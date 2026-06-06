@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 
-const root = new URL("..", import.meta.url).pathname
+const root = fileURLToPath(new URL("..", import.meta.url))
 const sourcePath = join(root, "src/main/application-agent.ts")
 const applicationSource = readFileSync(sourcePath, "utf8")
 const opencodeSource = readFileSync(join(root, "src/main/application-agent-opencode.ts"), "utf8")
