@@ -1,0 +1,68 @@
+#!/usr/bin/env bun
+import { $ } from "bun"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+
+const mode = "free"
+const releaseDir = join(process.cwd(), "dist", "release-notes")
+
+console.log("Preparing Terra-Edu Application Agent macOS customer release...")
+console.log("Signing/notarization: free ad-hoc build. macOS may ask the customer to manually allow first launch.")
+
+await $`bun verify:application-agent`
+await $`bun verify:application-agent:e2e`
+await $`bun typecheck`
+await $`OPENCODE_CHANNEL=prod bun run build`
+await $`OPENCODE_CHANNEL=prod bun run package:mac`
+
+mkdirSync(releaseDir, { recursive: true })
+
+const dmg = join(process.cwd(), "dist", "terra-edu-application-agent-mac-arm64.dmg")
+const zip = join(process.cwd(), "dist", "terra-edu-application-agent-mac-arm64.zip")
+const generatedAt = new Date().toISOString()
+
+writeFileSync(
+  join(releaseDir, `mac-${mode}.md`),
+  [
+    "# Terra-Edu Application Agent macOS Release",
+    "",
+    `Generated at: ${generatedAt}`,
+    `Mode: ${mode}`,
+    "",
+    "## Artifacts",
+    "",
+    `- DMG: ${dmg}`,
+    `- ZIP: ${zip}`,
+    "",
+    "## Verification",
+    "",
+    "- Static Application Agent contract verification passed.",
+    "- E2E workspace verification passed.",
+    "- TypeScript typecheck passed.",
+    "- Electron production build passed.",
+    "- macOS package build passed.",
+    "- Supabase public config was bundled from the Terra-Edu web environment when available.",
+    "",
+    "## Distribution Notes",
+    "",
+    "- This is a free customer distribution build with ad-hoc signing.",
+    "- macOS Gatekeeper may show a security warning on first launch.",
+    "- Customers may need to allow the app in System Settings -> Privacy & Security.",
+    "- Customers sign in with Terra-Edu consultant accounts. Each consultant starts with 200 AI credits.",
+    "- AI credits are charged from OpenCode token usage: input + output * 4 + reasoning + cache_write, divided by 10,000.",
+    "- When credits run out, the app asks the customer to contact WeChat: shilaidong.",
+    "- The app is not submitted to the Mac App Store.",
+    "- Application materials stay in the local Terra-Edu Application Agent workspace unless the consultant intentionally uploads files through an application portal.",
+    "",
+  ].join("\n"),
+  "utf8",
+)
+
+if (!existsSync(dmg) || !existsSync(zip)) {
+  throw new Error("Release artifacts were not generated as expected.")
+}
+
+console.log("Release complete.")
+console.log(`DMG: ${dmg}`)
+console.log(`ZIP: ${zip}`)
+console.log(`Notes: ${join(releaseDir, `mac-${mode}.md`)}`)
