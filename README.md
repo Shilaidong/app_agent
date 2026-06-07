@@ -4,6 +4,23 @@ Terra-Edu Application Agent is a standalone desktop subprogram forked from OpenC
 
 This repository is intentionally separate from the Terra-Edu main project. It does not require the Terra-Edu Next.js dev server to run or build.
 
+## Product Logic
+
+The product behavior, Agent language, workflow contract, CUA rules, safety boundaries, and rebuild guidance are documented in [APPLICATION_AGENT_LOGIC.md](./APPLICATION_AGENT_LOGIC.md).
+
+This document is written for humans and other Agents that want to understand, refactor, or recreate the application without depending on implementation details.
+
+## Current Release
+
+Release builds are published on [GitHub Releases](https://github.com/Shilaidong/app_agent/releases).
+
+The current packaged deliverables are:
+
+- macOS Apple Silicon DMG
+- macOS Apple Silicon ZIP
+- Windows x64 executable artifact
+- update helper metadata such as blockmap files when available
+
 ## Requirements
 
 - Bun `1.3.14`
