@@ -40,14 +40,14 @@ Do not mirror this repository publicly without rotating or replacing those bundl
 bun install
 ```
 
-For Supabase login/quota support in fresh clones, create `.env.local` at the repository root:
+For Supabase login/quota support in custom clones, create `.env.local` at the repository root if you need to replace the bundled direct-distribution config:
 
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 ```
 
-Local private build files live under `packages/desktop/resources/private/` and are git-ignored.
+Direct-distribution private runtime files live under `packages/desktop/resources/private/` and are intentionally tracked for the current customer-ready build.
 
 ## Development
 
