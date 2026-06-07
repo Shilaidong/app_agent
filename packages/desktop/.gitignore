@@ -27,4 +27,7 @@ out/
 resources/opencode-cli*
 resources/icons
 resources/*.metainfo.xml
-resources/private/
+
+# Direct-distribution customer builds intentionally commit and bundle
+# resources/private/ so the desktop app opens with Supabase login and
+# the default OpenCode Go model route already configured.

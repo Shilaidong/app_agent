@@ -21,6 +21,12 @@ The current packaged deliverables are:
 - Windows x64 executable artifact
 - update helper metadata such as blockmap files when available
 
+## Bundled Runtime Config
+
+This repository is currently set up as a direct-distribution customer build. Runtime config under `packages/desktop/resources/private/` is intentionally committed and bundled into desktop packages so the app opens with Supabase login/quota support and the default OpenCode Go model route already configured.
+
+Do not mirror this repository publicly without rotating or replacing those bundled credentials.
+
 ## Requirements
 
 - Bun `1.3.14`
