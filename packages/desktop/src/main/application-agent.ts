@@ -153,11 +153,11 @@ const GENERATED: Array<[string, string, GeneratedFile["kind"]]> = [
   ["申请进度记录", "03_state/application_progress.json", "json"],
   ["申请要求记录", "03_state/application_requirements.json", "json"],
   ["申请要求摘要", "02_generated/application_requirements.md", "markdown"],
-  ["CUA 控制状态", "03_state/cua_control.json", "json"],
+  ["浏览器自动化控制状态", "03_state/cua_control.json", "json"],
   ["登录凭证状态", "03_state/login_credentials.json", "json"],
   ["工具执行审计", "03_state/agent_execution_audit.json", "json"],
   ["Agent 日志", "04_logs/agent_log.md", "log"],
-  ["CUA 日志", "04_logs/cua_log.md", "log"],
+  ["浏览器自动化日志", "04_logs/cua_log.md", "log"],
 ]
 
 const STATUS_MESSAGES: Record<ApplicationTaskStatus, string> = {
@@ -169,7 +169,7 @@ const STATUS_MESSAGES: Record<ApplicationTaskStatus, string> = {
   正在生成学生资料: "我正在生成结构化学生申请档案。",
   正在检查缺失内容: "我正在检查缺失信息、缺失材料和需要确认的内容。",
   等待顾问登录: "我已打开申请平台。如果需要登录，请顾问先完成登录。",
-  正在填写申请平台: "我正在通过 CUA 操作申请平台的普通字段。",
+  正在填写申请平台: "我正在通过 ego-browser 操作申请平台的普通字段。",
   正在保存申请进度: "我正在保存当前可以保存的申请页面。",
   正在上传材料: "我正在尝试上传可确认匹配的材料。",
   等待补充材料: "当前可处理内容已完成，剩余内容需要补充材料后继续。",
@@ -370,7 +370,7 @@ export async function openApplicationPlatform(workspacePath: string): Promise<Ap
   progress.failedActions.push({
     at: now.toISOString(),
     action: "cua_open_application_platform",
-    reason: recentlyOpened ? "申请平台近期已打开，本次复用现有页面继续。" : "第一版已打开申请平台并等待顾问登录；真实页面填写由 CUA 工具在登录后继续执行。",
+    reason: recentlyOpened ? "申请平台近期已打开，本次复用现有页面继续。" : "申请平台填表将由 OpenCode Agent 通过 ego-browser / ego lite 在独立 Space 中继续执行。",
   })
   await writeJson(join(workspacePath, "03_state/application_progress.json"), progress)
   await appendLog(
@@ -497,7 +497,7 @@ async function createWorkspace(workspacePath: string) {
   ]
   for (const dir of dirs) await mkdir(join(workspacePath, dir), { recursive: true })
   await writeFile(join(workspacePath, "04_logs/agent_log.md"), "# Agent 日志\n\n", "utf8")
-  await writeFile(join(workspacePath, "04_logs/cua_log.md"), "# CUA 日志\n\n", "utf8")
+  await writeFile(join(workspacePath, "04_logs/cua_log.md"), "# 浏览器自动化日志\n\n", "utf8")
   await writeJson(join(workspacePath, "03_state/agent_execution_audit.json"), [])
   await writeJson(join(workspacePath, "03_state/cua_control.json"), {
     stopped: false,
@@ -1033,7 +1033,7 @@ function initialApplicationProgress(): ApplicationProgress {
       { step: "生成 student_profile.md", status: "pending" },
       { step: "检查缺失项并更新 missing_items.json", status: "pending" },
       { step: "生成信息表、材料表和 Word 清单", status: "pending" },
-      { step: "CUA 打开平台、等待登录并填写可确认字段", status: "pending" },
+      { step: "ego-browser 打开平台、等待登录并填写可确认字段", status: "pending" },
       { step: "保存进度、生成总结并提示人工高风险动作", status: "pending" },
     ],
   }

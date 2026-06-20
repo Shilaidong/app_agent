@@ -177,6 +177,18 @@ for (const skill of skills) {
   assert(body.includes("application-agent_") || body.includes("CUA") || body.includes("OCR"), `Skill does not guide tool/OCR/CUA usage: ${skill}`)
 }
 
+const egoBrowserSkillPath = join(workspace, ".opencode/skills/ego-browser/SKILL.md")
+if (existsSync(egoBrowserSkillPath)) {
+  assertNonEmptyFile(egoBrowserSkillPath)
+  assertNonEmptyFile(join(workspace, ".opencode/skills/ego-browser/references/install.md"))
+  const egoBrowserSkill = readText(egoBrowserSkillPath)
+  assert(egoBrowserSkill.includes("ego-browser nodejs"), "ego-browser skill must expose official nodejs heredoc workflow.")
+  assert(egoBrowserSkill.includes("useOrCreateTaskSpace"), "ego-browser skill must describe task spaces.")
+  assert(egoBrowserSkill.includes("handOffTaskSpace"), "ego-browser skill must describe user handoff.")
+} else {
+  warnings.push("Legacy workspace has no ego-browser skill yet. Reopening the task will regenerate .opencode with the ego-lite backend.")
+}
+
 for (const command of commands) assertNonEmptyFile(join(workspace, ".opencode/commands", `${command}.md`))
 
 const prompt = readText(join(workspace, ".opencode/prompts/application-agent.md"))
@@ -190,30 +202,15 @@ for (const tool of ["workspace", "materials", "state", "documents", "risk", "cua
 }
 if (!tools.includes("export const requirements =")) warnings.push("Legacy workspace custom tools do not yet include application-agent_requirements; reopening the task will regenerate .opencode config.")
 if (!tools.includes("export const login =")) warnings.push("Legacy workspace custom tools do not yet include application-agent_login; reopening the task will regenerate .opencode config.")
-assert(tools.includes("select_option"), "CUA custom tool lacks select_option.")
-for (const action of ["observe_page", "fill_field_verified", "select_option_verified", "save_page_verified", "handle_blocker"]) {
-  assert(tools.includes(action), `CUA custom tool lacks high-level action: ${action}.`)
+for (const action of ["prepare_ego_task", "record_observation", "record_field_verified", "record_select_verified", "record_save_verified", "record_blocker", "handoff_to_consultant"]) {
+  if (!tools.includes(action)) warnings.push(`Legacy workspace CUA coordination tool does not yet include ego-browser action: ${action}.`)
 }
-assert(tools.includes("lastObservedAt"), "CUA custom tool lacks lastObservedAt progress synchronization.")
-assert(tools.includes("verifiedFields"), "CUA custom tool lacks verifiedFields progress synchronization.")
-assert(tools.includes("blockedDialogs"), "CUA custom tool lacks blockedDialogs progress synchronization.")
-assert(tools.includes("UNVERIFIED_SAVE_RECORDED"), "record_saved must not write verified savedPages.")
-assert(tools.includes("SAVE_BLOCKED_REQUIRED_FIELDS"), "save_page_verified must block saving when required fields are empty.")
-assert(tools.includes("isBeforeUnloadText"), "CUA custom tool lacks beforeunload handling.")
-if (!tools.includes("resume_cua")) warnings.push("Legacy workspace custom tools do not yet include resume_cua; reopening the task will regenerate .opencode config.")
-if (!tools.includes("dismiss_dialog")) warnings.push("Legacy workspace custom tools do not yet include dismiss_dialog; reopening the task will regenerate .opencode config.")
-if (!tools.includes("dismiss_native_menu")) warnings.push("Legacy workspace custom tools do not yet include dismiss_native_menu; reopening the task will regenerate .opencode config.")
-if (!tools.includes("dom_set_field")) warnings.push("Legacy workspace custom tools do not yet include dom_set_field; reopening the task will regenerate .opencode config.")
-if (!tools.includes("enable_browser_dom")) warnings.push("Legacy workspace custom tools do not yet include enable_browser_dom; reopening the task will regenerate .opencode config.")
-if (!tools.includes("keyboard_fill_sequence")) warnings.push("Legacy workspace custom tools do not yet include keyboard_fill_sequence; reopening the task will regenerate .opencode config.")
-if (!tools.includes("原生菜单键盘兜底") && !tools.includes("native menu keyboard typeahead")) {
-  warnings.push("Legacy workspace custom tools do not yet include native select keyboard fallback; reopening the task will regenerate .opencode config.")
-}
-if (!tools.includes("AX popup menu")) warnings.push("Legacy workspace custom tools do not yet include AX popup menu select fallback; reopening the task will regenerate .opencode config.")
+if (!tools.includes("lastObservedAt")) warnings.push("Legacy workspace CUA custom tool lacks lastObservedAt progress synchronization.")
+if (!tools.includes("verifiedFields")) warnings.push("Legacy workspace CUA custom tool lacks verifiedFields progress synchronization.")
+if (!tools.includes("blockedDialogs")) warnings.push("Legacy workspace CUA custom tool lacks blockedDialogs progress synchronization.")
+if (!tools.includes("UNVERIFIED_SAVE_RECORDED")) warnings.push("Legacy workspace record_saved behavior predates verified save enforcement.")
+if (!tools.includes("browserBackend = \"ego-browser\"")) warnings.push("Legacy workspace does not yet record ego-browser as the browser backend.")
 assert(tools.includes("BLOCKED"), "Risk custom tool lacks BLOCKED response.")
-if (!tools.includes("execCua") || !tools.includes("CUA_STOPPED") || !tools.includes("CUA_RATE_LIMITED")) {
-  warnings.push("Legacy workspace custom tools do not yet include the CUA watchdog/circuit breaker; reopening the task will regenerate .opencode config.")
-}
 if (!tools.includes("application_requirements.json")) warnings.push("Legacy workspace custom tools do not yet include application_requirements.json output.")
 
 const task = readJson(join(workspace, "03_state/task_state.json"))

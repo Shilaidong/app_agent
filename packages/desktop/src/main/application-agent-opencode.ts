@@ -1,11 +1,38 @@
+import { existsSync, readFileSync } from "node:fs"
 import { mkdir, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
 import type { ApplicationTask } from "./application-agent"
+
+const root = dirname(fileURLToPath(import.meta.url))
 
 async function writeJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, JSON.stringify(value, null, 2) + "\n", "utf8")
+}
+
+function readBundledEgoBrowserResource(relativePath: string) {
+  const candidates = [
+    join(process.resourcesPath ?? "", "ego-browser", relativePath),
+    join(root, "../../resources/ego-browser", relativePath),
+  ]
+  for (const candidate of candidates) {
+    try {
+      if (!candidate || !existsSync(candidate)) continue
+      return readFileSync(candidate, "utf8")
+    } catch {}
+  }
+  throw new Error("Missing bundled ego-browser resource: " + relativePath)
+}
+
+async function writeEgoBrowserSkill(base: string) {
+  const skillBase = join(base, "skills", "ego-browser")
+  await mkdir(join(skillBase, "references"), { recursive: true })
+  await mkdir(join(skillBase, "scripts"), { recursive: true })
+  await writeFile(join(skillBase, "SKILL.md"), readBundledEgoBrowserResource("SKILL.md"), "utf8")
+  await writeFile(join(skillBase, "references/install.md"), readBundledEgoBrowserResource("references/install.md"), "utf8")
+  await writeFile(join(skillBase, "scripts/install.sh"), readBundledEgoBrowserResource("scripts/install.sh"), "utf8")
 }
 
 export function buildApplicationAgentStartPrompt(task: ApplicationTask) {
@@ -16,7 +43,7 @@ export function buildApplicationAgentStartPrompt(task: ApplicationTask) {
 
 重要交互规则：遇到不确定信息、材料用途、学校要求解释或申请平台字段选择时，优先调用 OpenCode 内置 question 工具向顾问提出清晰选项；顾问回复后，把确认结果写入 task_state.json、missing_items.json 或 application_progress.json，再继续执行。
 
-长流程规则：这是一个从 0 到 1 的连续申请任务。上下文接近上限时允许 OpenCode 自动 compaction，但 compaction 完成后必须继续执行当前未完成步骤；不要因为上下文压缩、工具输出被截断、某一步耗时较长或 CUA 临时暂停就直接结束任务。每次继续前先读取 todowrite、03_state/application_progress.json、03_state/task_state.json 和 03_state/agent_execution_audit.json 恢复现场。
+长流程规则：这是一个从 0 到 1 的连续申请任务。上下文接近上限时允许 OpenCode 自动 compaction，但 compaction 完成后必须继续执行当前未完成步骤；不要因为上下文压缩、工具输出被截断、某一步耗时较长、ego-browser 交接给顾问或浏览器自动化临时暂停就直接结束任务。每次继续前先读取 todowrite、03_state/application_progress.json、03_state/task_state.json 和 03_state/agent_execution_audit.json 恢复现场。
 
 ## 任务创建页信息
 
@@ -39,7 +66,8 @@ ${inputJson}
 - application-agent_materials：分类 00_original_backup 中的材料，写入 materials_index。
 - application-agent_documents：从 missing_items.json 生成信息表、材料表、Word 清单和任务总结。
 - application-agent_state：按统一 task_state.json schema 更新状态、统计和进度。
-- application-agent_cua：通过 cua-driver 打开/复用申请平台，并优先按真人式循环执行 observe_page → fill_field_verified/select_option_verified → observe_page → save_page_verified；低级点击/输入工具只作为兜底。默认不截图，只有失败证据、上传证据、保存证据或顾问要求时才截图。
+- ego-browser skill：macOS 申请平台填表的唯一浏览器自动化后端。通过 ego lite 的独立 task space 打开/复用申请平台，使用 snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace、completeTaskSpace 完成真人式观察、填写、复查和保存。
+- application-agent_cua：不再直接控制 Chrome，也不再调用 cua-driver；它只记录 ego-browser 填表阶段的 task space、观察结果、已验证字段、保存页面、上传材料、阻塞弹窗、失败原因和审计链。
 - application-agent_login：从 03_state/login_credentials.json 读取本机保存的申请平台账号状态，并通过钥匙串读取密码后填写登录页；不会把密码输出给 Agent。
 - application-agent_risk：识别并阻断最终提交、付款、不可逆推荐信邀请、保存账号密码等高风险动作。
 - application-agent_requirements：保存 webfetch/websearch 得到的学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
@@ -47,19 +75,17 @@ ${inputJson}
 ## 工具调用硬性约束
 
 - 启动后先调用 OpenCode 内置 todowrite，建立默认 10 步任务清单；每完成或阻塞一步，都更新 todowrite，并调用 application-agent_state 同步 application_progress.json。
-- 默认流程中的工作区创建、材料分类、状态更新、文档生成、自动登录、CUA 操作和高风险识别，必须调用对应的 application-agent_* Custom Tool。
+- 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
 - 学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方学校/项目/申请要求页面。抓取结果必须调用 application-agent_requirements 落盘。
-- bash 只允许用于读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用 bash 替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
+- bash 允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用普通 bash 临时脚本替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
 - 如果看到 OpenCode compaction/summary/上下文压缩相关消息，必须把它当作正常维护动作：先读取最新状态文件恢复任务现场，然后继续执行 todowrite 中未完成的下一步。
-- 页面里出现像 macOS/Chrome 系统弹层一样漂浮在页面上方的下拉选项时，通常是原生 HTML select 的浏览器弹层；不要用坐标点击选项，也不要直接宣布“AX 树限制无法填写”。先调用 observe_page，再调用 select_option_verified；它会按 DOM、AX set_value、AX popup menu、原生菜单键盘 typeahead 的顺序自动兜底并二次复查。
-- 如果 application-agent_cua 返回 CUA_STOPPED，说明此前顾问手动停止过自动化；当顾问明确说继续、继续填表、恢复 CUA 或正在当前任务里要求继续填写时，先调用 application-agent_cua 的 resume_cua，再重试原动作，不要把字段总结成“需要鼠标选择”。
-- 如果 Chrome 返回“通过 AppleScript 执行 JavaScript 的功能已关闭”或 “Allow JavaScript from Apple Events” 相关错误，只代表 DOM 脚本通道不可用，不代表不能填表。必须继续使用 select_option_verified 的 AX/原生键盘兜底、fill_field_verified 的 AX/键盘策略或 keyboard_fill_sequence 填写；只有这些工具都返回失败时才停止 CUA。
-- 如果出现浏览器 alert/confirm/prompt 弹窗，例如标题含“显示”、正文提示 “is required”，必须先调用 application-agent_cua handle_blocker 关闭并记录提示；然后 observe_page，补齐对应字段，不能重复点击 SAVE 触发同一个弹窗。
-- 如果 Chrome 出现“离开此网站？”“Leave site?”，必须调用 application-agent_cua handle_blocker，默认选择“取消/留在页面”，防止未保存表单丢失。Chrome “要恢复页面吗？”“Chrome 未正确关闭”等恢复弹窗也用 handle_blocker 关闭，不要点击“恢复”。
-- open_platform 只在首次进入平台或当前没有可用申请页时调用；如果 application_progress.json 已记录平台近期打开，直接 observe_page/list_windows 复用现有 Chrome 页面，不要反复打开申请链接或把 URL 填进网页输入框。
-- 点击 SAVE 前必须调用 save_page_verified；它会先重新检查当前 modal 的必填字段，尤其是日期三段式 Month/Day/Year、考试分数与百分位、Registration Number。只要 AX/DOM 显示空值或校验错误，就先补字段，不要保存。
+- ego-browser 操作必须符合官方 skill：每轮 Bash 用 useOrCreateTaskSpace 或 takeOverTaskSpace 选中同一个申请 task space；用 openOrReuseTab 打开申请链接；用 snapshotText() 观察；用 fillInput、click、js、cdp、pressKey、typeText 等 helper 一次推进一组动作；所有对顾问可见输出必须用 cliLog(...)。
+- 页面里出现下拉、autocomplete、Slate 动态菜单、浏览器 alert/confirm/prompt 时，不要再切回 cua-driver 或坐标硬点。先通过 pageInfo()、snapshotText()、js(...) 或 cdp(...) 判断页面状态；必要时用键盘 typeahead 和 DOM/CDP 组合处理，并在保存前后再次 snapshotText() 或 pageInfo() 验证。
+- 如果 pageInfo() 返回 dialog 信息，必须用 ego-browser 官方建议的 cdp('Page.handleJavaScriptDialog', { accept: false }) 或更安全的取消策略处理；“离开此网站？”/“Leave site?” 一律取消或留在页面，防止未保存表单丢失。
+- 如果任务需要顾问登录、验证码、MFA 或人工接管，调用 ego-browser 的 handOffTaskSpace(task.id)，并在顾问明确回复继续后用 takeOverTaskSpace(task.id) 恢复。不要自动抢回控制。
+- 点击 SAVE 前，必须在 ego-browser 脚本内检查当前 modal/page 的必填空项和 validation 文案；保存后必须再次读取页面，确认没有错误提示，才调用 application-agent_cua 的 record_save_verified 写入 savedPages。
 
 ## 你必须由 OpenCode 自己执行的工作
 
@@ -101,11 +127,11 @@ ${inputJson}
 7. 生成学生档案前，先用 webfetch 读取申请链接；如不能确认学校/项目要求，用 websearch 搜索官方页面，然后调用 application-agent_requirements 落盘。
 8. student_profile.md 必须是基于材料内容和申请要求的结构化学生申请档案，包含材料路径、已确认信息、缺失项、不确定项和申请目标。
 9. missing_materials.docx 必须通过 application-agent_documents 从 03_state/missing_items.json 生成，面向顾问、学生和家长，避免技术语言。
-10. 进入 CUA 阶段时，调用 application-agent_cua 打开或复用申请平台链接；如 03_state/login_credentials.json 里有已保存密码，调用 application-agent_login 填写登录页；如需 MFA/验证码，提示顾问手动完成。登录完成后必须按真人式循环：observe_page 观察页面和 modal，填 1-3 个字段后再次 observe_page，遇到新菜单/新字段就调整策略，最后 save_page_verified。默认不保存截图，只有失败、上传、保存证据或顾问要求时才截图。
-11. 遇到 select、combobox、dropdown、degree program、state、school、test type 等下拉选择时，必须调用 select_option_verified。像系统框一样的原生 select 弹层不要坐标点击；select_option_verified 会按 DOM、AX set_value、AX popup menu、原生菜单键盘 typeahead 分层尝试，并在选择后 observe_page 复查。
-12. 如果浏览器弹出 alert/confirm/prompt 或“离开此网站？”确认框，调用 handle_blocker；“离开此网站？”一律选择取消/留在页面。从提示文本判断缺失字段，补齐字段后再尝试 save_page_verified。
-13. 如果 application-agent_cua 返回 CUA_STOPPED，先判断顾问是否已经要求继续；如果是，调用 resume_cua 并重试，不要把下拉框交给鼠标。CUA_RATE_LIMITED 才停止本轮 CUA，记录当前页面和待填字段。
-14. 如果 application-agent_cua 返回 CUA_CHROME_JS_DISABLED，立即停止 DOM 相关重试，但继续使用 select_option_verified 的 AX/原生键盘兜底、fill_field_verified 的 AX/键盘策略和 keyboard_fill_sequence。
+10. 进入填表阶段时，先调用 application-agent_cua 的 prepare_ego_task 记录 ego-browser 后端、申请链接和 task space 名称；然后严格使用官方 ego-browser skill 的 Bash heredoc 操作申请平台。首次脚本必须 useOrCreateTaskSpace、openOrReuseTab、snapshotText，并把 task.id、pageInfo 和页面摘要用 cliLog 输出。
+11. 如需登录，优先使用顾问在 ego lite / Chrome 迁移后的真实登录态；如 03_state/login_credentials.json 里有已保存平台账号密码，可调用 application-agent_login 辅助填写登录页，但不能输出明文密码。需要 MFA/验证码时，调用 handOffTaskSpace 交给顾问，顾问回复继续后再 takeOverTaskSpace。
+12. 登录完成后必须按 ego-browser 真人式循环推进：snapshotText/pageInfo 观察页面和 modal，填 1-3 个字段后再次 snapshotText 或 pageInfo 复查，遇到新菜单/新字段就调整策略，最后保存前后都做验证，并调用 application-agent_cua record_save_verified 记录。
+13. 遇到 select、combobox、dropdown、degree program、state、school、test type 等下拉选择时，优先用 ego-browser 的语义 workflow：snapshotText refs/locators、fillInput、click、js DOM/CDP 和键盘 typeahead；必要时再用 visual workflow 截图辅助，但不能回退到 cua-driver。
+14. 如果浏览器弹出 alert/confirm/prompt 或“离开此网站？”确认框，在 ego-browser 脚本里用 pageInfo/dialog 与 cdp('Page.handleJavaScriptDialog', { accept:false }) 或安全取消策略处理；处理结果再调用 application-agent_cua record_blocker 写入进度。
 15. 不确定内容用 question 提供 2-3 个顾问可选答案；每个关键阶段都要在对话里告诉顾问进度，并调用 application-agent_state 同步更新 03_state/task_state.json。
 16. 完成当前可做内容后，检查 agent_execution_audit.json，输出阶段性总结和下一步需要顾问补充的内容。
 
@@ -137,7 +163,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 6. 生成结构化 student_profile.md。
 7. 检查缺失信息和缺失材料，已有信息不要重复要求，并写入 03_state/missing_items.json。
 8. 调用 application-agent_documents，根据 missing_items.json 生成信息表、材料表、Word 清单和总结。
-9. 调用 application-agent_cua 打开申请平台；如已保存平台账号密码，调用 application-agent_login 填写登录页；需要 MFA/验证码时暂停并提示顾问手动完成。
+9. 调用 application-agent_cua 的 prepare_ego_task 记录 ego-browser 填表上下文；随后按官方 ego-browser skill 使用 ego-browser nodejs heredoc 打开申请平台、读取 snapshot、填写字段和保存页面。需要 MFA/验证码时用 handOffTaskSpace 交给顾问，顾问回复继续后 takeOverTaskSpace 恢复。
 10. 能填写的先填写，能保存的先保存；缺失内容跳过并记录，不确定内容用 question 询问顾问。顾问补充材料后，重新读取 06_new_materials，更新档案并继续申请。
 
 可用 Custom Tools：
@@ -145,7 +171,8 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - application-agent_materials：材料分类、materials_index 生成。
 - application-agent_documents：从 missing_items.json 生成 Word 清单、表单和总结。
 - application-agent_state：更新 task_state.json。
-- application-agent_cua：调用 cua-driver 进行申请平台操作；优先使用 observe_page、fill_field_verified、select_option_verified、save_page_verified、handle_blocker 组成真人式填表循环；低级点击/输入/选择只作为兜底；默认不截图。
+- ego-browser skill：macOS 申请平台填表后端。必须使用官方 helper：useOrCreateTaskSpace、openOrReuseTab、snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace、completeTaskSpace。
+- application-agent_cua：记录 ego-browser 填表状态、task space、观察结果、已验证字段、已保存页面、上传材料、阻塞弹窗和失败原因；不直接控制浏览器。
 - application-agent_login：用本机钥匙串保存的申请平台账号密码填写登录页；不会向 Agent 输出明文密码。
 - application-agent_risk：高风险动作识别和硬拦截。
 - application-agent_requirements：保存学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
@@ -153,12 +180,12 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 工具调用硬性约束：
 - 启动后必须调用 todowrite，建立默认 10 步计划；每完成一步要同步 todowrite 和 application-agent_state。
 - 学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方页面。抓取结果必须调用 application-agent_requirements 落盘。
-- 默认流程中的工作区创建、材料分类、状态更新、文档生成、自动登录、CUA 操作和高风险识别，必须调用对应的 application-agent_* Custom Tool。
-- bash 只允许用于读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用 bash 替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
+- 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
+- bash 允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用普通 bash 临时脚本替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
-- 遇到原生系统样式下拉弹层时，不要坐标点击，也不要先盲目 Escape；调用 application-agent_cua observe_page 后再调用 select_option_verified。它会按 DOM、AX set_value、AX popup menu、原生菜单键盘 typeahead 兜底，并在选择后复查。
-- 填表必须像真人一样小步推进：每页先 observe_page；每填 1-3 个字段就复查；遇到新菜单、新字段、alert 或“离开此网站？”先 handle_blocker；保存必须用 save_page_verified，不能用 record_saved 直接算成功。
+- 遇到原生系统样式下拉弹层、Slate 动态菜单、autocomplete、alert 或“离开此网站？”时，不要坐标硬点，也不要切回旧 cua-driver；用 ego-browser 的 snapshotText/pageInfo/js/cdp/键盘策略处理，并在每次选择后复查。
+- 填表必须像真人一样小步推进：每页先 snapshotText/pageInfo；每填 1-3 个字段就复查；遇到新菜单、新字段、alert 或“离开此网站？”先处理阻塞；保存必须在 ego-browser 脚本里保存前检查、保存后复查，再调用 application-agent_cua record_save_verified，不能用 record_saved 直接算成功。
 
 安全规则：
 - 不删除或覆盖原始学生文件。
@@ -249,7 +276,7 @@ const SKILL_DEFINITIONS = [
 2. 先用 webfetch 读取任务中的申请链接；如果链接只到登录页或信息不足，用 websearch 查找学校官网、项目页和 admissions requirements 官方页面。
 3. 调用 application-agent_requirements，把来源 URL、抓取时间、可信度、字段需求、材料需求、待确认要求写入 application_requirements.json/md。
 4. 基于申请学校、项目、专业、申请类型和官方来源判断通用需求：身份、学历、成绩、语言、简历、文书、推荐人、资金、紧急联系人、申请问题。
-5. 只做可解释的通用申请分析；除非申请平台页面已经打开并被 CUA 识别，不要臆测平台专属字段。
+5. 只做可解释的通用申请分析；除非申请平台页面已经通过 ego-browser snapshot/pageInfo 识别，不要臆测平台专属字段。
 6. 把缺失信息、缺失材料、不确定字段交给 missing-content-recording skill。
 
 输出要求：
@@ -287,26 +314,28 @@ const SKILL_DEFINITIONS = [
   },
   {
     name: "cua-application-filling",
-    description: "通过 CUA 打开申请平台、等待顾问登录、识别页面字段、填写可确认信息并保存页面。",
+    description: "通过 ego-browser / ego lite 打开申请平台、等待顾问登录、识别页面字段、填写可确认信息并保存页面。",
     body: `执行步骤：
-1. 首次进入平台时调用 application-agent_cua，action 使用 open_platform 打开申请链接；后续继续填表优先 capture_state/list_windows 复用现有 Chrome 页面，不要反复 open_platform。
-2. 如果页面需要登录，先读取 03_state/login_credentials.json；如 hasSavedPassword 为 true，调用 application-agent_login 自动填写登录页。Agent 不能要求工具输出或展示明文密码。
-3. 如果需要 MFA、验证码或邮箱验证，调用 application-agent_login record_mfa_required，并提示顾问手动完成；完成后继续。
-4. 登录后先调用 application-agent_cua observe_page；它会读取 AX/DOM 状态、当前页面、modal、必填空项、保存按钮和阻塞弹窗。默认不要请求截图。
-5. 对每个字段，先从 student_profile.md 查找可确认答案；无法确认则记录缺失，不瞎填。
-6. 普通文本字段优先调用 fill_field_verified。它会尝试 DOM、AX、键盘输入，并立刻 observe_page 二次复查；返回 FIELD_FILLED_NEEDS_RECHECK 时不要保存，先重新观察或重试字段。
-7. 下拉框、学校、专业、州、国家、日期、考试类型等控件必须调用 select_option_verified。它会处理普通 select、原生系统菜单、autocomplete 学校搜索、Slate 动态下拉，并在选择后复查显示值/隐藏值。
-8. 每填 1-3 个字段后再次调用 observe_page。若页面出现新字段、新菜单或动态必填项，先处理新内容，再继续。
-9. 如果页面状态里出现像 macOS/Chrome 系统菜单一样的原生 select 弹层，不要点弹层选项；直接调用 select_option_verified，必要时先 handle_blocker 或 dismiss_native_menu 关闭残留弹层后重试。
-10. 对 GRE/GMAT/TOEFL 分数、百分位、日期、注册号这类连续普通输入框，如果 fill_field_verified 不能稳定处理，才用 keyboard_fill_sequence 通过 Tab 顺序填写；填写后必须 observe_page 复查。
-11. 如果出现浏览器 alert/confirm/prompt 或“离开此网站？”确认框，调用 handle_blocker。“离开此网站？”必须选择取消/留在页面；从提示文本判断缺失字段，补齐字段后再保存。若出现 Chrome “要恢复页面吗？”恢复弹窗，关闭它，不要点恢复。
-12. 保存页面必须调用 save_page_verified。它会保存前扫描必填空项、点击保存、保存后检查 validation error/alert/页面状态，成功后才写入 savedPages。不要再用 record_saved 直接当作保存成功。
-13. 如果工具返回 CUA_STOPPED，先调用 application-agent_cua resume_cua，再重试当前字段；不要直接把字段列为“鼠标点击操作”。如果返回 CUA_CHROME_JS_DISABLED，不要停止整个 CUA；停止 DOM 相关重试，继续使用 verified action 的 AX/键盘兜底。只有 CUA_RATE_LIMITED 才停止本轮 CUA。
-14. 每次准备点击 submit、final submit、payment、recommendation invite、不可逆确认前，必须先调用 application-agent_risk；命中 BLOCKED 就停止。
+1. 首次进入平台前调用 application-agent_cua，action 使用 prepare_ego_task，记录申请链接、taskSpaceName 和本轮目标。
+2. 按官方 ego-browser skill 使用 Bash heredoc：ego-browser nodejs <<'EOF' ... EOF。每个 heredoc 里先 useOrCreateTaskSpace(name) 或 takeOverTaskSpace(id)，不要新建多个无关 Space。
+3. 首次脚本用 openOrReuseTab(applicationUrl, { wait:true }) 打开申请链接，然后 cliLog 输出 task.id、pageInfo() 和 snapshotText() 摘要。
+4. 如果页面需要登录，优先复用 ego lite 从 Chrome 迁移来的登录态；如需要账号密码，可调用 application-agent_login 辅助登录，但不能输出明文密码。
+5. 如果需要 MFA、验证码、邮箱验证或顾问手动确认，调用 ego-browser 的 handOffTaskSpace(task.id)，并提示顾问完成。顾问明确回复继续后，再用 takeOverTaskSpace(task.id) 恢复，不要自动抢回控制。
+6. 登录后先用 snapshotText() 和 pageInfo() 观察页面、modal、必填字段、保存按钮、错误提示和当前 URL；随后调用 application-agent_cua record_observation 写入 application_progress.json。
+7. 对每个字段，先从 student_profile.md 查找可确认答案；无法确认则记录缺失，不瞎填。
+8. 普通文本字段优先使用 ego-browser 的 fillInput('@ref' 或 loc=...)、typeText、pressKey，或一次性 js(...) DOM 填写；填写后再次 snapshotText/pageInfo 复查，并调用 application-agent_cua record_field_verified。
+9. 下拉框、学校、专业、州、国家、日期、考试类型等控件优先使用 ego-browser 的语义 workflow：snapshotText refs/locators、click、fillInput、pressKey/typeahead、js DOM/CDP。选择后必须复查显示值/隐藏值，并调用 record_select_verified。
+10. 每填 1-3 个字段后再次观察。若页面出现新字段、新菜单或动态必填项，先处理新内容，再继续。
+11. 如果 pageInfo() 返回 { dialog: ... }，说明网页 JavaScript dialog 阻塞页面。对 validation alert 先读取错误文案；对“离开此网站？”或 Leave site 一律用 cdp('Page.handleJavaScriptDialog', { accept:false }) 取消。处理后调用 record_blocker。
+12. 保存页面前，在 ego-browser 脚本里扫描 required、aria-required、红色错误、validation 文案和 modal 内空值；发现必填空项时不要点 SAVE，先补字段或写 missing_items。
+13. 保存页面后必须再次 snapshotText/pageInfo 验证没有错误提示，且页面或列表显示保存结果；确认后调用 application-agent_cua record_save_verified。不要用 record_saved 直接算成功。
+14. 上传材料用 ego-browser uploadFile；上传后观察页面确认文件名或状态，再调用 record_upload。
+15. 每次准备点击 submit、final submit、payment、recommendation invite、不可逆确认前，必须先调用 application-agent_risk；命中 BLOCKED 就停止。
+16. 当前页完成后，如果不需要顾问继续看页面，调用 completeTaskSpace(task.id, { keep:false })；如果要留给顾问复核，调用 completeTaskSpace(task.id, { keep:true }) 并只保留必要标签页。
 
 输出要求：
 - 持续告诉顾问正在填写哪个页面、保存了什么、缺了什么。
-- 不要用视觉坐标猜选下拉项，除非 observe_page、select_option_verified 和键盘兜底都失败且顾问明确允许。`,
+- 默认使用 ego-browser 语义 workflow；只有页面是 canvas/虚拟编辑器或语义信息明显不足时，才用 captureScreenshot 的 visual workflow。`,
   },
   {
     name: "material-upload",
@@ -315,8 +344,9 @@ const SKILL_DEFINITIONS = [
 1. 读取 student_profile.md、materials_index.json 和当前申请页面状态。
 2. 只上传用途和字段要求能明确匹配的材料；不确定材料不能上传。
 3. 上传前检查高风险：不要上传含账号密码、无关隐私或用途不明文件。
-4. 上传成功调用 application-agent_cua record_upload；失败调用 record_failure；需要证据时再额外调用 capture_state 保存截图。
-5. 上传后更新 application_progress.json 和 task_summary.md。
+4. 上传材料必须通过 ego-browser uploadFile 完成；上传后用 snapshotText/pageInfo 或必要截图确认文件名/状态。
+5. 上传成功调用 application-agent_cua record_upload；失败调用 record_failure；需要证据时使用 ego-browser captureScreenshot，并把截图路径或页面证据写入 detail/evidence。
+6. 上传后更新 application_progress.json 和 task_summary.md。
 
 输出要求：
 - 汇报上传了哪些材料、哪些失败、失败原因和是否需要顾问手动处理。`,
@@ -546,211 +576,6 @@ async function appendAudit(workspace: string, tool: string, action: string, stat
   }
 }
 
-async function stopCuaDriver() {
-  for (const pattern of ["cua-driver", "CuaDriver.app/Contents/MacOS/cua-driver"]) {
-    await new Promise<void>((resolve) => {
-      execFile("pkill", ["-f", pattern], () => resolve())
-    })
-  }
-}
-
-async function notifyCuaStopped(reason: string) {
-  await new Promise<void>((resolve) => {
-    execFile(
-      "osascript",
-      [
-        "-e",
-        "display notification " + JSON.stringify(reason) + " with title " + JSON.stringify("Terra-Edu 申请 Agent：CUA 已停止"),
-      ],
-      () => resolve(),
-    )
-  })
-}
-
-async function readCuaControl(workspace: string) {
-  return await readJson(join(workspace, "03_state/cua_control.json"), {
-    stopped: false,
-    stoppedAt: "",
-    reason: "",
-    domAutomationUnavailable: false,
-    domAutomationUnavailableAt: "",
-    domAutomationUnavailableReason: "",
-    recentActions: [],
-    consecutiveFailures: 0,
-    updatedAt: new Date().toISOString(),
-  })
-}
-
-async function writeCuaControl(workspace: string, control: any) {
-  control.updatedAt = new Date().toISOString()
-  await writeJson(join(workspace, "03_state/cua_control.json"), control)
-}
-
-function isChromeJavaScriptAppleEventsDisabled(message: string) {
-  return /AppleScript 执行 JavaScript 的功能已关闭|允许 Apple 事件中的 JavaScript|Allow JavaScript from Apple Events|JavaScript from Apple Events|applescript/i.test(message)
-    && /execute_javascript|JavaScript execution failed|执行 JavaScript/i.test(message)
-}
-
-function chromeJavaScriptAppleEventsHelp() {
-  return "Chrome 未开启“允许 Apple 事件中的 JavaScript”，DOM 控件识别、自动登录和 DOM 下拉选择不可用。CUA 将改用 AX/键盘事件 fallback 继续填写普通文本字段；如需恢复 DOM 策略，可在 Chrome 菜单“查看 > 开发者 > 允许 Apple 事件中的 JavaScript”开启。"
-}
-
-function isCuaStopSignal(message: string) {
-  return /CUA_(STOPPED|RATE_LIMITED)/.test(message)
-}
-
-function isCuaDomUnavailableSignal(message: string) {
-  return /CUA_CHROME_JS_DISABLED/.test(message)
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function nativeSelectTypeahead(text: string) {
-  const normalized = text
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z0-9 ]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase()
-  return normalized.slice(0, 24)
-}
-
-function normalizeOptionText(text: string) {
-  return String(text || "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase()
-}
-
-function normalizeApplicationUrl(value?: string) {
-  const raw = String(value || "").trim()
-  if (!raw) return ""
-  if (!URL.canParse(raw)) return normalizeOptionText(raw).replace(/\/+$/, "")
-  const url = new URL(raw)
-  url.hash = ""
-  const pathname = url.pathname.replace(/\/+$/, "")
-  return (url.protocol + "//" + url.host + (pathname || "/") + url.search).toLowerCase()
-}
-
-function findAxSelectableOptionIndex(tree: string, desired: string) {
-  const wanted = normalizeOptionText(desired)
-  if (!wanted) return undefined
-
-  const candidates: Array<{ index: number; label: string; exact: boolean; line: string }> = []
-  for (const line of String(tree || "").split(/\r?\n/)) {
-    if (!/\bAX(?:MenuItem|CheckBox|RadioButton)\b/.test(line)) continue
-    const indexMatch = line.match(/\[(\d+)\]/)
-    if (!indexMatch) continue
-    const labelMatch = line.match(/=\s*"([^"]+)"/) || line.match(/\bAX(?:MenuItem|CheckBox|RadioButton)\s+"([^"]+)"/)
-    if (!labelMatch) continue
-    const label = labelMatch[1] || ""
-    const normalized = normalizeOptionText(label)
-    if (!normalized) continue
-    if (normalized === wanted) candidates.push({ index: Number(indexMatch[1]), label, exact: true, line })
-    else if (normalized.includes(wanted) || wanted.includes(normalized)) candidates.push({ index: Number(indexMatch[1]), label, exact: false, line })
-  }
-
-  const exact = candidates.find((candidate) => candidate.exact)
-  return exact?.index ?? candidates[0]?.index
-}
-
-async function pressCuaTypeahead(workspace: string, auditAction: string, pid: number, windowId: number, text: string) {
-  const value = nativeSelectTypeahead(text)
-  if (!value) {
-    await execCua(workspace, auditAction, ["call", "type_text", JSON.stringify({ pid, text })], 10000)
-    return
-  }
-  for (const char of value) {
-    const key = char === " " ? "space" : char
-    await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid, window_id: windowId, key })], 5000)
-    await sleep(45)
-  }
-}
-
-async function assertCuaAllowed(workspace: string, action: string) {
-  const control = await readCuaControl(workspace)
-  if (control.stopped) {
-    const reason = control.reason || "CUA 自动化已停止。"
-    await appendLog(workspace, "cua", "已阻止 CUA 调用：" + action + "；原因：" + reason)
-    await appendAudit(workspace, "cua", action, "failed", "CUA stopped: " + reason)
-    throw new Error("CUA_STOPPED: " + reason + " 如需继续，请由顾问重新发起“开始填表/继续填表”。")
-  }
-
-  const now = Date.now()
-  const recent = Array.isArray(control.recentActions) ? control.recentActions : []
-  const nextRecent = recent
-    .filter((item: any) => now - Date.parse(String(item.at || "")) < 60_000)
-    .concat({ at: new Date(now).toISOString(), action })
-  control.recentActions = nextRecent
-
-  if (nextRecent.length > 36) {
-    control.stopped = true
-    control.stoppedAt = new Date(now).toISOString()
-    control.reason = "CUA 在 60 秒内调用超过 36 次，疑似自动化循环或前台抢占，已自动熔断。"
-    await writeCuaControl(workspace, control)
-    await stopCuaDriver()
-    await notifyCuaStopped(control.reason)
-    await appendLog(workspace, "cua", control.reason)
-    await appendAudit(workspace, "cua", action, "failed", control.reason)
-    throw new Error("CUA_RATE_LIMITED: " + control.reason)
-  }
-
-  await writeCuaControl(workspace, control)
-}
-
-async function markCuaSuccess(workspace: string) {
-  const control = await readCuaControl(workspace)
-  control.consecutiveFailures = 0
-  await writeCuaControl(workspace, control)
-}
-
-async function markCuaFailure(workspace: string, action: string, error: unknown) {
-  const control = await readCuaControl(workspace)
-  const message = String((error as any)?.message || error)
-  if (isChromeJavaScriptAppleEventsDisabled(message)) {
-    control.domAutomationUnavailable = true
-    control.domAutomationUnavailableAt = new Date().toISOString()
-    control.domAutomationUnavailableReason = chromeJavaScriptAppleEventsHelp()
-    control.consecutiveFailures = 0
-  } else {
-    control.consecutiveFailures = Number(control.consecutiveFailures || 0) + 1
-    if (control.consecutiveFailures >= 3) {
-      control.stopped = true
-      control.stoppedAt = new Date().toISOString()
-      control.reason = "CUA 连续失败 3 次，疑似页面卡死或驱动失控，已自动停止以释放 Chrome 前台控制。"
-      await stopCuaDriver()
-      await notifyCuaStopped(control.reason)
-    }
-  }
-  await writeCuaControl(workspace, control)
-  await appendLog(workspace, "cua", "CUA 调用失败：" + action + "；" + message)
-  if (isChromeJavaScriptAppleEventsDisabled(message)) await appendLog(workspace, "cua", control.domAutomationUnavailableReason)
-  if (control.stopped) await appendLog(workspace, "cua", control.reason)
-}
-
-async function execCua(workspace: string, action: string, args: string[], timeout = 15_000) {
-  await assertCuaAllowed(workspace, action)
-  try {
-    const result = await execFileAsync("cua-driver", args, { timeout })
-    await markCuaSuccess(workspace)
-    return result
-  } catch (error) {
-    await markCuaFailure(workspace, action, error)
-    const control = await readCuaControl(workspace)
-    if (isChromeJavaScriptAppleEventsDisabled(String((error as any)?.message || error))) {
-      const updated = await readCuaControl(workspace)
-      throw new Error("CUA_CHROME_JS_DISABLED: " + (updated.domAutomationUnavailableReason || chromeJavaScriptAppleEventsHelp()))
-    }
-    throw error
-  }
-}
-
 function ensureCuaProgress(progress: any) {
   if (!progress || typeof progress !== "object") progress = {}
   if (!Array.isArray(progress.completedPages)) progress.completedPages = []
@@ -788,175 +613,6 @@ function parseJsonObjectFromText(text: string) {
     } catch {}
   }
   return undefined
-}
-
-function normalizedMatch(actual: string, expected: string) {
-  const a = normalizeOptionText(actual)
-  const e = normalizeOptionText(expected)
-  if (!e) return true
-  if (!a) return false
-  return a === e || a.includes(e) || e.includes(a)
-}
-
-function isBeforeUnloadText(text: string) {
-  return /离开此网站|离开网站|Leave this site|Leave site|changes.*not be saved|may not be saved|可能不会保存|不会保存您所做的更改|unsaved changes/i.test(String(text || ""))
-}
-
-function isRestoreDialogText(text: string) {
-  return /要恢复页面吗|Chrome 未正确关闭|restore pages|didn.t shut down correctly|恢复页面/i.test(String(text || ""))
-}
-
-function buildDomObservationScript() {
-  return [
-    "(function(){",
-    "const norm=(v)=>String(v||'').trim().replace(/\\s+/g,' ');",
-    "const visible=(el)=>!!(el&&el.offsetParent!==null&&getComputedStyle(el).visibility!=='hidden'&&getComputedStyle(el).display!=='none');",
-    "const cssPath=(el)=>{if(!el||!el.tagName)return '';if(el.id)return '#'+CSS.escape(el.id);const parts=[];let cur=el;while(cur&&cur.nodeType===1&&parts.length<6){let part=cur.tagName.toLowerCase();if(cur.name)part+='[name=\"'+String(cur.name).replace(/\"/g,'\\\\\"')+'\"]';else{const p=cur.parentElement;if(p){const same=Array.from(p.children).filter(x=>x.tagName===cur.tagName);if(same.length>1)part+=':nth-of-type('+(same.indexOf(cur)+1)+')';}}parts.unshift(part);cur=cur.parentElement;}return parts.join(' > ');};",
-    "const labelFor=(el)=>{const id=el.id;if(id){const l=document.querySelector('label[for=\"'+CSS.escape(id)+'\"]');if(l)return norm(l.innerText||l.textContent);}let cur=el;for(let i=0;i<5&&cur;i++,cur=cur.parentElement){const own=cur.querySelector&&cur.querySelector(':scope > label');if(own)return norm(own.innerText||own.textContent);const prev=cur.previousElementSibling;if(prev&&/label|div|span|p|td|th/i.test(prev.tagName)){const t=norm(prev.innerText||prev.textContent);if(t&&t.length<140)return t;}}return norm(el.getAttribute('aria-label')||el.getAttribute('placeholder')||el.name||el.id);};",
-    "const valueOf=(el)=>{const tag=el.tagName.toLowerCase();if(tag==='select')return norm(el.selectedOptions[0]?.textContent||el.value||'');if(el.type==='checkbox'||el.type==='radio')return el.checked?'checked':'';return norm(el.value||el.getAttribute('aria-valuetext')||el.textContent||'');};",
-    "const isReq=(el,label)=>!!(el.required||el.getAttribute('aria-required')==='true'||/\\*/.test(label||'')||/required/i.test(el.getAttribute('class')||''));",
-    "const controls=Array.from(document.querySelectorAll('input,select,textarea,[role=combobox],button,[aria-haspopup=listbox]')).filter(visible).slice(0,180).map((el,index)=>{const tag=el.tagName.toLowerCase();const label=labelFor(el);const options=tag==='select'?Array.from(el.options).map(o=>({label:norm(o.textContent),value:o.value,selected:o.selected})).slice(0,100):[];const value=valueOf(el);const required=isReq(el,label);return {index,tag,type:el.getAttribute('type')||'',role:el.getAttribute('role')||'',name:el.getAttribute('name')||'',id:el.id||'',label,selector:cssPath(el),value,required,empty:required&&!value,disabled:!!el.disabled||el.getAttribute('aria-disabled')==='true',options};});",
-    "const dialogs=Array.from(document.querySelectorAll('[role=dialog],[aria-modal=true],.modal,.dialog')).filter(visible).map(d=>({title:norm((d.querySelector('h1,h2,h3,.modal-title,.title')||d).innerText||d.textContent).slice(0,160),selector:cssPath(d)})).slice(0,12);",
-    "const buttons=controls.filter(c=>c.tag==='button'||/button|submit/i.test(c.type)).filter(c=>/save|continue|next|保存|下一步|继续/i.test(c.label||c.value||c.name||c.id)).slice(0,20);",
-    "const errors=Array.from(document.querySelectorAll('.error,.errors,.validation,.field-validation-error,.alert,[role=alert],.text-danger')).filter(visible).map(e=>norm(e.innerText||e.textContent)).filter(Boolean).slice(0,30);",
-    "const redTexts=Array.from(document.querySelectorAll('body *')).filter(visible).filter(e=>{const s=getComputedStyle(e);return /rgb\\(?(255, 0, 0|220, 38, 38|185, 28, 28)|red/i.test(s.color)&&norm(e.innerText||e.textContent).length<180;}).map(e=>norm(e.innerText||e.textContent)).filter(Boolean).slice(0,30);",
-    "const heading=norm((document.querySelector('h1')||document.querySelector('h2')||document.querySelector('[aria-current=true]')||{}).innerText||'');",
-    "return {ok:true,url:location.href,title:document.title,pageTitle:heading||document.title,modalTitle:dialogs[0]?.title||'',dialogs,controls,requiredEmpty:controls.filter(c=>c.empty&&!c.disabled),saveButtons:buttons,validationMessages:Array.from(new Set(errors.concat(redTexts))).slice(0,40)};",
-    "})()",
-  ].join("")
-}
-
-function buildDomSetFieldScript(selector: string, labelHint: string, value: string) {
-  return [
-    "(function(){",
-    "const selector=" + JSON.stringify(String(selector || "")) + ";",
-    "const labelHint=" + JSON.stringify(String(labelHint || "")) + ";",
-    "const value=" + JSON.stringify(String(value || "")) + ";",
-    "const norm=(v)=>String(v||'').trim().toLowerCase().replace(/\\s+/g,' ');",
-    "const visible=(el)=>!!(el&&el.offsetParent!==null&&getComputedStyle(el).visibility!=='hidden'&&getComputedStyle(el).display!=='none');",
-    "const fire=(el,type)=>el.dispatchEvent(new Event(type,{bubbles:true}));",
-    "const setNative=(el,next)=>{const proto=Object.getPrototypeOf(el);const desc=Object.getOwnPropertyDescriptor(proto,'value')||Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')||Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')||Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value');if(desc&&desc.set)desc.set.call(el,next);else el.value=next;fire(el,'input');fire(el,'change');};",
-    "const labelFor=(el)=>{const id=el.id;if(id){const l=document.querySelector('label[for=\"'+CSS.escape(id)+'\"]');if(l)return l.innerText||l.textContent||'';}let cur=el;for(let i=0;i<5&&cur;i++,cur=cur.parentElement){const own=cur.querySelector&&cur.querySelector(':scope > label');if(own)return own.innerText||own.textContent||'';const prev=cur.previousElementSibling;if(prev)return prev.innerText||prev.textContent||'';}return el.getAttribute('aria-label')||el.getAttribute('placeholder')||el.name||el.id||'';};",
-    "const candidates=[];if(selector){const el=document.querySelector(selector);if(el)candidates.push(el);}const all=Array.from(document.querySelectorAll('input,select,textarea,[role=combobox]')).filter(visible);if(labelHint)candidates.push(...all.filter(el=>norm(labelFor(el)).includes(norm(labelHint))||norm(el.name||el.id||'').includes(norm(labelHint))));candidates.push(...all);",
-    "for(const el of Array.from(new Set(candidates))){if(!el||el.disabled||el.getAttribute('aria-disabled')==='true')continue;const tag=el.tagName.toLowerCase();if(tag==='select'){const opts=Array.from(el.options);const opt=opts.find(o=>norm(o.value)===norm(value)||norm(o.textContent)===norm(value)||norm(o.textContent).includes(norm(value))||norm(value).includes(norm(o.textContent)));if(!opt)continue;el.value=opt.value;fire(el,'input');fire(el,'change');return {ok:true,method:'dom-select-as-field',label:labelFor(el),selector:selector||'',value:el.selectedOptions[0]?.textContent||el.value};}el.focus();setNative(el,value);return {ok:true,method:'dom-set-field',label:labelFor(el),selector:selector||'',value:el.value||el.getAttribute('aria-valuetext')||''};}",
-    "return {ok:false,reason:'field not found',selector,labelHint,value};",
-    "})()",
-  ].join("")
-}
-
-function buildDomSelectScript(selector: string, labelHint: string, desired: string, desiredValue: string) {
-  return [
-    "(function(){",
-    "const selector=" + JSON.stringify(String(selector || "")) + ";",
-    "const labelHint=" + JSON.stringify(String(labelHint || "")) + ";",
-    "const wanted=" + JSON.stringify(String(desired || "")) + ";",
-    "const wantedValue=" + JSON.stringify(String(desiredValue || desired || "")) + ";",
-    "const norm=(v)=>String(v||'').trim().toLowerCase().replace(/\\s+/g,' ');",
-    "const visible=(el)=>!!(el&&el.offsetParent!==null&&getComputedStyle(el).visibility!=='hidden'&&getComputedStyle(el).display!=='none');",
-    "const fire=(el,type)=>el.dispatchEvent(new Event(type,{bubbles:true}));",
-    "const setNative=(el,next)=>{const proto=Object.getPrototypeOf(el);const desc=Object.getOwnPropertyDescriptor(proto,'value')||Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')||Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value');if(desc&&desc.set)desc.set.call(el,next);else el.value=next;fire(el,'input');fire(el,'change');};",
-    "const labelFor=(el)=>{const id=el.id;if(id){const l=document.querySelector('label[for=\"'+CSS.escape(id)+'\"]');if(l)return l.innerText||l.textContent||'';}let cur=el;for(let i=0;i<5&&cur;i++,cur=cur.parentElement){const own=cur.querySelector&&cur.querySelector(':scope > label');if(own)return own.innerText||own.textContent||'';const prev=cur.previousElementSibling;if(prev)return prev.innerText||prev.textContent||'';}return el.getAttribute('aria-label')||el.getAttribute('placeholder')||el.name||el.id||'';};",
-    "const candidates=[];if(selector){const el=document.querySelector(selector);if(el)candidates.push(el);}const all=Array.from(document.querySelectorAll('select,input[role=combobox],input[aria-autocomplete],input[list],[role=combobox],[aria-haspopup=listbox]')).filter(visible);if(labelHint)candidates.push(...all.filter(el=>norm(labelFor(el)).includes(norm(labelHint))||norm(el.name||el.id||'').includes(norm(labelHint))));candidates.push(...all);",
-    "for(const el of Array.from(new Set(candidates))){if(!el||el.disabled||el.getAttribute('aria-disabled')==='true')continue;const tag=el.tagName.toLowerCase();if(tag==='select'){const opts=Array.from(el.options);const opt=opts.find(o=>norm(o.textContent)===norm(wanted)||norm(o.value)===norm(wantedValue)||norm(o.textContent).includes(norm(wanted))||norm(wanted).includes(norm(o.textContent)));if(opt){el.value=opt.value;fire(el,'input');fire(el,'change');return {ok:true,method:'dom-select',label:labelFor(el),selected:opt.textContent,value:opt.value,actual:el.selectedOptions[0]?.textContent||el.value};}}else{el.focus();setNative(el,wanted);el.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));el.dispatchEvent(new KeyboardEvent('keyup',{key:'ArrowDown',bubbles:true}));el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',bubbles:true}));return {ok:true,method:'dom-combobox-query',label:labelFor(el),selected:wanted,actual:el.value||el.getAttribute('aria-valuetext')||wanted};}}",
-    "return {ok:false,reason:'select/combobox not found',selector,labelHint,wanted};",
-    "})()",
-  ].join("")
-}
-
-function buildDomSaveScript(selector: string) {
-  return [
-    "(function(){",
-    "const selector=" + JSON.stringify(String(selector || "")) + ";",
-    "const norm=(v)=>String(v||'').trim().replace(/\\s+/g,' ');",
-    "const visible=(el)=>!!(el&&el.offsetParent!==null&&getComputedStyle(el).visibility!=='hidden'&&getComputedStyle(el).display!=='none');",
-    "const candidates=[];if(selector){const el=document.querySelector(selector);if(el)candidates.push(el);}candidates.push(...Array.from(document.querySelectorAll('button,input[type=submit],input[type=button],a')).filter(visible).filter(el=>/save|保存|continue|next|下一步|继续/i.test(norm(el.innerText||el.value||el.getAttribute('aria-label')||el.textContent||''))));",
-    "const el=Array.from(new Set(candidates))[0];if(!el)return {ok:false,reason:'save button not found'};const label=norm(el.innerText||el.value||el.getAttribute('aria-label')||el.textContent||'');el.click();return {ok:true,method:'dom-click-save',label};",
-    "})()",
-  ].join("")
-}
-
-async function observeCuaPage(workspace: string, auditAction: string, input: any, progress: any) {
-  ensureCuaProgress(progress)
-  const result: any = { ok: true, at: new Date().toISOString(), ax: "", dom: null, dialogs: [], notes: [] }
-  const payload: any = { pid: input.pid, window_id: input.windowId, capture_mode: input.saveScreenshot ? "som" : "ax" }
-  if (input.saveScreenshot) {
-    result.screenshotPath = join(workspace, "05_screenshots", "cua-" + Date.now() + ".png")
-    payload.screenshot_out_file = result.screenshotPath
-  }
-  const state = await execCua(workspace, auditAction, ["call", "get_window_state", JSON.stringify(payload)], 30000)
-  result.ax = String(state.stdout || "")
-
-  const control = await readCuaControl(workspace)
-  if (!control.domAutomationUnavailable) {
-    try {
-      const dom = await execCua(workspace, auditAction, ["call", "page", JSON.stringify({ pid: input.pid, window_id: input.windowId, action: "execute_javascript", javascript: buildDomObservationScript() })], 30000)
-      result.dom = parseJsonObjectFromText(String(dom.stdout || ""))
-    } catch (error: any) {
-      const message = String(error?.message || error)
-      if (isCuaDomUnavailableSignal(message)) result.notes.push("DOM unavailable; using AX-only observation.")
-      else result.notes.push("DOM observation failed: " + message)
-    }
-  } else {
-    result.notes.push("DOM automation unavailable; using AX-only observation.")
-  }
-
-  try {
-    const windowsRes = await execCua(workspace, auditAction, ["call", "list_windows", "--compact"], 10000)
-    const parsed = parseJsonObjectFromText(String(windowsRes.stdout || "")) || {}
-    const windows = Array.isArray(parsed.windows) ? parsed.windows : []
-    for (const window of windows) {
-      if (Number(window.pid) !== Number(input.pid)) continue
-      const title = String(window.title || "")
-      const width = Number(window.bounds?.width || 0)
-      const height = Number(window.bounds?.height || 0)
-      const looksLikeDialog = /显示|alert|confirm|prompt|dialog|required|验证|提示|离开|Leave|恢复|Restore/i.test(title) || (width > 0 && height > 0 && width <= 760 && height <= 420)
-      if (!looksLikeDialog) continue
-      let tree = ""
-      try {
-        const dialogState = await execCua(workspace, auditAction, ["call", "get_window_state", JSON.stringify({ pid: input.pid, window_id: Number(window.window_id), capture_mode: "ax" }), "--compact"], 10000)
-        tree = String(dialogState.stdout || "")
-      } catch {}
-      const text = title + "\n" + tree
-      result.dialogs.push({ windowId: Number(window.window_id), title, kind: isBeforeUnloadText(text) ? "beforeunload" : isRestoreDialogText(text) ? "restore" : "dialog", text: tree.slice(0, 1200) })
-    }
-  } catch (error: any) {
-    result.notes.push("dialog scan failed: " + String(error?.message || error))
-  }
-
-  const dom = result.dom || {}
-  progress.currentPage = String(dom.pageTitle || dom.title || progress.currentPage || "申请平台页面")
-  progress.currentUrl = String(dom.url || progress.currentUrl || "")
-  progress.currentModal = String(dom.modalTitle || "")
-  progress.requiredEmptyFields = Array.isArray(dom.requiredEmpty) ? dom.requiredEmpty : []
-  progress.validationMessages = Array.isArray(dom.validationMessages) ? dom.validationMessages : []
-  progress.blockedDialogs = result.dialogs
-  progress.lastObservedAt = result.at
-  if (result.screenshotPath) progress.lastScreenshotPath = result.screenshotPath
-  await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-  return result
-}
-
-async function recordFieldProgress(workspace: string, progress: any, kind: string, detail: string, value: string, method: string, verified: boolean) {
-  ensureCuaProgress(progress)
-  const entry = { at: new Date().toISOString(), kind, detail, value, method, verified, page: progress.currentPage || "", modal: progress.currentModal || "" }
-  appendLimited(progress, "filledFields", entry)
-  if (verified) appendLimited(progress, "verifiedFields", entry)
-  await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-}
-
-function summarizeObservation(result: any) {
-  const dom = result?.dom || {}
-  return JSON.stringify({
-    pageTitle: dom.pageTitle || "",
-    url: dom.url || "",
-    modalTitle: dom.modalTitle || "",
-    requiredEmpty: Array.isArray(dom.requiredEmpty) ? dom.requiredEmpty.slice(0, 20) : [],
-    validationMessages: Array.isArray(dom.validationMessages) ? dom.validationMessages.slice(0, 20) : [],
-    saveButtons: Array.isArray(dom.saveButtons) ? dom.saveButtons.slice(0, 8) : [],
-    dialogs: Array.isArray(result?.dialogs) ? result.dialogs : [],
-    notes: Array.isArray(result?.notes) ? result.notes : [],
-    screenshotPath: result?.screenshotPath || "",
-  }, null, 2)
 }
 
 async function listFiles(dir: string): Promise<string[]> {
@@ -1326,11 +982,11 @@ export const requirements = {
 }
 
 export const login = {
-  description: "Fill the application-platform login page with credentials saved by the Terra-Edu desktop app. The password is read from the macOS keychain and is never returned to the agent, logs, or workspace files.",
+  description: "Prepare ego-browser login with credentials saved by the Terra-Edu desktop app. The password stays in the macOS keychain and is never returned to the agent, logs, or workspace files.",
   args: inputArg({
-    action: { type: "string", enum: ["fill_saved_credentials", "record_mfa_required", "record_login_failure"], description: "Use fill_saved_credentials on a login form; use record_mfa_required when MFA/CAPTCHA/email verification appears." },
-    pid: { type: "number", description: "Target browser pid from CUA launch/capture output" },
-    windowId: { type: "number", description: "Target browser window_id" },
+    action: { type: "string", enum: ["fill_saved_credentials", "record_mfa_required", "record_login_failure"], description: "Use fill_saved_credentials to prepare an ego-browser keychain-login snippet; use record_mfa_required when MFA/CAPTCHA/email verification appears." },
+    taskSpaceId: { type: "string", description: "Optional ego-browser task space id to reuse with takeOverTaskSpace." },
+    taskSpaceName: { type: "string", description: "Optional ego-browser task space name to use with useOrCreateTaskSpace." },
     usernameSelector: { type: "string", description: "Optional CSS selector for username/email input" },
     passwordSelector: { type: "string", description: "Optional CSS selector for password input" },
     submitSelector: { type: "string", description: "Optional CSS selector for login/continue button" },
@@ -1358,7 +1014,6 @@ export const login = {
       await appendAudit(workspace, "login", "record_login_failure", "failed", input.detail || "", ctx)
       return JSON.stringify({ status: "failed", reason: input.detail || "login_failed" })
     }
-    if (!input.pid || !input.windowId) throw new Error("fill_saved_credentials requires pid and windowId")
     const credential = await readJson(join(workspace, "03_state/login_credentials.json"), null)
     if (!credential?.username || !credential?.serviceName || !credential?.hasSavedPassword) {
       await saveTask(workspace, task, "等待顾问登录", "当前申请平台没有保存密码，请顾问手动登录或在任务创建页保存平台账号密码。")
@@ -1374,47 +1029,48 @@ export const login = {
       return JSON.stringify({ status: "needs_human", reason: "keychain_password_unavailable" })
     }
     if (!password) return JSON.stringify({ status: "needs_human", reason: "empty_saved_password" })
-    const js = "(function(){"
-      + "const username=" + JSON.stringify(String(credential.username)) + ";"
-      + "const password=" + JSON.stringify(password) + ";"
-      + "const usernameSelector=" + JSON.stringify(String(input.usernameSelector || "")) + ";"
-      + "const passwordSelector=" + JSON.stringify(String(input.passwordSelector || "")) + ";"
-      + "const submitSelector=" + JSON.stringify(String(input.submitSelector || "")) + ";"
-      + "const shouldSubmit=" + JSON.stringify(input.submit !== false) + ";"
-      + "const visible=(el)=>!!(el&&el.offsetParent!==null&&!el.disabled&&el.getAttribute('aria-disabled')!=='true');"
-      + "const setNative=(el,value)=>{const proto=Object.getPrototypeOf(el);const desc=Object.getOwnPropertyDescriptor(proto,'value')||Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');if(desc&&desc.set)desc.set.call(el,value);else el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));};"
-      + "const pick=(selector,fallbacks)=>{if(selector){const hit=document.querySelector(selector);if(visible(hit))return hit;}return Array.from(document.querySelectorAll(fallbacks)).find(visible);};"
-      + "const userEl=pick(usernameSelector,'input[type=email],input[name*=email i],input[id*=email i],input[name*=user i],input[id*=user i],input[type=text]');"
-      + "const passEl=pick(passwordSelector,'input[type=password]');"
-      + "if(!userEl||!passEl)return {ok:false,reason:'login_fields_not_found'};"
-      + "setNative(userEl,username);setNative(passEl,password);"
-      + "let submitted=false;"
-      + "if(shouldSubmit){let submitEl=submitSelector?document.querySelector(submitSelector):null;if(!visible(submitEl)){submitEl=Array.from(document.querySelectorAll('button,input[type=submit],[role=button]')).find(el=>visible(el)&&/log in|login|sign in|continue|next|登录|登入|继续|下一步/i.test(String(el.innerText||el.value||el.getAttribute('aria-label')||'')));}"
-      + "if(visible(submitEl)){submitEl.click();submitted=true;}else{passEl.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));submitted=true;}}"
-      + "return {ok:true,usernameFilled:true,passwordFilled:true,submitted};"
-      + "})()"
     password = ""
-    let res
-    try {
-      res = await execCua(workspace, "login_fill_saved_credentials", ["call", "page", JSON.stringify({ pid: input.pid, window_id: input.windowId, action: "execute_javascript", javascript: js })], 30000)
-    } catch (error: any) {
-      const message = String(error?.message || error)
-      if (isCuaStopSignal(message)) {
-        await saveTask(workspace, task, "异常中断", "自动登录所需的 Chrome DOM 通道不可用，已停止 CUA，避免继续抢占 Chrome 前台。")
-        await appendAudit(workspace, "login", "fill_saved_credentials", "failed", message, ctx)
-        return JSON.stringify({ status: "blocked", reason: message })
-      }
-      if (isCuaDomUnavailableSignal(message)) {
-        await saveTask(workspace, task, "等待顾问登录", "Chrome DOM 登录通道不可用；CUA 未停止，后续可用键盘/AX 策略继续填写已登录后的普通表单。")
-        await appendAudit(workspace, "login", "fill_saved_credentials", "failed", message, ctx)
-        return JSON.stringify({ status: "needs_human_or_keyboard_login", reason: message })
-      }
-      throw error
-    }
-    await appendLog(workspace, "cua", "已用本机保存的申请平台凭证填写登录页；密码未写入日志。")
-    await saveTask(workspace, task, "等待顾问登录", "已自动填写申请平台账号密码。如页面要求 MFA、验证码或邮箱验证，请顾问手动完成。")
-    await appendAudit(workspace, "login", "fill_saved_credentials", "completed", "credential filled without exposing password", ctx)
-    return JSON.stringify({ status: "completed", usernameFilled: true, passwordFilled: true, output: String(res.stdout || "").replace(/password[^,}]*/ig, "password:redacted") })
+    const usernameSelector = String(input.usernameSelector || "")
+    const passwordSelector = String(input.passwordSelector || "")
+    const submitSelector = String(input.submitSelector || "")
+    const shouldSubmit = input.submit !== false
+    const taskSpaceSelector = input.taskSpaceId
+      ? "const task = await takeOverTaskSpace(" + JSON.stringify(String(input.taskSpaceId)) + ")"
+      : "const task = await useOrCreateTaskSpace(" + JSON.stringify(String(input.taskSpaceName || ["Terra-Edu", task.input?.studentName, task.input?.school].filter(Boolean).join(" / "))) + ")"
+    const snippet = [
+      "ego-browser nodejs <<'EOF'",
+      "import { execFileSync } from 'node:child_process'",
+      taskSpaceSelector,
+      "const username = " + JSON.stringify(String(credential.username)),
+      "const serviceName = " + JSON.stringify(String(credential.serviceName)),
+      "const password = execFileSync('security', ['find-generic-password', '-s', serviceName, '-a', username, '-w'], { encoding: 'utf8' }).trim()",
+      "const usernameSelector = " + JSON.stringify(usernameSelector),
+      "const passwordSelector = " + JSON.stringify(passwordSelector),
+      "const submitSelector = " + JSON.stringify(submitSelector),
+      "const shouldSubmit = " + JSON.stringify(shouldSubmit),
+      "await js(({ username, password, usernameSelector, passwordSelector, submitSelector, shouldSubmit }) => {",
+      "  const visible = (el) => !!(el && el.offsetParent !== null && !el.disabled && el.getAttribute('aria-disabled') !== 'true')",
+      "  const setNative = (el, value) => { const proto = Object.getPrototypeOf(el); const desc = Object.getOwnPropertyDescriptor(proto, 'value') || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value'); if (desc && desc.set) desc.set.call(el, value); else el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) }",
+      "  const pick = (selector, fallbacks) => { if (selector) { const hit = document.querySelector(selector); if (visible(hit)) return hit } return Array.from(document.querySelectorAll(fallbacks)).find(visible) }",
+      "  const userEl = pick(usernameSelector, 'input[type=email],input[name*=email i],input[id*=email i],input[name*=user i],input[id*=user i],input[type=text]')",
+      "  const passEl = pick(passwordSelector, 'input[type=password]')",
+      "  if (!userEl || !passEl) return { ok:false, reason:'login_fields_not_found' }",
+      "  setNative(userEl, username); setNative(passEl, password)",
+      "  let submitted = false",
+      "  if (shouldSubmit) {",
+      "    let submitEl = submitSelector ? document.querySelector(submitSelector) : null",
+      "    if (!visible(submitEl)) submitEl = Array.from(document.querySelectorAll('button,input[type=submit],[role=button]')).find((el) => visible(el) && /log in|login|sign in|continue|next|登录|登入|继续|下一步/i.test(String(el.innerText || el.value || el.getAttribute('aria-label') || '')))",
+      "    if (visible(submitEl)) { submitEl.click(); submitted = true } else { passEl.dispatchEvent(new KeyboardEvent('keydown', { key:'Enter', bubbles:true })); submitted = true }",
+      "  }",
+      "  return { ok:true, usernameFilled:true, passwordFilled:true, submitted }",
+      "}, { username, password, usernameSelector, passwordSelector, submitSelector, shouldSubmit })",
+      "cliLog(JSON.stringify({ loginAttempted: true, taskSpaceId: task.id, info: await pageInfo(), snapshot: await snapshotText() }, null, 2))",
+      "EOF",
+    ].join("\n")
+    await appendLog(workspace, "cua", "已确认本机钥匙串存在申请平台凭证；已生成 ego-browser 登录步骤，密码不会写入日志。")
+    await saveTask(workspace, task, "等待顾问登录", "已准备通过 ego-browser 使用本机钥匙串填写登录页；如页面要求 MFA、验证码或邮箱验证，请顾问手动完成。")
+    await appendAudit(workspace, "login", "fill_saved_credentials", "completed", "prepared ego-browser keychain login snippet", ctx)
+    return JSON.stringify({ status: "prepared", usernameAvailable: true, passwordSource: "macOS keychain", snippet }, null, 2)
   },
 }
 
@@ -1447,47 +1103,21 @@ export const risk = {
 }
 
 export const cua = {
-  description: "Use cua-driver for application-platform browser operations. Prefer the human-like high-level loop: observe_page, fill_field_verified, select_option_verified, save_page_verified, handle_blocker. Low-level click/type/select actions remain as fallbacks. Default observation is AX/DOM without screenshot; screenshots are only for failure or evidence.",
+  description: "Coordinate ego-browser / ego lite application-platform filling. This tool does not directly control Chrome or call cua-driver. Use the official ego-browser skill for browser actions, then call this tool to record task space, observations, verified fields, verified saves, uploads, blockers, failures, and audit state.",
   args: inputArg({
-    action: { type: "string", enum: ["resume_cua", "list_windows", "open_platform", "observe_page", "fill_field_verified", "select_option_verified", "save_page_verified", "handle_blocker", "capture_state", "inspect_controls", "enable_browser_dom", "dismiss_dialog", "dismiss_native_menu", "click_element", "dom_set_field", "type_text", "set_value", "select_option", "keyboard_fill_sequence", "press_key", "record_failure", "record_saved", "record_upload", "block_high_risk"], description: "CUA operation. Prefer observe_page before each page/modal, fill_field_verified and select_option_verified for fields, save_page_verified before saving, and handle_blocker for Chrome alert/beforeunload/native dialog. Use list_windows to find an already-open Chrome window before open_platform. Low-level actions are fallback only." },
-    applicationUrl: { type: "string", description: "Application platform URL, defaults to task input" },
-    pid: { type: "number", description: "Optional target browser pid" },
-    windowId: { type: "number", description: "Optional target browser window_id" },
-    browserBundleId: { type: "string", description: "Optional browser bundle id, defaults to com.google.Chrome" },
-    elementIndex: { type: "number", description: "Optional element_index from the last capture_state/get_window_state call" },
-    text: { type: "string", description: "Text/value to type or set" },
-    cssSelector: { type: "string", description: "Optional CSS selector for select_option DOM fallback, such as select[name='state']" },
-    fieldLabel: { type: "string", description: "Human-readable field label for verified fill/select, such as State, Institution, Current Title." },
-    optionLabel: { type: "string", description: "Desired dropdown option label for select_option" },
-    optionValue: { type: "string", description: "Desired dropdown option value for select_option" },
-    expectedText: { type: "string", description: "Expected visible value after fill/select/save verification. Defaults to text or optionLabel." },
-    key: { type: "string", description: "Key name for press_key, such as tab, return, escape" },
-    matchText: { type: "string", description: "Optional dialog text/title to match when dismissing browser alerts or validation dialogs" },
-    modifiers: { type: "array", items: { type: "string" }, description: "Optional modifiers for press_key, such as cmd, shift, option, ctrl" },
-    replace: { type: "boolean", description: "For type_text or keyboard_fill_sequence, select existing field content before typing." },
-    delayMs: { type: "number", description: "Typing delay in milliseconds for CUA type_text fallback." },
-    saveScreenshot: { type: "boolean", description: "For capture_state only. Default false uses capture_mode=ax to avoid macOS Screen Recording prompts. Set true only for failure evidence, upload/save evidence, or consultant request." },
-    values: {
-      type: "array",
-      description: "Ordered values for keyboard_fill_sequence. Each item can be a string or { text, detail, replace }.",
-      items: {
-        oneOf: [
-          { type: "string" },
-          {
-            type: "object",
-            properties: {
-              text: { type: "string" },
-              detail: { type: "string" },
-              replace: { type: "boolean" },
-            },
-          },
-        ],
-      },
-    },
-    tabAfterEach: { type: "boolean", description: "For keyboard_fill_sequence, press Tab after each value except the last. Defaults to true." },
-    confirmed: { type: "boolean", description: "Required true for enable_browser_dom because it may restart the browser after consultant confirmation." },
-    x: { type: "number", description: "Optional x pixel for direct click" },
-    y: { type: "number", description: "Optional y pixel for direct click" },
+    action: { type: "string", enum: ["prepare_ego_task", "resume_ego", "record_observation", "record_field_verified", "record_select_verified", "record_save_verified", "record_blocker", "handoff_to_consultant", "complete_ego_task", "record_failure", "record_saved", "record_upload", "block_high_risk"], description: "ego-browser coordination action. Browser control itself must be done through the official ego-browser skill, not this tool." },
+    applicationUrl: { type: "string", description: "Application platform URL, defaults to task input." },
+    taskSpaceName: { type: "string", description: "ego-browser task space name for this application task." },
+    taskSpaceId: { type: "string", description: "ego-browser task space id returned by useOrCreateTaskSpace." },
+    currentUrl: { type: "string", description: "Current URL reported by ego-browser pageInfo." },
+    pageTitle: { type: "string", description: "Current page title reported by ego-browser pageInfo or snapshot." },
+    fieldLabel: { type: "string", description: "Human-readable field label, such as State, Institution, Current Title." },
+    text: { type: "string", description: "Field value, selected option, page summary, or observation text." },
+    expectedText: { type: "string", description: "Expected visible value after ego-browser verification." },
+    optionLabel: { type: "string", description: "Selected option label for record_select_verified." },
+    optionValue: { type: "string", description: "Selected option value for record_select_verified." },
+    evidence: { type: "string", description: "Short verification evidence from snapshotText/pageInfo/screenshot/readback." },
+    confirmed: { type: "boolean", description: "Required true for record_save_verified after ego-browser verified there are no required-field or validation errors." },
     detail: { type: "string", description: "Operation detail, failure reason, saved page, upload material, or high-risk action" },
   }, ["action"]),
   async execute(args, ctx) {
@@ -1497,831 +1127,155 @@ export const cua = {
     const progress = await readJson(join(workspace, "03_state/application_progress.json"), { currentPage: "", completedPages: [], savedPages: [], uploadedMaterials: [], failedActions: [], highRiskBlocks: [] })
     const auditAction = String(input.action || "unknown")
     await appendAudit(workspace, "cua", auditAction, "started", input.detail || "")
-    if (input.action === "resume_cua") {
-      await writeCuaControl(workspace, {
-        stopped: false,
-        stoppedAt: "",
-        reason: "",
-        domAutomationUnavailable: false,
-        domAutomationUnavailableAt: "",
-        domAutomationUnavailableReason: "",
-        recentActions: [],
-        consecutiveFailures: 0,
-      })
-      await writeFile(join(dirname(workspace), ".cua_global_stop.json"), JSON.stringify({ stopped: false, stoppedAt: "", workspacePath: workspace }, null, 2) + "\n", "utf8").catch(() => {})
-      await appendLog(workspace, "cua", "已恢复 CUA 自动化：" + (input.detail || "顾问要求继续填写。"))
-      await saveTask(workspace, task, "正在填写申请平台", "CUA 自动化已恢复，可以继续填写可确认字段。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "resumed CUA automation")
-      return "CUA 自动化已恢复。请立即重试刚才失败的 select_option、type_text 或 keyboard_fill_sequence。"
-    }
     if (input.action === "block_high_risk") {
       return await risk.execute({ input: { action: input.detail || "high risk application action", page: progress.currentPage || "" } }, ctx as any)
     }
-    if (input.action === "list_windows") {
-      const res = await execCua(workspace, auditAction, ["call", "list_windows", JSON.stringify({})], 10000)
-      await appendLog(workspace, "cua", "已列出当前可用窗口，用于复用已打开的申请平台页面。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "listed windows")
-      return "窗口列表已读取。请选择 Google Chrome 且 URL/标题对应当前申请平台的窗口，然后用 capture_state 继续。\n" + String(res.stdout || "")
+    if (input.action === "resume_ego") {
+      ensureCuaProgress(progress)
+      progress.browserBackend = "ego-browser"
+      progress.egoBrowser = {
+        ...(progress.egoBrowser || {}),
+        taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "",
+        taskSpaceName: input.taskSpaceName || progress.egoBrowser?.taskSpaceName || "",
+        resumedAt: new Date().toISOString(),
+      }
+      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      await appendLog(workspace, "cua", "已恢复 ego-browser 填表上下文：" + (input.taskSpaceId || input.taskSpaceName || "当前申请 Space"))
+      await saveTask(workspace, task, "正在填写申请平台", "ego-browser task space 已恢复，Agent 可继续通过官方 skill 填写。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "resumed ego-browser task space")
+      return "ego-browser 填表上下文已恢复。请在下一轮 Bash heredoc 中使用 takeOverTaskSpace(taskSpaceId) 或 useOrCreateTaskSpace(taskSpaceName) 继续。"
     }
-    if (input.action === "open_platform") {
-      const url = input.applicationUrl || task.input?.applicationUrl
-      if (!url) throw new Error("applicationUrl is required")
-      const now = new Date()
-      const recentlyOpened =
-        normalizeApplicationUrl(progress.platformLastOpenedUrl) === normalizeApplicationUrl(url) &&
-        Date.parse(progress.platformLastOpenedAt || "") > 0 &&
-        now.getTime() - Date.parse(progress.platformLastOpenedAt || "") < 10 * 60 * 1000
-      if (recentlyOpened) {
-        progress.currentPage = progress.currentPage || "申请平台登录/首页"
-        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-        await appendLog(workspace, "cua", "已跳过重复打开申请平台，复用现有 Chrome 页面：" + url)
-        await saveTask(workspace, task, "正在填写申请平台", "申请平台近期已打开，正在复用现有 Chrome 页面继续填写。")
-        await appendAudit(workspace, "cua", auditAction, "completed", "reused already opened platform")
-        return "申请平台近期已打开，已跳过重复打开。请直接 capture_state/list_windows 并继续当前页面。"
-      }
-      const payload = { bundle_id: "com.google.Chrome", urls: [url] }
-      let output = ""
-      try {
-        const res = await execCua(workspace, auditAction, ["call", "launch_app", JSON.stringify(payload)], 30000)
-        output = String(res.stdout || res.stderr || "")
-      } catch (error: any) {
-        const message = String(error?.message || error)
-        output = "cua-driver launch_app failed: " + message
-        if (!Array.isArray(progress.failedActions)) progress.failedActions = []
-        progress.failedActions.push({ at: new Date().toISOString(), action: "open_platform", reason: output, page: url })
-        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-        if (isCuaStopSignal(message)) {
-          await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-          await appendAudit(workspace, "cua", auditAction, "failed", message)
-          return "BLOCKED: " + message
-        }
-      }
-      progress.currentPage = "申请平台登录/首页"
-      progress.platformLastOpenedAt = now.toISOString()
+    if (input.action === "prepare_ego_task") {
+      ensureCuaProgress(progress)
+      const url = String(input.applicationUrl || task.input?.applicationUrl || "").trim()
+      if (!url) throw new Error("applicationUrl is required for prepare_ego_task")
+      const taskSpaceName = String(input.taskSpaceName || ["Terra-Edu", task.input?.studentName, task.input?.school, task.input?.program].filter(Boolean).join(" / ")).trim()
+      progress.browserBackend = "ego-browser"
+      progress.currentPage = progress.currentPage || "申请平台准备中"
+      progress.currentUrl = url
+      progress.platformLastOpenedAt = new Date().toISOString()
       progress.platformLastOpenedUrl = url
+      progress.egoBrowser = {
+        ...(progress.egoBrowser || {}),
+        taskSpaceName,
+        taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "",
+        applicationUrl: url,
+        backend: "ego-browser",
+        preparedAt: new Date().toISOString(),
+      }
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", "已调用 cua-driver 打开申请平台：" + url)
-      await saveTask(workspace, task, "等待顾问登录", "申请平台已打开。如果需要登录，请顾问手动登录；Agent 不保存账号密码。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "opened platform")
-      return "已尝试通过 cua-driver 打开申请平台。\n" + output
+      await appendLog(workspace, "cua", "已准备 ego-browser 填表任务：" + taskSpaceName + " -> " + url)
+      await saveTask(workspace, task, "正在填写申请平台", "已切换到 ego-browser / ego lite 后端，准备在独立 Space 中打开申请平台。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "prepared ego-browser task")
+      return [
+        "ego-browser 填表任务已准备。下一步必须使用官方 ego-browser skill，不要调用 cua-driver。",
+        "",
+        "建议首轮 heredoc：",
+        "ego-browser nodejs <<'EOF'",
+        "const task = await useOrCreateTaskSpace(" + JSON.stringify(taskSpaceName) + ")",
+        "await openOrReuseTab(" + JSON.stringify(url) + ", { wait: true, timeout: 30 })",
+        "cliLog(JSON.stringify({ taskSpaceId: task.id, info: await pageInfo(), snapshot: await snapshotText() }, null, 2))",
+        "EOF",
+        "",
+        "拿到 taskSpaceId、pageInfo 和 snapshot 后，调用 application-agent_cua record_observation 记录观察结果，再继续填写。",
+      ].join("\n")
     }
-    if (input.action === "observe_page") {
-      if (!input.pid || !input.windowId) throw new Error("observe_page requires pid and windowId")
-      const observed = await observeCuaPage(workspace, auditAction, input, progress)
-      await appendLog(workspace, "cua", input.saveScreenshot ? "真人式观察：已读取页面状态并保存失败/证据截图。实际请求截图的进程可能是 CuaDriver 或 Chrome Helper，不一定是 Terra App。" : "真人式观察：已读取页面 AX/DOM 状态（未截图）。")
-      await saveTask(workspace, task, "正在填写申请平台", "已观察当前页面、modal、必填空项、保存按钮和可能弹窗，准备按真人式循环继续。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "observed page with verification state")
-      return "真人式页面观察完成。默认未截图；如 macOS 仍弹截图权限，请给 CuaDriver/Chrome Helper 授权，或仅在失败证据路径使用截图。\n" + summarizeObservation(observed)
-    }
-    if (input.action === "handle_blocker") {
-      if (!input.pid) throw new Error("handle_blocker requires pid")
+    if (input.action === "record_observation") {
       ensureCuaProgress(progress)
-      const matchText = String(input.matchText || input.detail || "").trim()
-      const candidateWindowIds: number[] = []
-      if (input.windowId) candidateWindowIds.push(Number(input.windowId))
-      if (!candidateWindowIds.length) {
-        try {
-          const windowsRes = await execCua(workspace, auditAction, ["call", "list_windows", "--compact"], 10000)
-          const parsed = parseJsonObjectFromText(String(windowsRes.stdout || "")) || {}
-          const windows = Array.isArray(parsed.windows) ? parsed.windows : []
-          for (const window of windows) {
-            if (Number(window.pid) !== Number(input.pid)) continue
-            const title = String(window.title || "")
-            const width = Number(window.bounds?.width || 0)
-            const height = Number(window.bounds?.height || 0)
-            const looksLikeBlocker = /显示|alert|confirm|prompt|dialog|required|验证|提示|离开|Leave|恢复|Restore/i.test(title) || (width > 0 && height > 0 && width <= 760 && height <= 420)
-            if (looksLikeBlocker) candidateWindowIds.push(Number(window.window_id))
-          }
-        } catch (error: any) {
-          await appendLog(workspace, "cua", "扫描阻塞弹窗失败，将尝试当前窗口按键处理：" + String(error?.message || error))
-        }
+      progress.browserBackend = "ego-browser"
+      progress.currentPage = input.pageTitle || input.detail || progress.currentPage || "申请平台页面"
+      progress.currentUrl = input.currentUrl || progress.currentUrl || ""
+      progress.lastObservedAt = new Date().toISOString()
+      progress.egoBrowser = {
+        ...(progress.egoBrowser || {}),
+        taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "",
+        taskSpaceName: input.taskSpaceName || progress.egoBrowser?.taskSpaceName || "",
+        lastSnapshotSummary: input.text || input.evidence || "",
+        lastObservedAt: progress.lastObservedAt,
       }
-      if (!candidateWindowIds.length) throw new Error("handle_blocker could not find candidate blocker windows")
-
-      const attempts: string[] = []
-      for (const windowId of candidateWindowIds) {
-        let tree = ""
-        try {
-          const state = await execCua(workspace, auditAction, ["call", "get_window_state", JSON.stringify({ pid: input.pid, window_id: windowId, capture_mode: "ax" }), "--compact"], 10000)
-          tree = String(state.stdout || "")
-        } catch (error: any) {
-          attempts.push("get_window_state failed for " + windowId + ": " + String(error?.message || error))
-        }
-        const allText = matchText + "\n" + tree
-        const beforeUnload = isBeforeUnloadText(allText)
-        const restoreDialog = isRestoreDialogText(allText)
-        const preferred = beforeUnload ? /(取消|Cancel|留在|Stay|Don.t Leave|不离开)/i : restoreDialog ? /(关闭|Close|取消|Cancel|不恢复|No)/i : /(确定|OK|Ok|好|关闭|Close|Continue|继续|Yes|是)/i
-        let buttonIndex: number | undefined
-        for (const line of tree.split(/\r?\n/)) {
-          if (!/\bAXButton\b/.test(line) || !preferred.test(line)) continue
-          const indexMatch = line.match(/\[(\d+)\]/)
-          if (indexMatch) {
-            buttonIndex = Number(indexMatch[1])
-            break
-          }
-        }
-        try {
-          let res
-          if (buttonIndex !== undefined) {
-            res = await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: windowId, element_index: buttonIndex })], 10000)
-          } else {
-            const key = beforeUnload || restoreDialog ? "escape" : "return"
-            res = await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: windowId, key })], 10000)
-          }
-          appendLimited(progress, "blockedDialogs", { at: new Date().toISOString(), windowId, kind: beforeUnload ? "beforeunload-cancelled" : restoreDialog ? "restore-dismissed" : "dialog-dismissed", detail: matchText || tree.slice(0, 300) })
-          await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-          await appendLog(workspace, "cua", beforeUnload ? "已取消 Chrome 离开页面确认，防止未保存表单丢失。" : restoreDialog ? "已关闭 Chrome 恢复页面弹窗。" : "已处理阻塞弹窗。")
-          await saveTask(workspace, task, "正在填写申请平台", beforeUnload ? "已留在当前页面，防止未保存内容丢失。" : "已处理页面阻塞弹窗，准备继续。")
-          await appendAudit(workspace, "cua", auditAction, "completed", beforeUnload ? "cancelled beforeunload" : "handled blocker")
-          return (beforeUnload ? "已选择取消/留在页面，未离开当前申请页。" : "阻塞弹窗已处理。") + "\n" + String(res.stdout || "") + (tree ? "\n\n弹窗内容：\n" + tree.slice(0, 1200) : "")
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("handle blocker failed for " + windowId + ": " + message)
-        }
-      }
-      appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "handle_blocker", reason: attempts.join("\n"), page: progress.currentPage || "" })
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendAudit(workspace, "cua", auditAction, "failed", attempts.join("\n"))
-      return "handle_blocker failed.\n" + attempts.join("\n")
+      await appendLog(workspace, "cua", "ego-browser 页面观察已记录：" + (progress.currentPage || "申请平台页面"))
+      await saveTask(workspace, task, "正在填写申请平台", "已通过 ego-browser snapshot/pageInfo 观察当前页面，准备继续小步填写。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "recorded ego-browser observation")
+      return "ego-browser 页面观察已记录。继续用 snapshotText refs/locators、fillInput、click、js 或 cdp 小步填写，并在 1-3 个字段后再次观察。"
     }
-    if (input.action === "fill_field_verified") {
-      if (!input.pid || !input.windowId || input.text === undefined) throw new Error("fill_field_verified requires pid, windowId, and text")
+    if (input.action === "record_field_verified" || input.action === "record_select_verified") {
       ensureCuaProgress(progress)
-      const value = String(input.text)
-      const label = String(input.fieldLabel || input.detail || "")
-      const expected = String(input.expectedText || value)
-      const attempts: string[] = []
-      let method = ""
-      let verified = false
-      let output = ""
-
-      try {
-        const dom = await execCua(workspace, auditAction, ["call", "page", JSON.stringify({ pid: input.pid, window_id: input.windowId, action: "execute_javascript", javascript: buildDomSetFieldScript(String(input.cssSelector || ""), label, value) })], 30000)
-        output = String(dom.stdout || "")
-        const parsed = parseJsonObjectFromText(output)
-        const data = parsed?.result || parsed
-        if (data?.ok) {
-          method = String(data.method || "dom-set-field")
-          verified = normalizedMatch(String(data.value || ""), expected)
-        } else {
-          attempts.push("DOM fill returned no match: " + output)
-        }
-      } catch (error: any) {
-        const message = String(error?.message || error)
-        if (isCuaStopSignal(message)) {
-          await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-          await appendAudit(workspace, "cua", auditAction, "failed", message)
-          return "BLOCKED: " + message
-        }
-        attempts.push("DOM fill failed: " + message)
-      }
-
-      if (!verified && input.elementIndex !== undefined) {
-        try {
-          const res = await execCua(workspace, auditAction, ["call", "set_value", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: input.elementIndex, value })], 30000)
-          output += "\n" + String(res.stdout || "")
-          method = "AX set_value"
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("AX set_value failed: " + message)
-        }
-      }
-
-      if (!method && input.elementIndex !== undefined) {
-        try {
-          await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: input.elementIndex })], 10000)
-          await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, key: "a", modifiers: ["cmd"] })], 10000).catch(() => {})
-          const res = await execCua(workspace, auditAction, ["call", "type_text", JSON.stringify({ pid: input.pid, text: value })], 30000)
-          output += "\n" + String(res.stdout || "")
-          method = "keyboard type_text"
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("keyboard fill failed: " + message)
-        }
-      }
-
-      const observed = await observeCuaPage(workspace, auditAction, { ...input, saveScreenshot: false }, progress)
-      const controls = Array.isArray(observed.dom?.controls) ? observed.dom.controls : []
-      const matching = controls.find((control: any) => {
-        const controlLabel = String(control.label || control.name || control.id || "")
-        if (label && !normalizedMatch(controlLabel, label)) return false
-        return normalizedMatch(String(control.value || ""), expected)
-      })
-      verified = verified || Boolean(matching) || (expected.length > 0 && normalizedMatch(JSON.stringify(observed.dom || {}), expected))
-      await recordFieldProgress(workspace, progress, "field", label || input.cssSelector || "普通字段", value, method || "unknown", verified)
-      await appendLog(workspace, "cua", (verified ? "已填写并复查字段：" : "已填写但复查不确定：") + (label || input.cssSelector || "普通字段"))
-      await saveTask(workspace, task, "正在填写申请平台", (verified ? "已填写并复查字段：" : "字段已填写但需要继续观察确认：") + (label || input.cssSelector || "普通字段"))
-      await appendAudit(workspace, "cua", auditAction, verified ? "completed" : "failed", (label || "field") + " via " + (method || "unknown"))
-      if (!verified) return "FIELD_FILLED_NEEDS_RECHECK: 字段已尝试填写，但二次检查未确认目标值。请 observe_page 后再决定是否重试。\n尝试记录：\n" + attempts.join("\n") + "\n输出：\n" + output + "\n观察摘要：\n" + summarizeObservation(observed)
-      return "字段已填写并通过二次检查。\n方法：" + method + "\n" + output
-    }
-    if (input.action === "select_option_verified") {
-      if (!input.pid || !input.windowId) throw new Error("select_option_verified requires pid and windowId")
-      ensureCuaProgress(progress)
-      const desired = String(input.optionLabel || input.optionValue || input.text || "").trim()
-      if (!desired) throw new Error("select_option_verified requires optionLabel, optionValue, or text")
-      const desiredValue = String(input.optionValue || desired)
-      const label = String(input.fieldLabel || input.detail || "")
-      const attempts: string[] = []
-      let method = ""
-      let output = ""
-
-      try {
-        const dom = await execCua(workspace, auditAction, ["call", "page", JSON.stringify({ pid: input.pid, window_id: input.windowId, action: "execute_javascript", javascript: buildDomSelectScript(String(input.cssSelector || ""), label, desired, desiredValue) })], 30000)
-        output = String(dom.stdout || "")
-        const parsed = parseJsonObjectFromText(output)
-        const data = parsed?.result || parsed
-        if (data?.ok) method = String(data.method || "dom-select")
-        else attempts.push("DOM verified select returned no match: " + output)
-      } catch (error: any) {
-        const message = String(error?.message || error)
-        if (isCuaStopSignal(message)) {
-          await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-          await appendAudit(workspace, "cua", auditAction, "failed", message)
-          return "BLOCKED: " + message
-        }
-        attempts.push("DOM verified select failed: " + message)
-      }
-
-      if (!method && input.elementIndex !== undefined) {
-        try {
-          const res = await execCua(workspace, auditAction, ["call", "set_value", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: input.elementIndex, value: desired })], 30000)
-          output += "\n" + String(res.stdout || "")
-          method = "AX set_value"
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("AX set_value select failed: " + message)
-        }
-      }
-
-      if (!method && input.elementIndex !== undefined) {
-        try {
-          await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: input.elementIndex, action: "press" })], 10000)
-          await sleep(250)
-          const state = await execCua(workspace, auditAction, ["call", "get_window_state", JSON.stringify({ pid: input.pid, window_id: input.windowId, query: desired, capture_mode: "ax" }), "--compact"], 15000)
-          const optionIndex = findAxSelectableOptionIndex(String(state.stdout || ""), desired)
-          if (optionIndex !== undefined) {
-            const res = await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: optionIndex, action: "press" })], 10000)
-            output += "\n" + String(res.stdout || "")
-            method = "AX popup menu"
-          } else {
-            attempts.push("AX popup menu did not expose matching option: " + desired)
-          }
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("AX popup select failed: " + message)
-        }
-      }
-
-      if (!method && input.elementIndex !== undefined) {
-        try {
-          await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, key: "escape" })], 5000).catch(() => {})
-          await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: input.elementIndex })], 10000)
-          await sleep(140)
-          await pressCuaTypeahead(workspace, auditAction, Number(input.pid), Number(input.windowId), desired)
-          const res = await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, key: "return" })], 10000)
-          output += "\n" + String(res.stdout || "")
-          method = "native menu keyboard typeahead"
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("native keyboard select failed: " + message)
-        }
-      }
-
-      const observed = await observeCuaPage(workspace, auditAction, { ...input, saveScreenshot: false }, progress)
-      const controls = Array.isArray(observed.dom?.controls) ? observed.dom.controls : []
-      const matching = controls.find((control: any) => {
-        const controlLabel = String(control.label || control.name || control.id || "")
-        if (label && !normalizedMatch(controlLabel, label)) return false
-        return normalizedMatch(String(control.value || ""), desired)
-      })
-      const verified = Boolean(matching) || normalizedMatch(JSON.stringify(observed.dom || {}), desired)
-      await recordFieldProgress(workspace, progress, "select", label || input.cssSelector || "下拉字段", desired, method || "unknown", verified)
-      await appendLog(workspace, "cua", (verified ? "已选择并复查下拉项：" : "已选择但复查不确定：") + (label || desired) + " -> " + desired)
-      await saveTask(workspace, task, "正在填写申请平台", (verified ? "已选择并复查：" : "下拉项已尝试选择但需要继续观察：") + (label || desired))
-      await appendAudit(workspace, "cua", auditAction, verified ? "completed" : "failed", (label || "select") + " via " + (method || "unknown"))
-      if (!verified) return "SELECT_NEEDS_RECHECK: 已尝试选择，但二次检查未确认目标值。不要立刻保存；先 observe_page 或重试。\n尝试记录：\n" + attempts.join("\n") + "\n输出：\n" + output + "\n观察摘要：\n" + summarizeObservation(observed)
-      return "下拉项已选择并通过二次检查。\n方法：" + method + "\n" + output
-    }
-    if (input.action === "save_page_verified") {
-      if (!input.pid || !input.windowId) throw new Error("save_page_verified requires pid and windowId")
-      ensureCuaProgress(progress)
-      const before = await observeCuaPage(workspace, auditAction, { ...input, saveScreenshot: false }, progress)
-      const requiredEmpty = Array.isArray(before.dom?.requiredEmpty) ? before.dom.requiredEmpty : []
-      if (requiredEmpty.length > 0 && !input.confirmed) {
-        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "save_page_verified", reason: "required fields empty before save", page: progress.currentPage || "", fields: requiredEmpty.slice(0, 20) })
-        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-        await appendLog(workspace, "cua", "保存前复查发现必填空项，已阻止保存：" + JSON.stringify(requiredEmpty.slice(0, 8)))
-        await saveTask(workspace, task, "正在填写申请平台", "保存前发现必填空项，先补齐后再保存。")
-        await appendAudit(workspace, "cua", auditAction, "failed", "required fields empty before save")
-        return "SAVE_BLOCKED_REQUIRED_FIELDS: 保存前发现必填空项，不能直接 SAVE。\n" + summarizeObservation(before)
-      }
-
-      let output = ""
-      try {
-        if (input.detail) {
-          const checked = await risk.execute({ input: { action: input.detail, page: progress.currentPage || "" } }, ctx as any)
-          if (String(checked).startsWith("BLOCKED")) return checked
-        }
-        if (input.elementIndex !== undefined) {
-          const res = await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: input.elementIndex })], 30000)
-          output = String(res.stdout || "")
-        } else {
-          const res = await execCua(workspace, auditAction, ["call", "page", JSON.stringify({ pid: input.pid, window_id: input.windowId, action: "execute_javascript", javascript: buildDomSaveScript(String(input.cssSelector || "")) })], 30000)
-          output = String(res.stdout || "")
-          const parsed = parseJsonObjectFromText(output)
-          const data = parsed?.result || parsed
-          if (!data?.ok) throw new Error("DOM save click returned no match: " + output)
-        }
-      } catch (error: any) {
-        const message = String(error?.message || error)
-        if (isCuaStopSignal(message)) {
-          await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-          await appendAudit(workspace, "cua", auditAction, "failed", message)
-          return "BLOCKED: " + message
-        }
-        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "save_page_verified", reason: message, page: progress.currentPage || "" })
-        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-        await appendAudit(workspace, "cua", auditAction, "failed", message)
-        return "SAVE_CLICK_FAILED: " + message
-      }
-
-      await sleep(900)
-      const after = await observeCuaPage(workspace, auditAction, { ...input, saveScreenshot: false }, progress)
-      const beforeUnload = Array.isArray(after.dialogs) ? after.dialogs.find((dialog: any) => dialog.kind === "beforeunload") : undefined
-      if (beforeUnload) {
-        await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: beforeUnload.windowId, key: "escape" })], 10000).catch(() => {})
-        appendLimited(progress, "blockedDialogs", { at: new Date().toISOString(), kind: "beforeunload-cancelled-after-save", detail: beforeUnload.title || beforeUnload.text || "" })
-        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-        await appendLog(workspace, "cua", "SAVE 后出现离开页面确认，已取消以防未保存内容丢失。")
-        await saveTask(workspace, task, "正在填写申请平台", "SAVE 后出现离开页面确认，已取消并留在当前页面。")
-        await appendAudit(workspace, "cua", auditAction, "failed", "beforeunload appeared after save")
-        return "SAVE_BLOCKED_BEFOREUNLOAD: 已取消离开页面确认，未把页面记为已保存。\n" + summarizeObservation(after)
-      }
-
-      const afterRequired = Array.isArray(after.dom?.requiredEmpty) ? after.dom.requiredEmpty : []
-      const validation = Array.isArray(after.dom?.validationMessages) ? after.dom.validationMessages : []
-      if (afterRequired.length > 0 || validation.length > 0) {
-        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "save_page_verified", reason: "validation after save", page: progress.currentPage || "", requiredEmpty: afterRequired.slice(0, 20), validation: validation.slice(0, 20) })
-        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-        await appendLog(workspace, "cua", "保存后仍有校验错误，未记为保存成功：" + JSON.stringify({ requiredEmpty: afterRequired.slice(0, 8), validation: validation.slice(0, 8) }))
-        await saveTask(workspace, task, "正在填写申请平台", "保存后页面提示仍需补字段，先处理错误再继续。")
-        await appendAudit(workspace, "cua", auditAction, "failed", "validation after save")
-        return "SAVE_NEEDS_FIX: 保存后仍有必填空项或校验错误，不要重复点 SAVE，先补字段。\n" + summarizeObservation(after)
-      }
-
-      const pageName = String(input.detail || progress.currentPage || before.dom?.pageTitle || "申请页面")
-      if (!Array.isArray(progress.savedPages)) progress.savedPages = []
-      progress.savedPages.push({ at: new Date().toISOString(), page: pageName, url: progress.currentUrl || "" })
+      const kind = input.action === "record_select_verified" ? "select" : "field"
+      const label = String(input.fieldLabel || input.detail || (kind === "select" ? "下拉字段" : "普通字段"))
+      const value = String(input.optionLabel || input.optionValue || input.text || input.expectedText || "")
+      appendLimited(progress, "filledFields", { at: new Date().toISOString(), kind, label, value, backend: "ego-browser", taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "" })
+      appendLimited(progress, "verifiedFields", { at: new Date().toISOString(), kind, label, value, expected: input.expectedText || value, evidence: input.evidence || "", backend: "ego-browser" })
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", "已验证保存页面：" + pageName)
-      await saveTask(workspace, task, "正在保存申请进度", "已保存并复查当前页面：" + pageName)
-      await appendAudit(workspace, "cua", auditAction, "completed", "verified saved page")
-      return "页面已保存并通过保存后复查。\n" + output + "\n保存后观察：\n" + summarizeObservation(after)
+      await appendLog(workspace, "cua", "ego-browser 已填写并复查：" + label + " -> " + value)
+      await saveTask(workspace, task, "正在填写申请平台", "已填写并复查字段：" + label)
+      await appendAudit(workspace, "cua", auditAction, "completed", label + " verified via ego-browser")
+      return (kind === "select" ? "下拉/选项" : "字段") + "已记录为 ego-browser 验证完成。继续每 1-3 个字段观察一次页面。"
     }
-    if (input.action === "capture_state") {
-      if (!input.pid || !input.windowId) throw new Error("capture_state requires pid and windowId from cua-driver launch/list_windows output")
-      const file = join(workspace, "05_screenshots", "cua-" + Date.now() + ".png")
-      const payload: any = { pid: input.pid, window_id: input.windowId, capture_mode: input.saveScreenshot ? "som" : "ax" }
-      if (input.saveScreenshot) payload.screenshot_out_file = file
-      const res = await execCua(workspace, auditAction, ["call", "get_window_state", JSON.stringify(payload)], 30000)
-      await appendLog(workspace, "cua", input.saveScreenshot ? "已保存页面截图和 AX 状态：" + file : "已读取页面 AX 状态（未截图）。")
-      await saveTask(workspace, task, "正在填写申请平台", input.saveScreenshot ? "已捕获申请页面状态和截图，准备填写可确认字段。" : "已读取申请页面状态，准备填写可确认字段。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "captured page state")
-      return (input.saveScreenshot ? "截图已保存：" + file : "页面 AX 状态已读取（未截图）") + "\n" + String(res.stdout || "")
+    if (input.action === "record_blocker") {
+      ensureCuaProgress(progress)
+      appendLimited(progress, "blockedDialogs", { at: new Date().toISOString(), detail: input.detail || input.text || "ego-browser handled blocker", evidence: input.evidence || "", backend: "ego-browser" })
+      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      await appendLog(workspace, "cua", "ego-browser 已处理阻塞弹窗：" + (input.detail || "未命名弹窗"))
+      await saveTask(workspace, task, "正在填写申请平台", "已处理申请页面弹窗或阻塞状态，准备继续。")
+      await appendAudit(workspace, "cua", auditAction, "completed", input.detail || "handled ego-browser blocker")
+      return "阻塞处理已记录。若是 Leave site / 离开此网站，应确认 ego-browser 已用 accept:false 取消离开。"
     }
-    if (input.action === "enable_browser_dom") {
+    if (input.action === "handoff_to_consultant") {
+      ensureCuaProgress(progress)
+      progress.egoBrowser = {
+        ...(progress.egoBrowser || {}),
+        taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "",
+        handoffAt: new Date().toISOString(),
+        handoffReason: input.detail || "需要顾问接管 ego-browser Space。",
+      }
+      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      await appendLog(workspace, "cua", "已交接 ego-browser task space 给顾问：" + (input.detail || "需要人工登录/验证。"))
+      await saveTask(workspace, task, "等待顾问登录", input.detail || "请顾问在 ego lite Space 中完成登录、验证码或人工确认，然后回复继续。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "handoff to consultant")
+      return "已记录顾问接管。ego-browser 脚本中应已调用 handOffTaskSpace(task.id)。顾问回复继续后，用 takeOverTaskSpace(task.id) 恢复。"
+    }
+    if (input.action === "record_save_verified") {
+      ensureCuaProgress(progress)
       if (!input.confirmed) {
-        await appendAudit(workspace, "cua", auditAction, "failed", "consultant confirmation required")
-        return "CONFIRMATION_REQUIRED: 开启 Chrome “Allow JavaScript from Apple Events” 会重启浏览器，用于更接近浏览器内部自动填表的 DOM 控制。请先用 question 向顾问确认，再以 confirmed:true 调用本动作。"
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "record_save_verified", reason: "missing confirmed:true", page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendLog(workspace, "cua", "收到未确认保存记录，未写入 savedPages：" + (input.detail || progress.currentPage || "申请页面"))
+        await saveTask(workspace, task, "正在保存申请进度", "保存记录需要 ego-browser 保存前检查和保存后复查，未确认前不算成功。")
+        await appendAudit(workspace, "cua", auditAction, "failed", "unverified save record")
+        return "UNVERIFIED_SAVE_RECORDED: 必须在 ego-browser 脚本里完成保存前 required/validation 检查、点击 SAVE、保存后 snapshot/pageInfo 复查，并以 confirmed:true 调用 record_save_verified。"
       }
-      const bundleId = String(input.browserBundleId || "com.google.Chrome")
-      const res = await execCua(workspace, auditAction, ["call", "page", JSON.stringify({ action: "enable_javascript_apple_events", bundle_id: bundleId, user_has_confirmed_enabling: true })], 30000)
-      const control = await readCuaControl(workspace)
-      control.domAutomationUnavailable = false
-      control.domAutomationUnavailableAt = ""
-      control.domAutomationUnavailableReason = ""
-      await writeCuaControl(workspace, control)
-      await appendLog(workspace, "cua", "已尝试开启浏览器 DOM 自动化通道：" + bundleId)
-      await saveTask(workspace, task, "正在填写申请平台", "浏览器 DOM 自动化通道已尝试开启，后续优先使用页面级自动填表。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "enabled browser DOM automation")
-      return "浏览器 DOM 自动化通道已尝试开启；如 Chrome 被重启，请回到申请页面后继续。\n" + String(res.stdout || "")
-    }
-    if (input.action === "dismiss_native_menu") {
-      if (!input.pid) throw new Error("dismiss_native_menu requires pid")
-      const payload: any = { pid: input.pid, key: "escape" }
-      if (input.windowId) payload.window_id = input.windowId
-      const res = await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify(payload)], 10000)
-      await appendLog(workspace, "cua", "已关闭原生下拉/菜单弹层：" + (input.detail || "escape"))
-      await saveTask(workspace, task, "正在填写申请平台", "已关闭原生下拉/菜单弹层，准备继续填写。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "dismissed native menu")
-      return "原生菜单弹层已关闭。\n" + String(res.stdout || "")
-    }
-    if (input.action === "dismiss_dialog") {
-      if (!input.pid) throw new Error("dismiss_dialog requires pid")
-      const matchText = String(input.matchText || input.detail || "").trim().toLowerCase()
-      const candidateWindowIds: number[] = []
-      if (input.windowId) candidateWindowIds.push(Number(input.windowId))
-      if (!candidateWindowIds.length) {
-        try {
-          const windowsRes = await execCua(workspace, auditAction, ["call", "list_windows", "--compact"], 10000)
-          const parsed = JSON.parse(String(windowsRes.stdout || "{}"))
-          const windows = Array.isArray(parsed.windows) ? parsed.windows : []
-          for (const window of windows) {
-            if (Number(window.pid) !== Number(input.pid)) continue
-            const title = String(window.title || "")
-            const looksLikeDialog = /显示|alert|confirm|prompt|dialog|required|验证|提示/i.test(title) || (Number(window.bounds?.width || 0) <= 700 && Number(window.bounds?.height || 0) <= 300)
-            if (looksLikeDialog) candidateWindowIds.push(Number(window.window_id))
-          }
-        } catch (error: any) {
-          await appendLog(workspace, "cua", "查找浏览器弹窗窗口失败，将尝试当前窗口按键关闭：" + String(error?.message || error))
-        }
-      }
-      if (!candidateWindowIds.length && input.windowId) candidateWindowIds.push(Number(input.windowId))
-      if (!candidateWindowIds.length) throw new Error("dismiss_dialog could not find candidate dialog windows")
-
-      const attempts: string[] = []
-      for (const windowId of candidateWindowIds) {
-        let tree = ""
-        try {
-          const state = await execCua(workspace, auditAction, ["call", "get_window_state", JSON.stringify({ pid: input.pid, window_id: windowId }), "--compact"], 10000)
-          tree = String(state.stdout || "")
-        } catch (error: any) {
-          attempts.push("get_window_state failed for " + windowId + ": " + String(error?.message || error))
-        }
-        if (matchText && tree && !tree.toLowerCase().includes(matchText)) {
-          attempts.push("dialog " + windowId + " did not match: " + matchText)
-          continue
-        }
-        const buttonMatch = tree.match(/\[(\d+)\]\s+AXButton[^\n]*(确定|OK|Ok|好|关闭|Close|Continue|继续|Yes|是)/)
-        try {
-          if (buttonMatch) {
-            const res = await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: windowId, element_index: Number(buttonMatch[1]) })], 10000)
-            await appendLog(workspace, "cua", "已关闭浏览器弹窗：" + (input.detail || matchText || "未命名弹窗"))
-            await appendAudit(workspace, "cua", auditAction, "completed", "dismissed dialog by button")
-            return "弹窗已关闭（按钮）。\n" + String(res.stdout || "") + (tree ? "\n\n弹窗内容：\n" + tree.slice(0, 1200) : "")
-          }
-          const res = await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: windowId, key: "return" })], 10000)
-          await appendLog(workspace, "cua", "已通过 Return 关闭浏览器弹窗：" + (input.detail || matchText || "未命名弹窗"))
-          await appendAudit(workspace, "cua", auditAction, "completed", "dismissed dialog by return")
-          return "弹窗已关闭（Return）。\n" + String(res.stdout || "") + (tree ? "\n\n弹窗内容：\n" + tree.slice(0, 1200) : "")
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("dismiss failed for " + windowId + ": " + message)
-        }
-      }
-      if (!Array.isArray(progress.failedActions)) progress.failedActions = []
-      progress.failedActions.push({ at: new Date().toISOString(), action: "dismiss_dialog", reason: attempts.join("\n"), page: progress.currentPage || "" })
+      const pageName = String(input.detail || input.pageTitle || progress.currentPage || "申请页面")
+      if (!Array.isArray(progress.savedPages)) progress.savedPages = []
+      progress.savedPages.push({ at: new Date().toISOString(), page: pageName, url: input.currentUrl || progress.currentUrl || "", backend: "ego-browser", evidence: input.evidence || "" })
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", "关闭浏览器弹窗失败：" + attempts.join(" | "))
-      await appendAudit(workspace, "cua", auditAction, "failed", attempts.join("\n"))
-      return "dismiss_dialog failed.\n" + attempts.join("\n")
+      await appendLog(workspace, "cua", "ego-browser 已验证保存页面：" + pageName)
+      await saveTask(workspace, task, "正在保存申请进度", "已通过 ego-browser 保存并复查当前页面：" + pageName)
+      await appendAudit(workspace, "cua", auditAction, "completed", "verified save via ego-browser")
+      return "页面已记录为 ego-browser 验证保存。继续下一页前请再次 snapshotText/pageInfo。"
     }
-    if (input.action === "inspect_controls") {
-      if (!input.pid || !input.windowId) throw new Error("inspect_controls requires pid and windowId")
-      const js = "(function(){"
-        + "const norm=(v)=>String(v||'').trim().replace(/\\s+/g,' ');"
-        + "const cssPath=(el)=>{if(!el||!el.tagName)return '';if(el.id)return '#'+CSS.escape(el.id);const parts=[];let cur=el;while(cur&&cur.nodeType===1&&parts.length<5){let part=cur.tagName.toLowerCase();if(cur.name)part+='[name=\"'+String(cur.name).replace(/\"/g,'\\\\\"')+'\"]';else{const p=cur.parentElement;if(p){const same=Array.from(p.children).filter(x=>x.tagName===cur.tagName);if(same.length>1)part+=':nth-of-type('+(same.indexOf(cur)+1)+')';}}parts.unshift(part);cur=cur.parentElement;}return parts.join(' > ');};"
-        + "const labelFor=(el)=>{const id=el.id;if(id){const l=document.querySelector('label[for=\"'+CSS.escape(id)+'\"]');if(l)return norm(l.innerText||l.textContent);}let cur=el;for(let i=0;i<4&&cur;i++,cur=cur.parentElement){const own=cur.querySelector&&cur.querySelector('label');if(own)return norm(own.innerText||own.textContent);const prev=cur.previousElementSibling;if(prev&&/label|div|span|p|td|th/i.test(prev.tagName)){const t=norm(prev.innerText||prev.textContent);if(t&&t.length<120)return t;}}return norm(el.getAttribute('aria-label')||el.getAttribute('placeholder')||el.name||el.id);};"
-        + "const visible=(el)=>!!(el&&el.offsetParent!==null&&getComputedStyle(el).visibility!=='hidden');"
-        + "const controls=Array.from(document.querySelectorAll('select,input,textarea,button,[role=combobox],[aria-haspopup=listbox],[role=listbox]')).filter(visible).slice(0,120).map((el,index)=>{const tag=el.tagName.toLowerCase();const options=tag==='select'?Array.from(el.options).map(o=>({label:norm(o.textContent),value:o.value,selected:o.selected})).slice(0,80):[];return {index,tag,type:el.getAttribute('type')||'',role:el.getAttribute('role')||'',name:el.getAttribute('name')||'',id:el.id||'',label:labelFor(el),selector:cssPath(el),value:tag==='select'?(el.selectedOptions[0]?.textContent||el.value||''):(el.value||el.getAttribute('aria-valuetext')||''),disabled:!!el.disabled||el.getAttribute('aria-disabled')==='true',options};});"
-        + "const nativeSelectHints=controls.filter(c=>c.tag==='select').map(c=>({label:c.label,selector:c.selector,value:c.value,options:c.options.map(o=>o.label).filter(Boolean)}));"
-        + "return {ok:true,controlCount:controls.length,nativeSelectHints,controls};"
-        + "})()"
-      let res
-      try {
-        res = await execCua(workspace, auditAction, ["call", "page", JSON.stringify({ pid: input.pid, window_id: input.windowId, action: "execute_javascript", javascript: js })], 30000)
-      } catch (error: any) {
-        const message = String(error?.message || error)
-        if (isCuaDomUnavailableSignal(message)) {
-          await appendLog(workspace, "cua", "DOM 控件识别不可用，已切换为 AX/键盘填表策略。")
-          await appendAudit(workspace, "cua", auditAction, "failed", message)
-          return "DOM_INSPECT_UNAVAILABLE: " + message + "\n请改用 capture_state 获取 AX 树，并对简单连续输入框使用 type_text replace 或 keyboard_fill_sequence。"
-        }
-        throw error
+    if (input.action === "complete_ego_task") {
+      ensureCuaProgress(progress)
+      progress.egoBrowser = {
+        ...(progress.egoBrowser || {}),
+        taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "",
+        completedAt: new Date().toISOString(),
+        completionDetail: input.detail || "",
       }
-      await appendLog(workspace, "cua", "已识别页面表单控件。遇到系统样式原生下拉框时，应直接用 select_option，不要先盲目 Escape。")
-      await saveTask(workspace, task, "正在填写申请平台", "已识别当前页面的表单控件和下拉选项。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "inspected form controls")
-      return "页面控件识别结果。若截图中出现系统样式下拉弹层，请不要坐标点击；直接 select_option，只有确实需要关闭已打开菜单时才 dismiss_native_menu。\n" + String(res.stdout || "")
-    }
-    if (input.action === "click_element") {
-      if (!input.pid) throw new Error("click_element requires pid")
-      if (input.detail) {
-        const checked = await risk.execute({ input: { action: input.detail, page: progress.currentPage || "" } }, ctx as any)
-        if (String(checked).startsWith("BLOCKED")) return checked
-      }
-      const payload: any = { pid: input.pid }
-      if (input.elementIndex !== undefined) {
-        if (!input.windowId) throw new Error("click_element with elementIndex requires windowId")
-        payload.window_id = input.windowId
-        payload.element_index = input.elementIndex
-      } else {
-        if (input.x === undefined || input.y === undefined) throw new Error("click_element requires either elementIndex or x/y")
-        payload.x = input.x
-        payload.y = input.y
-        if (input.windowId) payload.window_id = input.windowId
-      }
-      const res = await execCua(workspace, auditAction, ["call", "click", JSON.stringify(payload)], 30000)
-      await appendLog(workspace, "cua", "已点击页面元素：" + (input.detail || String(input.elementIndex ?? "")))
-      await saveTask(workspace, task, "正在填写申请平台", "已点击申请页面中的可确认元素。")
-      await appendAudit(workspace, "cua", auditAction, "completed", input.detail || "clicked element")
-      return "点击已执行。\n" + String(res.stdout || "")
-    }
-    if (input.action === "dom_set_field") {
-      if (!input.pid || !input.windowId || !input.cssSelector || input.text === undefined) throw new Error("dom_set_field requires pid, windowId, cssSelector, and text")
-      const value = String(input.text)
-      const js = "(function(){"
-        + "const selector=" + JSON.stringify(String(input.cssSelector || "")) + ";"
-        + "const value=" + JSON.stringify(value) + ";"
-        + "const norm=(v)=>String(v||'').trim().toLowerCase().replace(/\\s+/g,' ');"
-        + "const fire=(el,type)=>el.dispatchEvent(new Event(type,{bubbles:true}));"
-        + "const setNative=(el,next)=>{const proto=Object.getPrototypeOf(el);const desc=Object.getOwnPropertyDescriptor(proto,'value')||Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')||Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')||Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value');if(desc&&desc.set)desc.set.call(el,next);else el.value=next;fire(el,'input');fire(el,'change');};"
-        + "const el=document.querySelector(selector);"
-        + "if(!el)return {ok:false,reason:'selector not found',selector};"
-        + "if(el.disabled||el.getAttribute('aria-disabled')==='true')return {ok:false,reason:'field disabled',selector};"
-        + "if(el.tagName==='SELECT'){const opts=Array.from(el.options);const opt=opts.find(o=>norm(o.value)===norm(value)||norm(o.textContent)===norm(value)||norm(o.textContent).includes(norm(value))||norm(value).includes(norm(o.textContent)));if(!opt)return {ok:false,reason:'select option not found',selector,value,options:opts.map(o=>({label:o.textContent,value:o.value})).slice(0,60)};el.value=opt.value;fire(el,'input');fire(el,'change');return {ok:true,method:'dom-select',selector,selected:opt.textContent,value:opt.value};}"
-        + "el.focus();setNative(el,value);return {ok:true,method:'dom-set-value',selector,value};"
-        + "})()"
-      try {
-        const res = await execCua(workspace, auditAction, ["call", "page", JSON.stringify({ pid: input.pid, window_id: input.windowId, action: "execute_javascript", javascript: js })], 30000)
-        const output = String(res.stdout || "")
-        if (!/"ok"\s*:\s*true/.test(output) && !/ok.*true/.test(output)) {
-          throw new Error("DOM set returned no match: " + output)
-        }
-        await appendLog(workspace, "cua", "已通过 DOM 设置字段：" + (input.detail || input.cssSelector))
-        await saveTask(workspace, task, "正在填写申请平台", "已通过页面级自动化填写字段：" + (input.detail || "普通字段"))
-        await appendAudit(workspace, "cua", auditAction, "completed", input.detail || "dom set field")
-        return "字段已通过 DOM 设置。\n" + output
-      } catch (error: any) {
-        const message = String(error?.message || error)
-        if (isCuaDomUnavailableSignal(message)) {
-          await appendLog(workspace, "cua", "DOM 字段设置不可用，需改用 AX/键盘：" + (input.detail || input.cssSelector))
-          await appendAudit(workspace, "cua", auditAction, "failed", message)
-          return "DOM_SET_UNAVAILABLE: " + message + "\n请改用 set_value、type_text 或 keyboard_fill_sequence。"
-        }
-        throw error
-      }
-    }
-    if (input.action === "type_text") {
-      if (!input.pid || !input.text) throw new Error("type_text requires pid and text")
-      const payload: any = { pid: input.pid, text: input.text }
-      if (input.elementIndex !== undefined) {
-        if (!input.windowId) throw new Error("type_text with elementIndex requires windowId")
-        payload.window_id = input.windowId
-        payload.element_index = input.elementIndex
-      }
-      if (typeof input.delayMs === "number") payload.delay_ms = Math.max(0, Math.min(200, Math.round(input.delayMs)))
-      if (input.replace) {
-        const focusPayload: any = { pid: input.pid, key: "a", modifiers: ["cmd"] }
-        if (input.windowId) focusPayload.window_id = input.windowId
-        if (input.elementIndex !== undefined) focusPayload.element_index = input.elementIndex
-        try {
-          await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify(focusPayload)], 10000)
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          await appendLog(workspace, "cua", "替换输入前选择已有内容失败，将尝试直接输入：" + message)
-        }
-      }
-      const res = await execCua(workspace, auditAction, ["call", "type_text", JSON.stringify(payload)], 30000)
-      await appendLog(workspace, "cua", "已填写普通字段：" + (input.detail || "未命名字段"))
-      await saveTask(workspace, task, "正在填写申请平台", "已填写一个可确认字段：" + (input.detail || "普通字段"))
-      await appendAudit(workspace, "cua", auditAction, "completed", input.detail || "typed text")
-      return "文本已输入。\n" + String(res.stdout || "")
-    }
-    if (input.action === "set_value") {
-      if (!input.pid || !input.windowId || input.elementIndex === undefined || !input.text) throw new Error("set_value requires pid, windowId, elementIndex, and text")
-      const payload = { pid: input.pid, window_id: input.windowId, element_index: input.elementIndex, value: input.text }
-      const res = await execCua(workspace, auditAction, ["call", "set_value", JSON.stringify(payload)], 30000)
-      await appendLog(workspace, "cua", "已设置字段值：" + (input.detail || "未命名字段"))
-      await saveTask(workspace, task, "正在填写申请平台", "已设置一个可确认字段：" + (input.detail || "普通字段"))
-      await appendAudit(workspace, "cua", auditAction, "completed", input.detail || "set value")
-      return "字段值已设置。\n" + String(res.stdout || "")
-    }
-    if (input.action === "select_option") {
-      if (!input.pid || !input.windowId) throw new Error("select_option requires pid and windowId")
-      const desired = String(input.optionLabel || input.optionValue || input.text || "").trim()
-      if (!desired) throw new Error("select_option requires optionLabel, optionValue, or text")
-      const attempts = []
-      if (input.elementIndex !== undefined) {
-        try {
-          const payload = { pid: input.pid, window_id: input.windowId, element_index: input.elementIndex, value: desired }
-	          const res = await execCua(workspace, auditAction, ["call", "set_value", JSON.stringify(payload)], 30000)
-	          await appendLog(workspace, "cua", "已智能选择下拉项（AX set_value）：" + (input.detail || desired))
-	          await saveTask(workspace, task, "正在填写申请平台", "已选择下拉项：" + (input.detail || desired))
-	          await appendAudit(workspace, "cua", auditAction, "completed", "selected option by AX")
-	          return "下拉项已选择（AX set_value）。\n" + String(res.stdout || "")
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("AX set_value failed: " + message)
-        }
-      }
-
-      if (input.elementIndex !== undefined) {
-        try {
-          await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: input.elementIndex, action: "press" })], 10000)
-          await sleep(300)
-          const state = await execCua(workspace, auditAction, ["call", "get_window_state", JSON.stringify({ pid: input.pid, window_id: input.windowId, query: desired, capture_mode: "ax" }), "--compact"], 15000)
-          const optionIndex = findAxSelectableOptionIndex(String(state.stdout || ""), desired)
-          if (optionIndex !== undefined) {
-            const res = await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: optionIndex, action: "press" })], 10000)
-            await appendLog(workspace, "cua", "已智能选择下拉项（AX popup menu）：" + (input.detail || desired))
-            await saveTask(workspace, task, "正在填写申请平台", "已选择下拉项：" + (input.detail || desired))
-            await appendAudit(workspace, "cua", auditAction, "completed", "selected option by AX popup menu")
-            return "下拉项已选择（AX popup menu）。\n" + String(res.stdout || "")
-          }
-          attempts.push("AX popup menu did not expose matching option: " + desired)
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("AX popup menu fallback failed: " + message)
-        }
-      }
-
-      const js = "(function(){"
-        + "const wanted=" + JSON.stringify(desired) + ";"
-        + "const wantedValue=" + JSON.stringify(String(input.optionValue || desired)) + ";"
-        + "const selector=" + JSON.stringify(String(input.cssSelector || "")) + ";"
-        + "const labelHint=" + JSON.stringify(String(input.detail || "")) + ";"
-        + "const norm=(v)=>String(v||'').trim().toLowerCase().replace(/\\s+/g,' ');"
-        + "const fire=(el,type)=>el.dispatchEvent(new Event(type,{bubbles:true}));"
-        + "const setNative=(el,value)=>{const proto=Object.getPrototypeOf(el);const desc=Object.getOwnPropertyDescriptor(proto,'value')||Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')||Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value');if(desc&&desc.set)desc.set.call(el,value);else el.value=value;fire(el,'input');fire(el,'change');};"
-        + "const byLabel=()=>{if(!labelHint)return null;const labels=Array.from(document.querySelectorAll('label'));const hit=labels.find(l=>norm(l.innerText).includes(norm(labelHint)));if(!hit)return null;if(hit.htmlFor)return document.getElementById(hit.htmlFor);return hit.querySelector('select,input,[role=combobox],button,[aria-haspopup=listbox]');};"
-        + "const controls=[];"
-        + "if(selector){const el=document.querySelector(selector);if(el)controls.push(el);}"
-        + "const labeled=byLabel();if(labeled)controls.push(labeled);"
-        + "controls.push(...document.querySelectorAll('select,input[role=combobox],input[aria-autocomplete],button[aria-haspopup=listbox],[role=combobox],[aria-haspopup=listbox]'));"
-        + "for(const el of Array.from(new Set(controls))){"
-        + " if(!el||el.disabled||el.getAttribute('aria-disabled')==='true')continue;"
-        + " if(el.tagName==='SELECT'){const opts=Array.from(el.options);const opt=opts.find(o=>norm(o.textContent)===norm(wanted)||norm(o.value)===norm(wantedValue)||norm(o.textContent).includes(norm(wanted))||norm(wanted).includes(norm(o.textContent)));if(opt){el.value=opt.value;fire(el,'input');fire(el,'change');return {ok:true,method:'dom-select',selected:opt.textContent,value:opt.value};}}"
-        + " if(el.matches('input,[role=combobox]')){el.focus();setNative(el,wanted);el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',bubbles:true}));return {ok:true,method:'dom-combobox-query',selected:wanted};}"
-        + "}"
-        + "return {ok:false,reason:'No matching select/combobox found',wanted,selector,labelHint};"
-        + "})()"
-      try {
-        const res = await execCua(workspace, auditAction, ["call", "page", JSON.stringify({ pid: input.pid, window_id: input.windowId, action: "execute_javascript", javascript: js })], 30000)
-        const output = String(res.stdout || "")
-	        if (/"ok"\s*:\s*true/.test(output) || /ok.*true/.test(output)) {
-	          await appendLog(workspace, "cua", "已智能选择下拉项（DOM）：" + (input.detail || desired))
-	          await saveTask(workspace, task, "正在填写申请平台", "已选择下拉项：" + (input.detail || desired))
-	          await appendAudit(workspace, "cua", auditAction, "completed", "selected option by DOM")
-	          return "下拉项已选择（DOM smart select）。\n" + output
-        }
-        attempts.push("DOM smart select returned no match: " + output)
-      } catch (error: any) {
-        const message = String(error?.message || error)
-        if (isCuaStopSignal(message)) {
-          await saveTask(workspace, task, "异常中断", "Chrome DOM 通道不可用或 CUA 已停止，已停止下拉选择，避免继续抢占 Chrome 前台。")
-          await appendAudit(workspace, "cua", auditAction, "failed", message)
-          return "BLOCKED: " + message
-        }
-        attempts.push("DOM smart select failed: " + message)
-      }
-
-      if (input.elementIndex !== undefined) {
-        try {
-          await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, key: "escape" })], 5000).catch(() => {})
-          await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: input.elementIndex })], 10000)
-          await sleep(140)
-          await pressCuaTypeahead(workspace, auditAction, Number(input.pid), Number(input.windowId), desired)
-          const res = await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, key: "return" })], 10000)
-          await appendLog(workspace, "cua", "已智能选择下拉项（原生菜单键盘兜底）：" + (input.detail || desired))
-          await saveTask(workspace, task, "正在填写申请平台", "已通过原生菜单键盘选择下拉项：" + (input.detail || desired))
-          await appendAudit(workspace, "cua", auditAction, "completed", "selected option by native keyboard fallback")
-          return "下拉项已通过原生菜单键盘兜底选择。\n" + String(res.stdout || "")
-        } catch (error: any) {
-          const message = String(error?.message || error)
-          if (isCuaStopSignal(message)) {
-            await saveTask(workspace, task, "异常中断", "CUA 已停止或自动熔断，避免继续强制拉起 Chrome 前台。")
-            await appendAudit(workspace, "cua", auditAction, "failed", message)
-            return "BLOCKED: " + message
-          }
-          attempts.push("keyboard fallback failed: " + message)
-        }
-      }
-
-      if (!Array.isArray(progress.failedActions)) progress.failedActions = []
-      progress.failedActions.push({ at: new Date().toISOString(), action: "select_option", reason: attempts.join("\n"), page: progress.currentPage || "", detail: input.detail || desired })
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", "智能选择下拉项失败：" + (input.detail || desired))
-      await appendAudit(workspace, "cua", auditAction, "failed", attempts.join("\n"))
-      return "select_option failed. Do not guess by visual coordinates unless the consultant explicitly confirms.\n" + attempts.join("\n")
-    }
-    if (input.action === "keyboard_fill_sequence") {
-      if (!input.pid || !input.windowId) throw new Error("keyboard_fill_sequence requires pid and windowId")
-      const values = Array.isArray(input.values) ? input.values : []
-      if (values.length === 0) throw new Error("keyboard_fill_sequence requires non-empty values")
-      const normalized = values.map((item: any, index: number) => {
-        if (typeof item === "string" || typeof item === "number") return { text: String(item), detail: "field " + String(index + 1), replace: input.replace !== false }
-        return {
-          text: String(item?.text ?? ""),
-          detail: String(item?.detail || "field " + String(index + 1)),
-          replace: item?.replace ?? input.replace !== false,
-        }
-      }).filter((item: any) => item.text.length > 0)
-      if (normalized.length === 0) throw new Error("keyboard_fill_sequence values contain no text")
-
-      if (input.elementIndex !== undefined) {
-        await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, element_index: input.elementIndex, key: "a", modifiers: ["cmd"] })], 10000)
-      } else if (input.x !== undefined && input.y !== undefined) {
-        await execCua(workspace, auditAction, ["call", "click", JSON.stringify({ pid: input.pid, window_id: input.windowId, x: input.x, y: input.y })], 10000)
-        if (input.replace !== false) await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, key: "a", modifiers: ["cmd"] })], 10000)
-      } else if (input.replace !== false) {
-        await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, key: "a", modifiers: ["cmd"] })], 10000)
-      }
-
-      const completed: string[] = []
-      for (let index = 0; index < normalized.length; index += 1) {
-        const item = normalized[index]
-        if (index > 0 && item.replace) {
-          await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, key: "a", modifiers: ["cmd"] })], 10000).catch(() => {})
-        }
-        const payload: any = { pid: input.pid, text: item.text }
-        if (typeof input.delayMs === "number") payload.delay_ms = Math.max(0, Math.min(200, Math.round(input.delayMs)))
-        await execCua(workspace, auditAction, ["call", "type_text", JSON.stringify(payload)], 30000)
-        completed.push(item.detail + "=" + item.text)
-        if (index < normalized.length - 1 && input.tabAfterEach !== false) {
-          await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify({ pid: input.pid, window_id: input.windowId, key: "tab" })], 10000)
-        }
-      }
-
-      if (!Array.isArray(progress.keyboardFilledFields)) progress.keyboardFilledFields = []
-      progress.keyboardFilledFields.push({ at: new Date().toISOString(), detail: input.detail || "keyboard fill sequence", values: completed, page: progress.currentPage || "" })
-      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", "已通过键盘顺序填写连续字段：" + (input.detail || completed.join(", ")))
-      await saveTask(workspace, task, "正在填写申请平台", "已通过键盘顺序填写连续字段：" + (input.detail || String(completed.length) + " 个字段"))
-      await appendAudit(workspace, "cua", auditAction, "completed", input.detail || completed.join(", "))
-      return "连续字段已通过键盘顺序填写。\n" + completed.join("\n")
-    }
-    if (input.action === "press_key") {
-      if (!input.pid || !input.key) throw new Error("press_key requires pid and key")
-      const payload: any = { pid: input.pid, key: input.key }
-      if (Array.isArray(input.modifiers)) payload.modifiers = input.modifiers
-      if (input.windowId) payload.window_id = input.windowId
-      if (input.elementIndex !== undefined) payload.element_index = input.elementIndex
-      const res = await execCua(workspace, auditAction, ["call", "press_key", JSON.stringify(payload)], 30000)
-      await appendLog(workspace, "cua", "已按键：" + input.key)
-      await saveTask(workspace, task, "正在填写申请平台", "已执行页面按键：" + input.key)
-      await appendAudit(workspace, "cua", auditAction, "completed", input.key)
-      return "按键已执行。\n" + String(res.stdout || "")
+      await appendLog(workspace, "cua", "ego-browser task space 完成：" + (input.detail || "本轮填表阶段完成。"))
+      await saveTask(workspace, task, "阶段性完成", input.detail || "本轮 ego-browser 填表阶段已完成。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "completed ego-browser task")
+      return "ego-browser task space 完成状态已记录。若页面需要留给顾问复核，请确保 ego-browser 脚本已 completeTaskSpace(task.id, { keep:true })。"
     }
     if (input.action === "record_saved") {
       ensureCuaProgress(progress)
       appendLimited(progress, "unverifiedSaveRequests", { at: new Date().toISOString(), detail: input.detail || progress.currentPage || "申请页面", page: progress.currentPage || "" })
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       await appendLog(workspace, "cua", "收到未验证保存记录请求，未写入 savedPages：" + (input.detail || "申请页面"))
-      await saveTask(workspace, task, "正在保存申请进度", "保存请求已记录，但必须调用 save_page_verified 复查后才算保存成功。")
+      await saveTask(workspace, task, "正在保存申请进度", "保存请求已记录，但必须通过 ego-browser 保存前检查和保存后复查，再调用 record_save_verified 才算保存成功。")
       await appendAudit(workspace, "cua", auditAction, "completed", input.detail || "unverified save request")
-      return "UNVERIFIED_SAVE_RECORDED: record_saved 不再把页面计为保存成功。请调用 save_page_verified 完成保存前检查、点击保存、保存后复查，再写入 savedPages。"
+      return "UNVERIFIED_SAVE_RECORDED: record_saved 不再把页面计为保存成功。请先用 ego-browser 完成保存前检查、点击保存、保存后复查，再以 confirmed:true 调用 record_save_verified 写入 savedPages。"
     }
     if (input.action === "record_upload") {
       if (!Array.isArray(progress.uploadedMaterials)) progress.uploadedMaterials = []
@@ -2526,7 +1480,7 @@ export async function writeOpenCodeConfig(workspacePath: string) {
   await writeFile(
     join(base, "agents/application-agent.md"),
     `---
-description: Terra-Edu 留学申请 Agent，服务留学顾问完成申请资料整理、缺失项识别、Word 清单和 CUA 填表。
+description: Terra-Edu 留学申请 Agent，服务留学顾问完成申请资料整理、缺失项识别、Word 清单和 ego-browser 填表。
 mode: primary
 model: opencode-go/deepseek-v4-pro
 permission:
@@ -2548,6 +1502,7 @@ ${DEFAULT_APPLICATION_PROMPT}
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, "SKILL.md"), renderSkill(skill), "utf8")
   }
+  await writeEgoBrowserSkill(base)
   for (const command of COMMAND_DEFINITIONS) {
     await writeFile(join(base, "commands", `${command[0]}.md`), renderCommand(command), "utf8")
   }

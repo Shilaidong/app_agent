@@ -795,7 +795,7 @@ function ApplicationAgentShell(props: {
     setError(null)
     try {
       await window.api.stopApplicationAutomation(task()?.workspacePath)
-      setRestoreNotice("已停止 CUA 自动化，并把窗口焦点释放回申请 Agent。")
+      setRestoreNotice("已停止浏览器自动化，并把窗口焦点释放回申请 Agent。")
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -965,7 +965,7 @@ function ApplicationAgentShell(props: {
         lastAutomationNotificationKey = stopKey
         window.api.showNotification(
           "申请 Agent 自动化已停止",
-          latestProgressMessage || "CUA 已停止，避免继续抢占 Chrome 前台。请回到申请 Agent 查看下一步。",
+          latestProgressMessage || "浏览器自动化已停止。请回到申请 Agent 查看下一步。",
         )
       }
       setTask(latestTask)
@@ -1337,7 +1337,7 @@ function ApplicationAgentShell(props: {
                 <h2>快捷操作</h2>
                 <div class="quick-actions">
                   <For each={quickCommands}>{(command) => <button type="button" disabled={busy()} onClick={() => runCommand(command)}>{command}</button>}</For>
-                  <button type="button" class="danger-outline" onClick={stopAutomation}>停止 CUA / 释放鼠标</button>
+                  <button type="button" class="danger-outline" onClick={stopAutomation}>停止自动化 / 释放控制</button>
                   <button type="button" class="danger-outline" onClick={blockSubmit}>测试高风险拦截</button>
                 </div>
               </section>
@@ -1369,7 +1369,7 @@ function ApplicationAgentShell(props: {
                     </div>
                   </div>
                   <div class="workspace-actions">
-                    <button type="button" class="danger-outline" onClick={stopAutomation}>停止 CUA</button>
+                    <button type="button" class="danger-outline" onClick={stopAutomation}>停止自动化</button>
                     <button type="button" onClick={() => setShowOpenCode(true)}>进入 OpenCode 对话</button>
                     <button type="button" onClick={() => window.api.openPath(currentTask().workspacePath)}>打开申请工作区</button>
                   </div>

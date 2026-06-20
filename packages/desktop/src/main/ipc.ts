@@ -283,7 +283,7 @@ export function registerIpcHandlers(deps: Deps) {
           {
             stopped: true,
             stoppedAt: now,
-            reason: "顾问手动停止 CUA 自动化，释放 Chrome/鼠标焦点。",
+            reason: "顾问手动停止浏览器自动化，释放页面控制。",
             recentActions: [],
             consecutiveFailures: 0,
             updatedAt: now,
@@ -296,7 +296,7 @@ export function registerIpcHandlers(deps: Deps) {
       await mkdir(join(workspacePath, "04_logs"), { recursive: true })
       await writeFile(
         join(workspacePath, "04_logs/cua_log.md"),
-        "- " + now + " 顾问手动停止 CUA 自动化，已强制释放 Chrome/鼠标焦点。\n",
+        "- " + now + " 顾问手动停止浏览器自动化，已尝试释放页面控制。\n",
         { encoding: "utf8", flag: "a" },
       )
       await writeFile(
@@ -305,7 +305,7 @@ export function registerIpcHandlers(deps: Deps) {
         "utf8",
       )
     }
-    showNotification("CUA 自动化已停止", "已释放 Chrome/鼠标焦点。需要继续时，请回到申请 Agent 点击继续填表。")
+    showNotification("申请 Agent 自动化已停止", "已尝试释放浏览器控制。需要继续时，请回到申请 Agent 点击继续填表。")
     const win = BrowserWindow.getAllWindows().find((item) => !item.isDestroyed())
     if (win) {
       if (win.isMinimized()) win.restore()
