@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 
@@ -12,6 +12,8 @@ const builderSource = readFileSync(join(root, "electron-builder.config.ts"), "ut
 const egoSkillSource = readFileSync(join(root, "resources/ego-browser/SKILL.md"), "utf8")
 const egoInstallSource = readFileSync(join(root, "resources/ego-browser/references/install.md"), "utf8")
 const egoInstallScript = readFileSync(join(root, "resources/ego-browser/scripts/install.sh"), "utf8")
+const vendoredEgoLiteApp = join(root, "resources/vendor/ego-lite/ego lite.app")
+const vendoredEgoLiteInfoPlist = join(vendoredEgoLiteApp, "Contents/Info.plist")
 const source = [applicationSource, opencodeSource, modelSource].join("\n")
 const authSource = readFileSync(join(root, "src/main/terra-auth.ts"), "utf8")
 const rendererSource = readFileSync(join(root, "src/renderer/index.tsx"), "utf8")
@@ -88,6 +90,17 @@ function assert(condition: unknown, message: string) {
   }
 }
 
+function listFiles(rootPath: string): string[] {
+  if (!existsSync(rootPath)) return []
+  const out: string[] = []
+  for (const entry of readdirSync(rootPath, { withFileTypes: true })) {
+    const full = join(rootPath, entry.name)
+    if (entry.isDirectory()) out.push(...listFiles(full))
+    if (entry.isFile()) out.push(full)
+  }
+  return out
+}
+
 function countMatches(pattern: RegExp) {
   return [...source.matchAll(pattern)].length
 }
@@ -133,13 +146,30 @@ assert(source.includes("completeTaskSpace"), "ego-browser completion SOP is miss
 assert(source.includes("writeEgoBrowserSkill"), "Workspace generator must install bundled ego-browser skill")
 assert(source.includes("readBundledEgoBrowserResource"), "Bundled ego-browser resource loader is missing")
 assert(source.includes("TERRA_PINNED.md"), "Workspace generator must mark ego-browser skill as Terra pinned")
+assert(source.includes("writeEgoBrowserWrapper"), "Workspace generator must install Terra ego-browser wrapper")
+assert(source.includes("EGO_LITE_VENDOR_VERSION = \"0.4.2.15\""), "Vendored ego lite version pin is missing")
+assert(source.includes("EgoUpdater.app") && source.includes("EgoSoftwareUpdate.bundle"), "Terra ego-browser wrapper must refuse bundled updater components")
+assert(source.includes("open -gj \"$APP_PATH\""), "Terra ego-browser wrapper must launch bundled ego lite before invoking the helper")
+assert(source.includes("PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs"), "Prompts/tools must invoke Terra ego-browser wrapper before PATH fallback")
 assert(source.includes("TERRA_EGO_BROWSER_ALLOW_INSTALL=1"), "Start prompt must forbid automatic ego lite install/update")
 assert(constantsSource.includes("export const UPDATER_ENABLED = false"), "Terra private build must disable Electron auto-updates")
 assert(!builderSource.includes("owner: \"anomalyco\""), "Electron builder must not publish/check updates from upstream OpenCode repos")
+assert(builderSource.includes("resources/vendor/ego-lite/"), "Electron builder must package vendored ego lite as extra resource")
+assert(builderSource.includes("!resources/vendor/**"), "Electron builder must keep vendored ego lite out of app.asar")
 assert(egoSkillSource.includes("Terra-Edu pinned-build policy"), "Bundled ego-browser skill must declare pinned-build policy")
+assert(egoSkillSource.includes("PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser"), "Bundled ego-browser skill must use Terra wrapper")
 assert(egoInstallSource.includes("locked by default"), "Bundled ego-browser install instructions must be locked by default")
+assert(egoInstallSource.includes("Do not install or upgrade ego lite from the public website"), "Install docs must forbid public ego lite upgrades")
 assert(egoInstallScript.includes("TERRA_EGO_BROWSER_ALLOW_INSTALL"), "Bundled ego-browser install script must require explicit install unlock")
 assert(!egoInstallScript.includes("install_ego_lite\n\t\tinstalled_app_path") || egoInstallScript.includes("TERRA_EGO_BROWSER_ALLOW_INSTALL"), "Install script must not auto-install ego lite")
+assert(existsSync(vendoredEgoLiteInfoPlist), "Vendored ego lite app must be bundled under resources/vendor/ego-lite")
+assert(!readFileSync(vendoredEgoLiteInfoPlist, "utf8").includes("KSUpdateURL"), "Vendored ego lite must not include Keystone update URL")
+assert(!existsSync(join(vendoredEgoLiteApp, "Contents/Library/LaunchServices/com.citrolabs.ego.UpdaterPrivilegedHelper")), "Vendored ego lite updater helper must be removed")
+const vendoredPaths = listFiles(join(vendoredEgoLiteApp, "Contents"))
+assert(!vendoredPaths.some((file) => /EgoUpdater\.app|EgoSoftwareUpdate\.bundle|\/ksadmin$|\/ksinstall$/.test(file)), "Vendored ego lite updater components must be removed")
+const vendoredHelpers = vendoredPaths.filter((file) => file.endsWith("/ego-browser"))
+assert(vendoredHelpers.length > 0, "Vendored ego lite must include ego-browser helper")
+assert(vendoredHelpers.some((file) => (statSync(file).mode & 0o111) !== 0), "Vendored ego-browser helper must be executable")
 assert(source.includes("application-agent_login"), "Start prompt must mention login tool")
 assert(source.includes("application-agent_risk"), "Start prompt must mention risk tool")
 assert(source.includes("application-agent_requirements"), "Start prompt must mention requirements tool")
@@ -233,10 +263,12 @@ if (workspace) {
 
   const tools = readFileSync(join(opencode, "tools/application-agent.ts"), "utf8")
   for (const tool of expectedTools) assert(tools.includes(`export const ${tool} =`), `Workspace missing tool: ${tool}`)
+  assert(existsSync(join(opencode, "bin/ego-browser")), "Workspace missing Terra ego-browser wrapper")
+  assert((statSync(join(opencode, "bin/ego-browser")).mode & 0o111) !== 0, "Workspace Terra ego-browser wrapper must be executable")
   assert(existsSync(join(opencode, "skills/ego-browser/SKILL.md")), "Workspace missing official ego-browser skill")
   assert(existsSync(join(opencode, "skills/ego-browser/references/install.md")), "Workspace missing ego-browser install reference")
   const egoSkill = readFileSync(join(opencode, "skills/ego-browser/SKILL.md"), "utf8")
-  assert(egoSkill.includes("ego-browser nodejs"), "Workspace ego-browser skill must use official heredoc runtime")
+  assert(egoSkill.includes("PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs"), "Workspace ego-browser skill must use Terra pinned wrapper heredoc runtime")
   assert(egoSkill.includes("useOrCreateTaskSpace"), "Workspace ego-browser skill missing task spaces")
   for (const action of ["prepare_ego_task", "record_observation", "record_field_verified", "record_select_verified", "record_save_verified", "record_blocker"]) {
     assert(tools.includes(action), `Workspace ego-browser CUA coordination tool missing action: ${action}`)

@@ -178,6 +178,8 @@ assertNonEmptyFile(join(workspace, ".opencode/opencode.json"))
 assertNonEmptyFile(join(workspace, ".opencode/agents/application-agent.md"))
 assertNonEmptyFile(join(workspace, ".opencode/prompts/application-agent.md"))
 assertNonEmptyFile(join(workspace, ".opencode/tools/application-agent.ts"))
+assertNonEmptyFile(join(workspace, ".opencode/bin/ego-browser"))
+assert((statSync(join(workspace, ".opencode/bin/ego-browser")).mode & 0o111) !== 0, "Workspace ego-browser wrapper must be executable.")
 
 for (const skill of skills) {
   const file = join(workspace, ".opencode/skills", skill, "SKILL.md")
@@ -192,7 +194,7 @@ if (existsSync(egoBrowserSkillPath)) {
   assertNonEmptyFile(egoBrowserSkillPath)
   assertNonEmptyFile(join(workspace, ".opencode/skills/ego-browser/references/install.md"))
   const egoBrowserSkill = readText(egoBrowserSkillPath)
-  assert(egoBrowserSkill.includes("ego-browser nodejs"), "ego-browser skill must expose official nodejs heredoc workflow.")
+  assert(egoBrowserSkill.includes("PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs"), "ego-browser skill must use Terra-Edu pinned wrapper heredoc workflow.")
   assert(egoBrowserSkill.includes("useOrCreateTaskSpace"), "ego-browser skill must describe task spaces.")
   assert(egoBrowserSkill.includes("handOffTaskSpace"), "ego-browser skill must describe user handoff.")
 } else {

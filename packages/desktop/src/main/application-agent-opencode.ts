@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs"
-import { mkdir, writeFile } from "node:fs/promises"
+import { chmod, mkdir, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
@@ -7,6 +7,7 @@ import type { ApplicationTask } from "./application-agent"
 
 const root = dirname(fileURLToPath(import.meta.url))
 const EGO_BROWSER_SKILL_PIN = "terra-pinned-2026-06-15"
+const EGO_LITE_VENDOR_VERSION = "0.4.2.15"
 
 async function writeJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true })
@@ -25,6 +26,75 @@ function readBundledEgoBrowserResource(relativePath: string) {
     } catch {}
   }
   throw new Error("Missing bundled ego-browser resource: " + relativePath)
+}
+
+function bundledEgoLiteAppPath() {
+  const candidates = [
+    join(root, "../../resources/vendor/ego-lite/ego lite.app"),
+    join(process.resourcesPath ?? "", "vendor/ego-lite/ego lite.app"),
+  ]
+  for (const candidate of candidates) {
+    if (candidate && existsSync(join(candidate, "Contents/Info.plist"))) return candidate
+  }
+  return candidates[0]
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+function renderEgoBrowserWrapper() {
+  const appPath = bundledEgoLiteAppPath()
+  return `#!/bin/sh
+set -eu
+
+APP_PATH=${shellQuote(appPath)}
+EXPECTED_VERSION=${shellQuote(EGO_LITE_VENDOR_VERSION)}
+INFO_PLIST="$APP_PATH/Contents/Info.plist"
+
+die() {
+  printf '%s\\n' "$*" >&2
+  exit 127
+}
+
+[ -d "$APP_PATH" ] || die "Terra-Edu bundled ego lite is missing: $APP_PATH"
+[ -f "$INFO_PLIST" ] || die "Terra-Edu bundled ego lite Info.plist is missing: $INFO_PLIST"
+
+VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST" 2>/dev/null || true)
+[ "$VERSION" = "$EXPECTED_VERSION" ] || die "Terra-Edu bundled ego lite version mismatch: expected $EXPECTED_VERSION, got \${VERSION:-unknown}"
+
+if /usr/libexec/PlistBuddy -c 'Print :KSUpdateURL' "$INFO_PLIST" >/dev/null 2>&1; then
+  die "Terra-Edu bundled ego lite update feed is enabled; refusing to run."
+fi
+
+if [ -e "$APP_PATH/Contents/Library/LaunchServices/com.citrolabs.ego.UpdaterPrivilegedHelper" ]; then
+  die "Terra-Edu bundled ego lite updater helper is present; refusing to run."
+fi
+
+UPDATE_COMPONENT=$(find "$APP_PATH/Contents" \\( -name 'EgoUpdater.app' -o -name 'EgoSoftwareUpdate.bundle' -o -name 'ksadmin' -o -name 'ksinstall' \\) -print -quit 2>/dev/null || true)
+if [ -n "$UPDATE_COMPONENT" ]; then
+  die "Terra-Edu bundled ego lite updater component is present: $UPDATE_COMPONENT"
+fi
+
+HELPER=""
+for candidate in "$APP_PATH"/Contents/Frameworks/*.framework/Versions/*/Helpers/ego-browser; do
+  if [ -x "$candidate" ]; then
+    HELPER="$candidate"
+    break
+  fi
+done
+
+if [ -z "$HELPER" ]; then
+  HELPER=$(find "$APP_PATH/Contents" -type f -name ego-browser 2>/dev/null | head -n 1 || true)
+fi
+
+[ -n "$HELPER" ] && [ -x "$HELPER" ] || die "Terra-Edu bundled ego-browser helper is missing or not executable."
+
+export TERRA_EGO_LITE_APP="$APP_PATH"
+export TERRA_EGO_BROWSER_HELPER="$HELPER"
+open -gj "$APP_PATH" >/dev/null 2>&1 || true
+exec "$HELPER" "$@"
+`
 }
 
 async function writeEgoBrowserSkill(base: string) {
@@ -48,6 +118,14 @@ async function writeEgoBrowserSkill(base: string) {
     ].join("\n"),
     "utf8",
   )
+}
+
+async function writeEgoBrowserWrapper(base: string) {
+  const binBase = join(base, "bin")
+  const wrapper = join(binBase, "ego-browser")
+  await mkdir(binBase, { recursive: true })
+  await writeFile(wrapper, renderEgoBrowserWrapper(), "utf8")
+  await chmod(wrapper, 0o755)
 }
 
 export function buildApplicationAgentStartPrompt(task: ApplicationTask) {
@@ -96,7 +174,7 @@ ${inputJson}
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
 - 如果看到 OpenCode compaction/summary/上下文压缩相关消息，必须把它当作正常维护动作：先读取最新状态文件恢复任务现场，然后继续执行 todowrite 中未完成的下一步。
-- ego-browser skill 是 Terra-Edu 随软件打包的固定快照，不能自动更新、替换或从 ego lite 应用中重新复制。ego lite 浏览器本体也不能自动下载安装或升级；如果 \`ego-browser\` 不存在，只能提示顾问/Owner 手动处理，除非 Owner 明确设置 \`TERRA_EGO_BROWSER_ALLOW_INSTALL=1\`。
+- ego-browser skill 和 ego lite 浏览器都是 Terra-Edu 随软件打包的固定快照。每次运行 ego-browser heredoc 必须使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF'\`，命中 .opencode/bin/ego-browser wrapper；不能调用系统 PATH 中的 ego-browser，不能自动更新、替换、下载或从 ego lite 应用中重新复制。
 - ego-browser 操作必须符合官方 skill：每轮 Bash 用 useOrCreateTaskSpace 或 takeOverTaskSpace 选中同一个申请 task space；用 openOrReuseTab 打开申请链接；用 snapshotText() 观察；用 fillInput、click、js、cdp、pressKey、typeText 等 helper 一次推进一组动作；所有对顾问可见输出必须用 cliLog(...)。
 - 页面里出现下拉、autocomplete、Slate 动态菜单、浏览器 alert/confirm/prompt 时，不要再切回 cua-driver 或坐标硬点。先通过 pageInfo()、snapshotText()、js(...) 或 cdp(...) 判断页面状态；必要时用键盘 typeahead 和 DOM/CDP 组合处理，并在保存前后再次 snapshotText() 或 pageInfo() 验证。
 - 如果 pageInfo() 返回 dialog 信息，必须用 ego-browser 官方建议的 cdp('Page.handleJavaScriptDialog', { accept: false }) 或更安全的取消策略处理；“离开此网站？”/“Leave site?” 一律取消或留在页面，防止未保存表单丢失。
@@ -179,7 +257,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 6. 生成结构化 student_profile.md。
 7. 检查缺失信息和缺失材料，已有信息不要重复要求，并写入 03_state/missing_items.json。
 8. 调用 application-agent_documents，根据 missing_items.json 生成信息表、材料表、Word 清单和总结。
-9. 调用 application-agent_cua 的 prepare_ego_task 记录 ego-browser 填表上下文；随后按官方 ego-browser skill 使用 ego-browser nodejs heredoc 打开申请平台、读取 snapshot、填写字段和保存页面。需要 MFA/验证码时用 handOffTaskSpace 交给顾问，顾问回复继续后 takeOverTaskSpace 恢复。
+9. 调用 application-agent_cua 的 prepare_ego_task 记录 ego-browser 填表上下文；随后按官方 ego-browser skill 使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs\` heredoc 打开申请平台、读取 snapshot、填写字段和保存页面。需要 MFA/验证码时用 handOffTaskSpace 交给顾问，顾问回复继续后 takeOverTaskSpace 恢复。
 10. 能填写的先填写，能保存的先保存；缺失内容跳过并记录，不确定内容用 question 询问顾问。顾问补充材料后，重新读取 06_new_materials，更新档案并继续申请。
 
 可用 Custom Tools：
@@ -200,7 +278,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - bash 允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用普通 bash 临时脚本替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
-- ego-browser skill 是 Terra-Edu 随软件打包的固定快照，不能自动更新、替换或从 ego lite 应用中重新复制。ego lite 浏览器本体也不能自动下载安装或升级；如果 \`ego-browser\` 不存在，只能提示顾问/Owner 手动处理，除非 Owner 明确设置 \`TERRA_EGO_BROWSER_ALLOW_INSTALL=1\`。
+- ego-browser skill 和 ego lite 浏览器都是 Terra-Edu 随软件打包的固定快照。每次运行 ego-browser heredoc 必须使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF'\`，命中 .opencode/bin/ego-browser wrapper；不能调用系统 PATH 中的 ego-browser，不能自动更新、替换、下载或从 ego lite 应用中重新复制。
 - 遇到原生系统样式下拉弹层、Slate 动态菜单、autocomplete、alert 或“离开此网站？”时，不要坐标硬点，也不要切回旧 cua-driver；用 ego-browser 的 snapshotText/pageInfo/js/cdp/键盘策略处理，并在每次选择后复查。
 - 填表必须像真人一样小步推进：每页先 snapshotText/pageInfo；每填 1-3 个字段就复查；遇到新菜单、新字段、alert 或“离开此网站？”先处理阻塞；保存必须在 ego-browser 脚本里保存前检查、保存后复查，再调用 application-agent_cua record_save_verified，不能用 record_saved 直接算成功。
 
@@ -334,7 +412,7 @@ const SKILL_DEFINITIONS = [
     description: "通过 ego-browser / ego lite 打开申请平台、等待顾问登录、识别页面字段、填写可确认信息并保存页面。",
     body: `执行步骤：
 1. 首次进入平台前调用 application-agent_cua，action 使用 prepare_ego_task，记录申请链接、taskSpaceName 和本轮目标。
-2. 按官方 ego-browser skill 使用 Bash heredoc：ego-browser nodejs <<'EOF' ... EOF。每个 heredoc 里先 useOrCreateTaskSpace(name) 或 takeOverTaskSpace(id)，不要新建多个无关 Space。
+2. 按官方 ego-browser skill 使用 Bash heredoc：PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF' ... EOF。每个 heredoc 里先 useOrCreateTaskSpace(name) 或 takeOverTaskSpace(id)，不要新建多个无关 Space。
 3. 首次脚本用 openOrReuseTab(applicationUrl, { wait:true }) 打开申请链接，然后 cliLog 输出 task.id、pageInfo() 和 snapshotText() 摘要。
 4. 如果页面需要登录，优先复用 ego lite 从 Chrome 迁移来的登录态；如需要账号密码，可调用 application-agent_login 辅助登录，但不能输出明文密码。
 5. 如果需要 MFA、验证码、邮箱验证或顾问手动确认，调用 ego-browser 的 handOffTaskSpace(task.id)，并提示顾问完成。顾问明确回复继续后，再用 takeOverTaskSpace(task.id) 恢复，不要自动抢回控制。
@@ -1154,7 +1232,7 @@ export const login = {
       ? "const task = await takeOverTaskSpace(" + JSON.stringify(String(input.taskSpaceId)) + ")"
       : "const task = await useOrCreateTaskSpace(" + JSON.stringify(String(input.taskSpaceName || ["Terra-Edu", task.input?.studentName, task.input?.school].filter(Boolean).join(" / "))) + ")"
     const snippet = [
-      "ego-browser nodejs <<'EOF'",
+      "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
       "import { execFileSync } from 'node:child_process'",
       taskSpaceSelector,
       "const username = " + JSON.stringify(String(credential.username)),
@@ -1287,7 +1365,7 @@ export const cua = {
         "ego-browser 填表任务已准备。下一步必须使用官方 ego-browser skill，不要调用 cua-driver。",
         "",
         "建议首轮 heredoc：",
-        "ego-browser nodejs <<'EOF'",
+        "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
         "const task = await useOrCreateTaskSpace(" + JSON.stringify(taskSpaceName) + ")",
         "await openOrReuseTab(" + JSON.stringify(url) + ", { wait: true, timeout: 30 })",
         "cliLog(JSON.stringify({ taskSpaceId: task.id, info: await pageInfo(), snapshot: await snapshotText() }, null, 2))",
@@ -1541,6 +1619,7 @@ function crc32(buffer: Buffer) {
 export async function writeOpenCodeConfig(workspacePath: string) {
   const base = join(workspacePath, ".opencode")
   await mkdir(join(base, "agents"), { recursive: true })
+  await mkdir(join(base, "bin"), { recursive: true })
   await mkdir(join(base, "commands"), { recursive: true })
   await mkdir(join(base, "prompts"), { recursive: true })
   await mkdir(join(base, "tools"), { recursive: true })
@@ -1633,6 +1712,7 @@ ${DEFAULT_APPLICATION_PROMPT}
     await writeFile(join(dir, "SKILL.md"), renderSkill(skill), "utf8")
   }
   await writeEgoBrowserSkill(base)
+  await writeEgoBrowserWrapper(base)
   for (const command of COMMAND_DEFINITIONS) {
     await writeFile(join(base, "commands", `${command[0]}.md`), renderCommand(command), "utf8")
   }

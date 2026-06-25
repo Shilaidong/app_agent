@@ -32,7 +32,7 @@ const getBase = (): Configuration => ({
     output: "dist",
     buildResources: "resources",
   },
-  files: ["out/**/*", "resources/**/*"],
+  files: ["out/**/*", "resources/**/*", "!resources/vendor/**"],
   extraResources: [
     {
       from: "resources/private/",
@@ -48,6 +48,13 @@ const getBase = (): Configuration => ({
   mac: {
     category: "public.app-category.developer-tools",
     icon: `resources/icons/icon.icns`,
+    extraResources: [
+      {
+        from: "resources/vendor/ego-lite/",
+        to: "vendor/ego-lite/",
+        filter: ["ego lite.app/**"],
+      },
+    ],
     hardenedRuntime: true,
     gatekeeperAssess: false,
     entitlements: "resources/entitlements.plist",
