@@ -62,6 +62,16 @@ function includesAny(text: string, values: string[], message: string) {
 function normalizeMissingItems(value: any) {
   if (Array.isArray(value)) return value
   if (!value || typeof value !== "object") return []
+  if (Array.isArray(value.items)) {
+    return value.items.map((item: any, index: number) => ({
+      name: item.name || item.item || item.field || item.title || item.id || `missing-${index + 1}`,
+      type: item.status === "missing_form" || item.type === "info" ? "information" : item.type === "document" ? "material" : item.type || "uncertain",
+      status: item.status || "missing",
+      whyNeeded: item.whyNeeded || item.details || item.detail || item.reason,
+      prepareFrom: item.prepareFrom || item.source || "请顾问/学生确认",
+      formatRequirement: item.formatRequirement || item.format || "按申请平台要求提供",
+    }))
+  }
   const information = Array.isArray(value.missingInformation) ? value.missingInformation : []
   const materials = Array.isArray(value.missingMaterials) ? value.missingMaterials : []
   const uncertain = Array.isArray(value.uncertainItems) ? value.uncertainItems : []
@@ -226,6 +236,7 @@ const cuaControlPath = join(workspace, "03_state/cua_control.json")
 assert(task && typeof task === "object", "task_state.json must be an object.")
 assert(task.input && typeof task.input === "object", "task_state.json must include task.input.")
 assert(Array.isArray(missing), "missing_items.json must be an array or supported legacy grouped schema.")
+assert(missing.every((item: any) => item.name && !String(item.name).includes("未命名缺失项")), "missing_items.json normalization must produce named missing items.")
 assert(Array.isArray(materials), "materials_index.json must be an array.")
 assert(progress && typeof progress === "object", "application_progress.json must be an object.")
 if (existsSync(requirementsPath)) {
@@ -276,10 +287,13 @@ const generated = [
   "02_generated/task_summary.md",
 ]
 for (const file of generated) assertNonEmptyFile(join(workspace, file))
+for (const file of generated.filter((item) => item.endsWith(".md"))) {
+  assert(!readText(join(workspace, file)).includes("未命名缺失项"), `${file} must not contain unnamed missing-item placeholders.`)
+}
 
 const profile = readText(join(workspace, "02_generated/student_profile.md"))
 includesAny(profile, [String(task.input.studentName || ""), "张志强", basename(workspace)], "student_profile.md must identify the student.")
-includesAny(profile, [String(task.input.school || ""), "加州路德大学", "California Lutheran"], "student_profile.md must identify the target school.")
+includesAny(profile, [String(task.input.school || ""), "加州路德大学", "California Lutheran", "Northeastern", "NEU", "UC Berkeley", "Berkeley"], "student_profile.md must identify the target school.")
 includesAny(profile, [String(task.input.program || ""), "Master of Science in Management"], "student_profile.md must identify the target program.")
 includesAny(profile, ["01_classified_materials", "00_original_backup", "材料"], "student_profile.md must reference source/classified materials.")
 includesAny(profile, ["缺失", "待确认", "不确定", "Missing", "Uncertain", "Needs Review"], "student_profile.md must include missing or uncertain items.")

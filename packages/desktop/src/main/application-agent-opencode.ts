@@ -638,32 +638,126 @@ function generatedFiles(workspace: string) {
   ].filter((item) => item.kind === "folder" || existsSync(item.path))
 }
 
+function firstText(item: any, keys: string[]) {
+  for (const key of keys) {
+    const value = item?.[key]
+    if (typeof value === "string" && value.trim()) return value.trim()
+    if (typeof value === "number" && Number.isFinite(value)) return String(value)
+  }
+  return ""
+}
+
+function collectMissingRecords(raw: any) {
+  if (Array.isArray(raw)) return raw.filter((item) => item && typeof item === "object")
+  if (!raw || typeof raw !== "object") return []
+  const direct = Array.isArray(raw.items) ? raw.items.filter((item: any) => item && typeof item === "object") : []
+  const grouped: any[] = []
+  for (const [key, type] of [["missingInformation", "information"], ["missing_info", "information"], ["missingMaterials", "material"], ["missing_materials", "material"], ["uncertainItems", "uncertain"], ["uncertain_items", "uncertain"]]) {
+    const value = raw[key]
+    if (!Array.isArray(value)) continue
+    grouped.push(...value.filter((item: any) => item && typeof item === "object").map((item: any) => ({ ...item, type: item.type || type })))
+  }
+  return [...direct, ...grouped]
+}
+
 function classifyMissingType(item: any) {
-  const type = String(item?.type ?? "")
-  if (type === "information" || type.includes("信息缺失")) return "information"
-  if (type === "material" || type.includes("材料缺失") || type.includes("文书缺失")) return "material"
+  const type = String(item?.type ?? "").toLowerCase()
+  const status = String(item?.status ?? item?.state ?? item?.progress ?? "").toLowerCase()
+  const category = String(item?.category ?? "").toLowerCase()
+  const text = (type + " " + category + " " + firstText(item, ["name", "item", "field", "title", "detail", "details", "reason"])).toLowerCase()
+  if (/missing_form|form_error|required_field/.test(status)) return "information"
+  if (/available_not_uploaded|upload_pending/.test(status)) return "material"
+  if (/information|info|field|personal|信息缺失|信息/.test(type)) return "information"
+  if (/material|document|file|upload|essay|文书缺失|材料缺失|材料|文书/.test(type)) return "material"
+  if (/uncertain|confirmation|待确认/.test(type)) return "uncertain"
+  if (/推荐|recommendation|财务|financial|银行|bank|文书|essay|sop|resume|cv|简历|upload|上传|document|材料/.test(text)) return "material"
+  if (/地址|公民|法律|就业|工作|申请信息|表单|问题|日期|姓名|电话|邮箱|信息/.test(text)) return "information"
   return "uncertain"
 }
 
+function normalizeMissingStatus(item: any, type: string) {
+  const status = String(item?.status ?? item?.state ?? item?.progress ?? "").toLowerCase()
+  if (/resolved|complete|completed|done|filled|uploaded|verified|saved|已解决|已完成|已填写|已上传/.test(status)) return "resolved"
+  if (/pending_consultant|needs_confirmation|need_confirmation|uncertain|waiting|待确认|需确认/.test(status)) return "needs_confirmation"
+  if (type === "uncertain") return "needs_confirmation"
+  return "missing"
+}
+
 function normalizeMissingItems(raw: any) {
-  const source = Array.isArray(raw) ? raw : Array.isArray(raw?.items) ? raw.items : []
-  return source.map((item: any, index: number) => {
+  return collectMissingRecords(raw).map((item: any, index: number) => {
     const type = classifyMissingType(item)
+    const status = normalizeMissingStatus(item, type)
+    const priority = firstText(item, ["priority", "urgency"]) || "medium"
+    const rawStatus = firstText(item, ["status", "state", "progress"])
+    const explicitBlocksProgress = item.blocksProgress ?? item.blocks_progress ?? item.affects_continuation
     return {
-      id: item.id ?? "missing-" + String(index + 1).padStart(2, "0"),
-      name: String(item.name ?? item.title ?? "未命名缺失项"),
+      id: firstText(item, ["id"]) || "missing-" + String(index + 1).padStart(2, "0"),
+      name: firstText(item, ["name", "item", "field", "title", "label", "requirement", "id"]) || "待确认事项 " + String(index + 1).padStart(2, "0"),
       type,
-      status: type === "uncertain" ? "needs_confirmation" : "missing",
-      source: item.source ?? "application_target",
-      page: item.page ?? "",
-      whyNeeded: item.whyNeeded ?? item.reason ?? item.why_needed ?? "申请平台或学校申请要求需要该内容。",
-      prepareFrom: item.prepareFrom ?? item.preparation_method ?? item.prepare_from ?? "请顾问向学生确认或补充。",
-      formatRequirement: item.formatRequirement ?? item.format_requirement ?? "按申请平台要求提供清晰 PDF、Word、图片或文字信息。",
-      blocksProgress: Boolean(item.blocksProgress ?? item.affects_continuation ?? false),
-      addedToWordList: item.addedToWordList ?? item.include_in_word ?? true,
-      urgency: item.urgency ?? "medium",
+      status,
+      source: ["material_scan", "application_target", "cua", "manual"].includes(item.source) ? item.source : "application_target",
+      page: firstText(item, ["page", "section"]),
+      whyNeeded: firstText(item, ["whyNeeded", "why_needed", "detail", "details", "reason", "description", "note"]) || "申请平台或学校申请要求需要该内容。",
+      prepareFrom: firstText(item, ["prepareFrom", "prepare_from", "preparation_method", "sourceText", "source"]) || (type === "material" ? "请学生或家长提供对应材料。" : "请顾问向学生确认后补充。"),
+      formatRequirement: firstText(item, ["formatRequirement", "format_requirement", "format", "requirementFormat", "requirement"]) || (type === "material" ? "清晰 PDF、Word 或图片文件，以申请平台要求为准。" : "文字说明即可；涉及日期、地址、姓名拼写时请按证件或官方材料填写。"),
+      blocksProgress: status !== "resolved" && (typeof explicitBlocksProgress === "boolean" ? explicitBlocksProgress : priority === "high" || status === "missing"),
+      addedToWordList: item.addedToWordList !== false && item.include_in_word !== false,
+      priority,
+      rawStatus,
+      resolvedAt: firstText(item, ["resolvedAt", "resolved_at"]),
+      resolvedReason: firstText(item, ["resolvedReason", "resolved_reason"]),
     }
   })
+}
+
+function collectProgressText(value: any): string {
+  if (typeof value === "string") return value
+  if (Array.isArray(value)) return value.map(collectProgressText).join(" ")
+  if (!value || typeof value !== "object") return ""
+  return Object.values(value).map(collectProgressText).join(" ")
+}
+
+function hasVerifiedReviewReady(progress: any) {
+  const savedPages = Array.isArray(progress?.savedPages) ? progress.savedPages : []
+  return savedPages.some((entry: any) => {
+    const text = collectProgressText(entry).toLowerCase()
+    if (/application ready for submission|ready for submission|no errors? or warnings?/.test(text)) return true
+    return /(0\s*(错误|error|errors))/.test(text) && /(0\s*(警告|warning|warnings))/.test(text)
+  })
+}
+
+function isReviewResolvedPlatformItem(item: any) {
+  const rawStatus = String(item.rawStatus || item.status || "").toLowerCase()
+  const text = String([item.name, item.page, item.whyNeeded, item.prepareFrom, item.formatRequirement].join(" ")).toLowerCase()
+  if (rawStatus === "missing_form") return true
+  if (item.source === "cua") return true
+  if (/review|slate|申请平台|form|表单|required|必填|validation|error|错误|warning|警告/.test(text)) {
+    if (/文书|statement of purpose|sop|推荐信|recommendation|银行|存款|资金|financial|护照号码|passport number|i-20/.test(text)) {
+      return rawStatus === "available_not_uploaded" || (/resume|cv|简历|upload|上传/.test(text) && /review[^。；\n]*(错误|error|required|is required)|error|错误|required|必填/.test(text))
+    }
+    return true
+  }
+  return false
+}
+
+function syncMissingItemsWithProgress(missing: any[], progress: any) {
+  if (!hasVerifiedReviewReady(progress)) return missing
+  const resolvedAt = new Date().toISOString()
+  return missing.map((item: any) => {
+    if (!isReviewResolvedPlatformItem(item)) return item
+    return {
+      ...item,
+      status: "resolved",
+      blocksProgress: false,
+      addedToWordList: false,
+      resolvedAt: item.resolvedAt || resolvedAt,
+      resolvedReason: item.resolvedReason || "申请平台 Review 已由 ego-browser 验证为 0 错误 0 警告。",
+    }
+  })
+}
+
+function activeMissingItems(missing: any[]) {
+  return missing.filter((item: any) => item.status !== "resolved")
 }
 
 function requirementList(value: any) {
@@ -718,7 +812,8 @@ function renderRequirementsMarkdown(task: any, requirements: any) {
 async function summarizeCounts(workspace: string) {
   const totalFiles = (await listFiles(join(workspace, "00_original_backup"))).length
   const missingRaw = await readJson(join(workspace, "03_state/missing_items.json"), [])
-  const missing = normalizeMissingItems(missingRaw)
+  const progress = await readJson(join(workspace, "03_state/application_progress.json"), {})
+  const missing = activeMissingItems(syncMissingItemsWithProgress(normalizeMissingItems(missingRaw), progress))
   return {
     totalFiles,
     missingInformation: missing.filter((item: any) => item.type === "information").length,
@@ -893,9 +988,12 @@ export const documents = {
     await appendAudit(workspace, "documents", action, "started")
     const task = await loadTask(workspace)
     const input = task.input || {}
-    const missing = normalizeMissingItems(await readJson(join(workspace, "03_state/missing_items.json"), []))
+    const progress = await readJson(join(workspace, "03_state/application_progress.json"), {})
+    const syncedMissing = syncMissingItemsWithProgress(normalizeMissingItems(await readJson(join(workspace, "03_state/missing_items.json"), [])), progress)
+    const missing = activeMissingItems(syncedMissing)
+    await writeJson(join(workspace, "03_state/missing_items.json"), syncedMissing)
     const materials = await readJson(join(workspace, "03_state/materials_index.json"), [])
-    const title = String(input.studentName || basename(workspace))
+    const title = String(input.studentName || basename(workspace)).trim()
     if (action === "generate_forms" || action === "generate_all") {
       const infoItems = missing.filter((item: any) => item.type !== "material")
       const materialItems = missing.filter((item: any) => item.type === "material")
@@ -907,6 +1005,7 @@ export const documents = {
     }
     if (action === "generate_summary" || action === "generate_all") {
       const lines = ["# " + title + " 申请任务总结", "", "## 已完成", "", "- 已创建隔离申请工作区。", "- 已复制原始材料副本，未修改原始文件夹。", "- 已整理材料 " + materials.length + " 个。", "- 已生成或更新缺失项清单和顾问可转发文档。", "", "## 仍需处理", ""]
+      if (missing.length === 0) lines.push("- 暂无仍需补充的缺失项。")
       for (const item of missing) lines.push("- " + item.name + "：" + item.whyNeeded)
       lines.push("", "## 人工处理事项", "", "- 最终提交申请、付款、不可逆推荐信邀请和账号密码输入必须由顾问人工确认。")
       await writeFile(join(workspace, "02_generated/task_summary.md"), lines.join("\n") + "\n", "utf8")
@@ -950,6 +1049,7 @@ export const requirements = {
     await writeJson(join(workspace, "03_state/application_requirements.json"), requirements)
     await writeFile(join(workspace, "02_generated/application_requirements.md"), renderRequirementsMarkdown(task, requirements), "utf8")
 
+    const progress = await readJson(join(workspace, "03_state/application_progress.json"), { currentPage: "", completedPages: [], savedPages: [], uploadedMaterials: [], failedActions: [], highRiskBlocks: [] })
     const incomingMissing = normalizeMissingItems(input.missingItems || [])
     if (incomingMissing.length > 0) {
       const existingMissing = normalizeMissingItems(await readJson(join(workspace, "03_state/missing_items.json"), []))
@@ -961,10 +1061,9 @@ export const requirements = {
           seen.add(key)
         }
       }
-      await writeJson(join(workspace, "03_state/missing_items.json"), existingMissing)
+      await writeJson(join(workspace, "03_state/missing_items.json"), syncMissingItemsWithProgress(existingMissing, progress))
     }
 
-    const progress = await readJson(join(workspace, "03_state/application_progress.json"), { currentPage: "", completedPages: [], savedPages: [], uploadedMaterials: [], failedActions: [], highRiskBlocks: [] })
     progress.requirementsLastUpdatedAt = requirements.updatedAt
     await writeJson(join(workspace, "03_state/application_progress.json"), progress)
     await saveTask(workspace, task, "正在检查缺失内容", "已保存学校/项目申请要求，并准备对照学生材料检查缺失项。")
@@ -1249,10 +1348,24 @@ export const cua = {
       if (!Array.isArray(progress.savedPages)) progress.savedPages = []
       progress.savedPages.push({ at: new Date().toISOString(), page: pageName, url: input.currentUrl || progress.currentUrl || "", backend: "ego-browser", evidence: input.evidence || "" })
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      const syncedMissing = syncMissingItemsWithProgress(normalizeMissingItems(await readJson(join(workspace, "03_state/missing_items.json"), [])), progress)
+      const activeMissing = activeMissingItems(syncedMissing)
+      await writeJson(join(workspace, "03_state/missing_items.json"), syncedMissing)
+      const inputForDocs = task.input || {}
+      const title = String(inputForDocs.studentName || basename(workspace)).trim()
+      const materials = await readJson(join(workspace, "03_state/materials_index.json"), [])
+      await writeFile(join(workspace, "02_generated/info_collection_form.md"), renderCollection(title, inputForDocs, "信息补充清单", activeMissing.filter((item: any) => item.type !== "material")), "utf8")
+      await writeFile(join(workspace, "02_generated/material_collection_form.md"), renderCollection(title, inputForDocs, "材料补充清单", activeMissing.filter((item: any) => item.type === "material")), "utf8")
+      await writeFile(join(workspace, "02_generated/missing_materials.docx"), makeDocx(renderWordChecklist(title, inputForDocs, activeMissing)))
+      const summaryLines = ["# " + title + " 申请任务总结", "", "## 已完成", "", "- 已通过 ego-browser 保存并复查当前页面：" + pageName, "- 已同步缺失项和顾问文档。", "- 已整理材料 " + materials.length + " 个。", "", "## 仍需处理", ""]
+      if (activeMissing.length === 0) summaryLines.push("- 暂无仍需补充的缺失项。")
+      for (const item of activeMissing) summaryLines.push("- " + item.name + "：" + item.whyNeeded)
+      summaryLines.push("", "## 人工处理事项", "", "- 最终提交申请、付款、不可逆推荐信邀请和账号密码输入必须由顾问人工确认。")
+      await writeFile(join(workspace, "02_generated/task_summary.md"), summaryLines.join("\n") + "\n", "utf8")
       await appendLog(workspace, "cua", "ego-browser 已验证保存页面：" + pageName)
-      await saveTask(workspace, task, "正在保存申请进度", "已通过 ego-browser 保存并复查当前页面：" + pageName)
+      await saveTask(workspace, task, "正在保存申请进度", "已通过 ego-browser 保存并复查当前页面：" + pageName + "；缺失项和顾问文档已同步。")
       await appendAudit(workspace, "cua", auditAction, "completed", "verified save via ego-browser")
-      return "页面已记录为 ego-browser 验证保存。继续下一页前请再次 snapshotText/pageInfo。"
+      return "页面已记录为 ego-browser 验证保存，缺失项和顾问文档已同步。继续下一页前请再次 snapshotText/pageInfo。"
     }
     if (input.action === "complete_ego_task") {
       ensureCuaProgress(progress)
