@@ -4,9 +4,13 @@ Terra-Edu 申请 Agent 的独立 macOS Desktop 子程序，基于 OpenCode Deskt
 
 ## Development
 
+新电脑接手开发时先看根目录 `DEVELOPMENT.md`，尤其是 Git LFS、Bun 版本、随包 ego-lite 和私有运行配置检查。
+
 ```bash
+git lfs pull
 bun install
-bun dev
+bun run doctor
+bun run dev
 ```
 
 ## Build

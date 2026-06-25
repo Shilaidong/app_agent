@@ -7,6 +7,8 @@
   "packageManager": "bun@1.3.14",
   "scripts": {
     "dev": "bun --cwd packages/desktop dev",
+    "doctor": "bun ./script/dev-doctor.ts",
+    "dev:doctor": "bun ./script/dev-doctor.ts",
     "verify": "bun --cwd packages/desktop verify:application-agent",
     "verify:e2e": "bun --cwd packages/desktop verify:application-agent:e2e",
     "typecheck:desktop": "bun --cwd packages/desktop typecheck",

@@ -10,6 +10,18 @@ The product behavior, Agent language, workflow contract, CUA rules, safety bound
 
 This document is written for humans and other Agents that want to understand, refactor, or recreate the application without depending on implementation details.
 
+## Development Handoff
+
+If you are moving this project to another computer, start with [DEVELOPMENT.md](./DEVELOPMENT.md). It covers cloning with Git LFS, installing Bun, checking the bundled ego-lite runtime, running the app, building packages, and publishing GitHub Releases.
+
+Quick health check after cloning:
+
+```bash
+git lfs pull
+bun install
+bun run doctor
+```
+
 ## Current Release
 
 Release builds are published on [GitHub Releases](https://github.com/Shilaidong/app_agent/releases).
@@ -37,7 +49,9 @@ Do not mirror this repository publicly without rotating or replacing those bundl
 ## Setup
 
 ```bash
+git lfs pull
 bun install
+bun run doctor
 ```
 
 For Supabase login/quota support in custom clones, create `.env.local` at the repository root if you need to replace the bundled direct-distribution config:
