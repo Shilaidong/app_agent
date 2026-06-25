@@ -1,10 +1,21 @@
 # Terra-Edu Application Agent Desktop
 
-Terra-Edu 申请 Agent 的独立 macOS Desktop 子程序，基于 OpenCode Desktop fork 构建。
+这是 Terra-Edu 申请 Agent 的桌面端。它基于 OpenCode Desktop fork，当前只维护 macOS Apple Silicon 客户版。
 
-## Development
+## 当前交付形态
 
-新电脑接手开发时先看根目录 `DEVELOPMENT.md`，尤其是 Git LFS、Bun 版本、随包 ego-lite 和私有运行配置检查。
+- App 名称：Terra-Edu Application Agent
+- 最新版本：`1.0.3`
+- 发布页：https://github.com/Shilaidong/app_agent/releases
+- 安装包：macOS arm64 DMG / ZIP
+- 签名：ad-hoc signing
+- 公证：暂不做 Apple notarization
+- 更新：暂不做自动更新，新版通过 DMG 覆盖安装
+- 浏览器：随包 ego-lite `0.4.2.15`
+
+## 开发
+
+新电脑接手时先看根目录 [DEVELOPMENT.md](../../DEVELOPMENT.md)，尤其是 Git LFS、Bun、随包 ego-lite 和私有运行配置。
 
 ```bash
 git lfs pull
@@ -13,51 +24,53 @@ bun run doctor
 bun run dev
 ```
 
-## Build
-
-Run the `build` script to build the app's JS assets, then `package` to
-bundle the assets as an application. The resulting app will be in `dist/`.
+## 验证
 
 ```bash
-bun run build && bun run package
+bun run verify
+bun run verify:e2e
+bun run typecheck:desktop
 ```
 
-## macOS Customer Delivery
+`release:mac` 会自动运行申请 Agent 契约验证、E2E 验证、类型检查、生产构建和 macOS 打包。
 
-本项目暂不考虑上架 Mac App Store，也暂不考虑付费开发者公证。当前交付方式是免费客户分发版。
-
-### Free Customer Release
-
-适合自用、内部顾问、小范围客户试用和早期收费客户。
+## 本地打 macOS 包
 
 ```bash
 bun run release:mac
 ```
 
-这会生成正式产品名的 macOS DMG/ZIP：
+输出文件：
 
-- `dist/terra-edu-application-agent-mac-arm64.dmg`
-- `dist/terra-edu-application-agent-mac-arm64.zip`
-- `dist/release-notes/mac-free.md`
+```text
+packages/desktop/dist/terra-edu-application-agent-mac-arm64.dmg
+packages/desktop/dist/terra-edu-application-agent-mac-arm64.zip
+packages/desktop/dist/release-notes/mac-free.md
+```
 
-限制：这是 ad-hoc signing，不经过 Apple notarization。第一次在其他 Mac 上打开时，macOS Gatekeeper 可能提示无法验证开发者。用户需要按安装文档在系统设置里允许打开。
+第一次在客户 Mac 上打开时，系统可能提示无法验证开发者。让客户右键打开，或在“系统设置 -> 隐私与安全性”里允许打开。
 
-### Login, AI Credits, And Upgrades
+## GitHub Release
 
-- 客户不配置 Supabase，不配置 API key，只用 Terra-Edu 顾问账号登录。
+正式发版不再从本机手动上传大文件。确认代码已推到 `main` 后，推送版本 tag：
+
+```bash
+git tag -a v1.0.4 -m "Terra-Edu Application Agent v1.0.4"
+git push origin v1.0.4
+```
+
+GitHub Actions 会自动构建 macOS 包并上传到对应 Release。
+
+## 登录、额度和模型
+
+- 客户使用 Terra-Edu 顾问账号登录。
 - 每个顾问账号默认 200 AI credits。
-- credits 按 OpenCode 回传 token 折算：`input + output * 4 + reasoning + cache_write`，每 10,000 加权 token 扣 1 credit。
+- credits 按 OpenCode token usage 折算。
 - 额度用完后提示联系微信 `shilaidong`。
-- 当前不做自动更新；新版通过 DMG 覆盖安装，客户工作区保存在用户 Documents 目录，不会被覆盖。
+- 默认模型路线随包配置，不要求客户自己配置 API key。
 
-### Release Checks
+## 重要边界
 
-release 命令会先运行：
+Agent 可以填写、上传、保存草稿，但不能最终提交申请、付款、自动发送不可逆推荐信邀请、保存明文密码，或填写没有证据的不确定字段。
 
-- `verify:application-agent`
-- `verify:application-agent:e2e`
-- `typecheck`
-- production `build`
-- macOS `package:mac`
-
-如果任何一步失败，不应发包。
+Windows/Linux 脚本来自 OpenCode fork 的历史结构，不代表当前 Terra-Edu Application Agent 支持这些平台。

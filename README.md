@@ -1,75 +1,63 @@
 # Terra-Edu Application Agent
 
-Terra-Edu Application Agent is a standalone desktop subprogram forked from OpenCode Desktop. It helps consultants organize student materials, generate application profiles and missing-item checklists, and assist with application-platform form filling through CUA.
+Terra-Edu Application Agent 是一个独立的 macOS 桌面申请助理，基于 OpenCode Desktop fork 改造。它面向留学申请顾问：顾问输入学生材料文件夹、学校、项目和申请链接后，软件会让 OpenCode Agent 负责整理材料、生成学生申请档案、研究申请要求、检查缺失项、生成收集清单，并通过内置 ego-lite 浏览器辅助填写申请平台。
 
-This repository is intentionally separate from the Terra-Edu main project. It does not require the Terra-Edu Next.js dev server to run or build.
+这个仓库已经从 Terra-Edu 主项目拆分出来，独立开发、独立构建、独立发布，不依赖 Terra-Edu 主项目的 Next.js dev server。
 
-## Product Logic
+## 当前版本
 
-The product behavior, Agent language, workflow contract, CUA rules, safety boundaries, and rebuild guidance are documented in [APPLICATION_AGENT_LOGIC.md](./APPLICATION_AGENT_LOGIC.md).
+- 最新 Release：[Terra-Edu Application Agent v1.0.3](https://github.com/Shilaidong/app_agent/releases/tag/v1.0.3)
+- 支持平台：macOS Apple Silicon
+- 交付文件：`terra-edu-application-agent-mac-arm64.dmg` 和 `terra-edu-application-agent-mac-arm64.zip`
+- 构建方式：GitHub Actions 只构建 macOS arm64
+- 签名方式：免费 ad-hoc signing，不做 Apple notarization，不上架 Mac App Store
 
-This document is written for humans and other Agents that want to understand, refactor, or recreate the application without depending on implementation details.
+第一次在新 Mac 打开时，macOS 可能提示无法验证开发者。右键打开，或在“系统设置 -> 隐私与安全性”里允许打开即可。
 
-## Development Handoff
+## 软件能做什么
 
-If you are moving this project to another computer, start with [DEVELOPMENT.md](./DEVELOPMENT.md). It covers cloning with Git LFS, installing Bun, checking the bundled ego-lite runtime, running the app, building packages, and publishing GitHub Releases.
+- 新建或读取申请任务
+- 把原始学生材料复制到隔离工作区，避免修改原始文件
+- 自动分类身份、学术、语言、文书、推荐、财务等材料
+- 生成 `student_profile.md` 学生申请档案
+- 研究学校和项目的官方申请要求
+- 生成 `missing_items.json`、信息收集表、材料收集表和 Word 缺失材料清单
+- 使用 OpenCode Agent + Skills + Custom Tools 推进申请流程
+- 使用内置 ego-lite 浏览器辅助网页登录、填表、上传和保存草稿
+- 保存申请进度、日志、截图和阶段总结
 
-Quick health check after cloning:
+安全边界保持不变：Agent 可以填写、上传、保存草稿，但不能自动最终提交申请、付款、发送不可逆推荐信邀请、保存明文密码，或瞎填没有依据的字段。
+
+## 重要文档
+
+- [APPLICATION_AGENT_LOGIC.md](./APPLICATION_AGENT_LOGIC.md)：完整软件逻辑、Agent 语言、工作流、CUA 规则和安全边界，适合产品重构或让别的 Agent 复刻。
+- [DEVELOPMENT.md](./DEVELOPMENT.md)：新电脑接手开发、Git LFS、Bun、ego-lite、构建和发版流程。
+- [packages/desktop/README.md](./packages/desktop/README.md)：桌面端开发和 macOS 客户交付说明。
+
+## 新电脑开发
+
+本仓库使用 Bun `1.3.14`，并通过 Git LFS 跟踪随包 ego-lite 浏览器。新电脑克隆后先执行：
 
 ```bash
+git clone https://github.com/Shilaidong/app_agent.git
+cd app_agent
+git lfs install
 git lfs pull
 bun install
 bun run doctor
 ```
 
-## Current Release
+`bun run doctor` 会检查 Bun、Git LFS、私有运行配置、Supabase 登录配置、内置 OpenCode Go key、随包 ego-lite 和 macOS 打包资源。
 
-Release builds are published on [GitHub Releases](https://github.com/Shilaidong/app_agent/releases).
+## 常用命令
 
-The current packaged deliverables are:
-
-- macOS Apple Silicon DMG
-- macOS Apple Silicon ZIP
-- Windows x64 executable artifact
-- update helper metadata such as blockmap files when available
-
-## Bundled Runtime Config
-
-This repository is currently set up as a direct-distribution customer build. Runtime config under `packages/desktop/resources/private/` is intentionally committed and bundled into desktop packages so the app opens with Supabase login/quota support and the default OpenCode Go model route already configured.
-
-Do not mirror this repository publicly without rotating or replacing those bundled credentials.
-
-## Requirements
-
-- Bun `1.3.14`
-- macOS for local macOS packaging
-- Windows or a Windows CI runner for Windows packaging
-- Optional local CUA runtime for browser form automation testing
-
-## Setup
-
-```bash
-git lfs pull
-bun install
-bun run doctor
-```
-
-For Supabase login/quota support in custom clones, create `.env.local` at the repository root if you need to replace the bundled direct-distribution config:
-
-```bash
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-```
-
-Direct-distribution private runtime files live under `packages/desktop/resources/private/` and are intentionally tracked for the current customer-ready build.
-
-## Development
+启动桌面开发版：
 
 ```bash
 bun run dev
 ```
 
-## Verification
+运行验证：
 
 ```bash
 bun run verify
@@ -77,43 +65,68 @@ bun run verify:e2e
 bun run typecheck:desktop
 ```
 
-## Build Current Desktop Versions
-
-macOS customer build:
+本地生成 macOS 客户安装包：
 
 ```bash
 bun run release:mac
 ```
 
-Windows package:
-
-```bash
-bun run build:desktop
-bun run package:win
-```
-
-Artifacts are written to:
+产物位置：
 
 ```text
 packages/desktop/dist/
 ```
 
-## Runtime Data
+## 发版方式
 
-Application workspaces are created under:
+当前发版由 GitHub Actions 自动完成。推送 `v*` tag 后，云端会自动：
+
+1. 拉取 Git LFS 里的 ego-lite。
+2. 安装 Bun 依赖。
+3. 运行申请 Agent 验证、E2E 验证和桌面端类型检查。
+4. 生成 macOS DMG/ZIP。
+5. 上传到对应 GitHub Release。
+
+示例：
+
+```bash
+git tag -a v1.0.4 -m "Terra-Edu Application Agent v1.0.4"
+git push origin v1.0.4
+```
+
+Release 页面：
+
+```text
+https://github.com/Shilaidong/app_agent/releases
+```
+
+## 内置运行配置
+
+为了让客户“点开即用”，当前 direct-distribution build 会把必要运行配置一起打进桌面包，包括：
+
+- Supabase 登录和 AI 额度所需的 public config
+- 默认 OpenCode Go 模型路由
+- 随包 ego-lite 浏览器
+- 申请 Agent 的 Prompt、Skills、Commands 和 Custom Tools
+
+因此这个仓库应作为 private repo 维护。不要把它公开镜像；如果要开源，需要先移除或替换私有运行配置，并重新设计授权和 AI key 管理。
+
+## 运行数据
+
+用户申请工作区创建在：
 
 ```text
 ~/Documents/Terra-Edu Application Agent/application_workspaces/
 ```
 
-Each task keeps original materials copied into `00_original_backup/`; the Agent works inside the isolated application workspace.
+每个任务都会创建独立目录，包含原始材料备份、分类材料、生成文件、状态文件、日志、截图和补充材料。卸载或覆盖安装 App 不会自动删除这些工作区。
 
-## Safety Boundary
+## ego-lite 浏览器
 
-The Agent may fill, upload, and save application progress, but must not automatically:
+当前版本内置 ego-lite `0.4.2.15`，并禁用自动替换和自动更新。这样做是为了让申请平台填写行为稳定、可复现。
 
-- final-submit applications
-- pay fees
-- send irreversible recommendation invitations
-- write account passwords into files, logs, or chat
-- guess uncertain fields
+开发时请不要让 Agent 或用户自动安装新版 ego-lite，也不要把系统浏览器临时替换进来。升级浏览器应作为单独版本变更测试。
+
+## 平台范围
+
+当前只维护 macOS Apple Silicon。Windows 构建已从 CI 移除，仓库里继承自 OpenCode 的 Windows/Linux 脚本不代表当前产品支持这些平台。

@@ -126,7 +126,7 @@ EOF
 
 ## GitHub Release 流程
 
-常规发版流程：
+当前发版由 GitHub Actions 完成，不再从本机手动上传 DMG/ZIP。常规发版流程：
 
 ```bash
 bun run doctor
@@ -134,23 +134,22 @@ bun run release:mac
 git status --short
 ```
 
-确认当前提交已经推到 `main` 后，创建 Release：
+确认本地包能打出来、当前提交已经推到 `main` 后，创建并推送版本 tag：
 
 ```bash
-gh release create v1.0.x \
-  packages/desktop/dist/terra-edu-application-agent-mac-arm64.dmg \
-  packages/desktop/dist/terra-edu-application-agent-mac-arm64.zip \
-  --target "$(git rev-parse HEAD)" \
-  --title "Terra-Edu Application Agent v1.0.x" \
-  --notes-file packages/desktop/dist/release-notes/mac-free.md \
-  --latest
+git tag -a v1.0.x -m "Terra-Edu Application Agent v1.0.x"
+git push origin v1.0.x
 ```
+
+`build-desktop` workflow 会在 GitHub 上自动拉取 Git LFS、安装依赖、运行验证、构建 macOS arm64 DMG/ZIP，并上传到对应 GitHub Release。
 
 Release 页面：
 
 ```text
 https://github.com/Shilaidong/app_agent/releases
 ```
+
+当前只维护 macOS Apple Silicon Release。Windows 构建已经从 CI 移除。
 
 ## 常见问题
 
