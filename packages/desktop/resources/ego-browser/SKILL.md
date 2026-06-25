@@ -7,6 +7,10 @@ description: ego-browser (ego-lite) is a Chromium-based browser designed from th
 
 ego-browser gives AI agents a CLI-accessible Node.js runtime, with built-in helpers — snapshotText, click, js, cdp, and more — that agents call directly inside JS scripts to observe pages, interact with UI, evaluate browser-side JavaScript, and drive a real browser for any web automation task.
 
+## Terra-Edu pinned-build policy
+
+This copy is a Terra-Edu bundled snapshot. Do not update this skill from ego lite, do not replace it with a newer upstream skill, and do not install or upgrade ego lite automatically. If `ego-browser` is missing, read `references/install.md`; its script is locked by default and requires `TERRA_EGO_BROWSER_ALLOW_INSTALL=1` before downloading the current ego lite installer.
+
 For setup, install, or connection problems, read `references/install.md`.
 
 Use the `Bash` tool to run all browser operations via `ego-browser nodejs <<'EOF' ... EOF` heredoc. Do not write code to a `.js` file first.

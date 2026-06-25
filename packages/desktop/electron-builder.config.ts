@@ -101,7 +101,6 @@ function getConfig() {
         appId: "edu.terra.application-agent.beta",
         productName: "Terra-Edu Application Agent Beta",
         protocols: { name: "Terra-Edu Application Agent Beta", schemes: ["terra-application-agent"] },
-        publish: { provider: "github", owner: "anomalyco", repo: "opencode-beta", channel: "latest" },
         rpm: { packageName: "terra-edu-application-agent-beta" },
       }
     }
@@ -111,7 +110,6 @@ function getConfig() {
         appId: "edu.terra.application-agent",
         productName: "Terra-Edu Application Agent",
         protocols: { name: "Terra-Edu Application Agent", schemes: ["terra-application-agent"] },
-        publish: { provider: "github", owner: "anomalyco", repo: "opencode", channel: "latest" },
         rpm: { packageName: "terra-edu-application-agent" },
       }
     }

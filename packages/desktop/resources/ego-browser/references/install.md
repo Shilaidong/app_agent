@@ -2,6 +2,18 @@
 
 Read this file only when ego lite isn't installed yet, or when the user asks to install ego lite. For day-to-day browser work, go back to `SKILL.md`.
 
+## Terra-Edu pinned-build policy
+
+This Terra-Edu Application Agent build uses a pinned ego-browser skill snapshot bundled inside the app. Do not replace this skill with a newer ego lite skill and do not update ego lite automatically.
+
+The bundled install script is locked by default:
+
+- If ego lite is already installed, it only opens the existing app.
+- If ego lite is missing, it stops and asks the owner to install/approve it.
+- It will not download, replace, or upgrade ego lite unless the owner explicitly runs it with `TERRA_EGO_BROWSER_ALLOW_INSTALL=1`.
+
+This protects the private build from unexpected upstream behavior or pricing changes.
+
 The ego-browser skill depends on the ego lite browser: the `ego-browser` command is provided by the ego lite app. Once ego lite is installed and you've gone through onboarding once, the environment is ready and there are no further environment issues.
 
 ego lite website: https://lite.ego.app/
@@ -15,10 +27,16 @@ The install script lives at `scripts/install.sh` in this skill and supports macO
 - Strip the quarantine attribute to keep Gatekeeper from blocking the first launch.
 - After installing, launch the `ego lite` app.
 
-Run the script (use the script's actual path under this skill's directory):
+Run the script only after the owner has explicitly approved installing ego lite. The locked default command only opens an existing install and refuses network installation:
 
 ```bash
 sh skills/ego-browser/scripts/install.sh
+```
+
+To allow a first-time install, the owner must run:
+
+```bash
+TERRA_EGO_BROWSER_ALLOW_INSTALL=1 sh skills/ego-browser/scripts/install.sh
 ```
 
 After installing, the script opens the ego lite app directly. If ego lite is already installed, the script skips the download and opens the app directly.

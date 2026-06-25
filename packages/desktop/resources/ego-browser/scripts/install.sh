@@ -1,5 +1,7 @@
 #!/bin/sh
 #v1.5 2026.06.04 17:16
+# Terra-Edu pinned build patch: do not download, replace, or upgrade ego lite
+# unless the owner explicitly sets TERRA_EGO_BROWSER_ALLOW_INSTALL=1.
 
 set -eu
 
@@ -215,9 +217,13 @@ install_ego_lite() {
 main() {
 	[ "$(uname -s)" = "Darwin" ] || die "this script only supports macOS"
 
-	# Install first if not present; otherwise use the ego-browser bundled inside the app.
+	# Use an existing install by default. This private Terra-Edu build must not
+	# download, replace, or upgrade ego lite unless the owner explicitly unlocks it.
 	installed_app_path=$(find_ego_lite_app || true)
 	if [ -z "$installed_app_path" ]; then
+		if [ "${TERRA_EGO_BROWSER_ALLOW_INSTALL:-0}" != "1" ]; then
+			die "$APP_NAME is not installed. Terra-Edu pinned builds do not install or update ego lite automatically. Ask the owner to install ego lite manually, or rerun with TERRA_EGO_BROWSER_ALLOW_INSTALL=1 if they explicitly approve downloading the current installer."
+		fi
 		install_ego_lite
 		installed_app_path=$(find_ego_lite_app || true)
 		[ -n "$installed_app_path" ] ||

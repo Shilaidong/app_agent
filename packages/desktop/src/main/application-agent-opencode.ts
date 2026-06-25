@@ -6,6 +6,7 @@ import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./applicati
 import type { ApplicationTask } from "./application-agent"
 
 const root = dirname(fileURLToPath(import.meta.url))
+const EGO_BROWSER_SKILL_PIN = "terra-pinned-2026-06-15"
 
 async function writeJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true })
@@ -14,8 +15,8 @@ async function writeJson(path: string, value: unknown) {
 
 function readBundledEgoBrowserResource(relativePath: string) {
   const candidates = [
-    join(process.resourcesPath ?? "", "ego-browser", relativePath),
     join(root, "../../resources/ego-browser", relativePath),
+    join(process.resourcesPath ?? "", "ego-browser", relativePath),
   ]
   for (const candidate of candidates) {
     try {
@@ -33,6 +34,20 @@ async function writeEgoBrowserSkill(base: string) {
   await writeFile(join(skillBase, "SKILL.md"), readBundledEgoBrowserResource("SKILL.md"), "utf8")
   await writeFile(join(skillBase, "references/install.md"), readBundledEgoBrowserResource("references/install.md"), "utf8")
   await writeFile(join(skillBase, "scripts/install.sh"), readBundledEgoBrowserResource("scripts/install.sh"), "utf8")
+  await writeFile(
+    join(skillBase, "TERRA_PINNED.md"),
+    [
+      "# Terra-Edu Pinned ego-browser Skill",
+      "",
+      `Pin: ${EGO_BROWSER_SKILL_PIN}`,
+      "",
+      "This workspace uses the Terra-Edu bundled ego-browser skill snapshot.",
+      "Do not replace it with a newer ego lite skill unless Terra-Edu explicitly updates this application build.",
+      "The install script is locked by default and must not download or replace ego lite unless TERRA_EGO_BROWSER_ALLOW_INSTALL=1 is set by the owner.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
 }
 
 export function buildApplicationAgentStartPrompt(task: ApplicationTask) {
@@ -81,6 +96,7 @@ ${inputJson}
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
 - 如果看到 OpenCode compaction/summary/上下文压缩相关消息，必须把它当作正常维护动作：先读取最新状态文件恢复任务现场，然后继续执行 todowrite 中未完成的下一步。
+- ego-browser skill 是 Terra-Edu 随软件打包的固定快照，不能自动更新、替换或从 ego lite 应用中重新复制。ego lite 浏览器本体也不能自动下载安装或升级；如果 \`ego-browser\` 不存在，只能提示顾问/Owner 手动处理，除非 Owner 明确设置 \`TERRA_EGO_BROWSER_ALLOW_INSTALL=1\`。
 - ego-browser 操作必须符合官方 skill：每轮 Bash 用 useOrCreateTaskSpace 或 takeOverTaskSpace 选中同一个申请 task space；用 openOrReuseTab 打开申请链接；用 snapshotText() 观察；用 fillInput、click、js、cdp、pressKey、typeText 等 helper 一次推进一组动作；所有对顾问可见输出必须用 cliLog(...)。
 - 页面里出现下拉、autocomplete、Slate 动态菜单、浏览器 alert/confirm/prompt 时，不要再切回 cua-driver 或坐标硬点。先通过 pageInfo()、snapshotText()、js(...) 或 cdp(...) 判断页面状态；必要时用键盘 typeahead 和 DOM/CDP 组合处理，并在保存前后再次 snapshotText() 或 pageInfo() 验证。
 - 如果 pageInfo() 返回 dialog 信息，必须用 ego-browser 官方建议的 cdp('Page.handleJavaScriptDialog', { accept: false }) 或更安全的取消策略处理；“离开此网站？”/“Leave site?” 一律取消或留在页面，防止未保存表单丢失。
@@ -184,6 +200,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - bash 允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用普通 bash 临时脚本替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
+- ego-browser skill 是 Terra-Edu 随软件打包的固定快照，不能自动更新、替换或从 ego lite 应用中重新复制。ego lite 浏览器本体也不能自动下载安装或升级；如果 \`ego-browser\` 不存在，只能提示顾问/Owner 手动处理，除非 Owner 明确设置 \`TERRA_EGO_BROWSER_ALLOW_INSTALL=1\`。
 - 遇到原生系统样式下拉弹层、Slate 动态菜单、autocomplete、alert 或“离开此网站？”时，不要坐标硬点，也不要切回旧 cua-driver；用 ego-browser 的 snapshotText/pageInfo/js/cdp/键盘策略处理，并在每次选择后复查。
 - 填表必须像真人一样小步推进：每页先 snapshotText/pageInfo；每填 1-3 个字段就复查；遇到新菜单、新字段、alert 或“离开此网站？”先处理阻塞；保存必须在 ego-browser 脚本里保存前检查、保存后复查，再调用 application-agent_cua record_save_verified，不能用 record_saved 直接算成功。
 
