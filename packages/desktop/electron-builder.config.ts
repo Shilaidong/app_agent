@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process"
+import { existsSync, lstatSync, readdirSync, statSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
@@ -9,6 +10,16 @@ const execFileAsync = promisify(execFile)
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const signScript = path.join(rootDir, "script", "sign-windows.ps1")
 
+type PackContext = {
+  appOutDir: string
+  electronPlatformName?: string
+  packager: {
+    appInfo: {
+      productFilename: string
+    }
+  }
+}
+
 async function signWindows(configuration: { path: string }) {
   if (process.platform !== "win32") return
   if (process.env.GITHUB_ACTIONS !== "true") return
@@ -18,6 +29,69 @@ async function signWindows(configuration: { path: string }) {
     ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", signScript, configuration.path],
     { cwd: rootDir },
   )
+}
+
+function walkFiles(base: string): string[] {
+  if (!existsSync(base)) return []
+  return readdirSync(base, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(base, entry.name)
+    if (entry.isDirectory()) return walkFiles(full)
+    if (entry.isFile()) return [full]
+    return []
+  })
+}
+
+function walkDirectories(base: string): string[] {
+  if (!existsSync(base)) return []
+  return readdirSync(base, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(base, entry.name)
+    if (!entry.isDirectory()) return []
+    return [full, ...walkDirectories(full)]
+  })
+}
+
+function isExecutableCode(file: string) {
+  const stat = statSync(file)
+  const basename = path.basename(file)
+  return (
+    (stat.mode & 0o111) !== 0 ||
+    basename.endsWith(".dylib") ||
+    basename.endsWith(".so") ||
+    basename.endsWith(".node") ||
+    basename === "ego Framework"
+  )
+}
+
+async function adHocSign(target: string) {
+  await execFileAsync("codesign", ["--sign", "-", "--force", "--timestamp=none", target])
+}
+
+async function signBundledEgoLite(context: PackContext) {
+  if (process.platform !== "darwin") return
+  if (context.electronPlatformName && context.electronPlatformName !== "darwin") return
+
+  const app = path.join(
+    context.appOutDir,
+    `${context.packager.appInfo.productFilename}.app`,
+    "Contents/Resources/vendor/ego-lite/ego lite.app",
+  )
+  if (!existsSync(app)) return
+
+  const files = walkFiles(app)
+    .filter(isExecutableCode)
+    .sort((a, b) => b.length - a.length)
+  const bundles = walkDirectories(app)
+    .filter((directory) => directory.endsWith(".app") || directory.endsWith(".framework"))
+    .filter((directory) => !lstatSync(directory).isSymbolicLink())
+    .sort((a, b) => b.length - a.length)
+
+  for (const file of files) {
+    await adHocSign(file)
+  }
+  for (const bundle of bundles) {
+    await adHocSign(bundle)
+  }
+  await adHocSign(app)
 }
 
 const channel = (() => {
@@ -65,6 +139,7 @@ const getBase = (): Configuration => ({
   dmg: {
     sign: true,
   },
+  afterPack: signBundledEgoLite,
   protocols: {
     name: "Terra-Edu Application Agent",
     schemes: ["terra-application-agent"],
