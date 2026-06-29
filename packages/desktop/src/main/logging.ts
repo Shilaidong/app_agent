@@ -16,9 +16,13 @@ export function initLogging() {
   return (logger = log)
 }
 
+export function logFilePath() {
+  return log.transports.file.getFile().path
+}
+
 export function tail(): string {
   try {
-    const path = log.transports.file.getFile().path
+    const path = logFilePath()
     const contents = readFileSync(path, "utf8")
     const lines = contents.split("\n")
     return lines.slice(Math.max(0, lines.length - TAIL_LINES)).join("\n")

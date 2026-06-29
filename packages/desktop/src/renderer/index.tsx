@@ -782,6 +782,44 @@ function ApplicationAgentShell(props: {
     }
   }
 
+  const resendStartPrompt = async () => {
+    const current = task()
+    const session = opencodeSession()
+    if (!current || !session) return
+    setBusy(true)
+    setError(null)
+    try {
+      await window.api.resendApplicationAgentStartPrompt(session, current)
+      setRestoreNotice("已重新发送精简启动指令：只要求建立 todowrite、初始化工作区并同步状态。")
+      await refreshAgentMessages(session)
+      await refreshAuthStatus()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const rebuildOpenCodeSession = async () => {
+    const current = task()
+    if (!current) return
+    setBusy(true)
+    setError(null)
+    try {
+      const session = await window.api.startApplicationAgentSession(current)
+      setOpenCodeSession(session)
+      setAgentMessages([])
+      persistActiveSession(session)
+      setRestoreNotice("已重建 OpenCode 会话，并发送精简启动指令。旧会话不会被隐藏，可通过 OpenCode 原生页查看。")
+      await refreshAgentMessages(session)
+      await refreshAuthStatus()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const blockSubmit = async () => {
     const current = task()
     const session = opencodeSession()
@@ -1370,6 +1408,8 @@ function ApplicationAgentShell(props: {
                   </div>
                   <div class="workspace-actions">
                     <button type="button" class="danger-outline" onClick={stopAutomation}>停止自动化</button>
+                    <button type="button" disabled={busy() || !opencodeSession()} onClick={resendStartPrompt}>重新发送启动指令</button>
+                    <button type="button" disabled={busy()} onClick={rebuildOpenCodeSession}>重建 OpenCode 会话</button>
                     <button type="button" onClick={() => setShowOpenCode(true)}>进入 OpenCode 对话</button>
                     <button type="button" onClick={() => window.api.openPath(currentTask().workspacePath)}>打开申请工作区</button>
                   </div>

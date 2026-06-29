@@ -234,6 +234,7 @@ function createSidecarEnv(): Record<string, string> {
   )
   const goAuth = openCodeGoAuthContent()
   if (goAuth && !env.OPENCODE_AUTH_CONTENT) env.OPENCODE_AUTH_CONTENT = goAuth
+  env.OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL = "1"
   delete env.DEBUG
   if (process.platform === "linux") delete env.LD_PRELOAD
   return env

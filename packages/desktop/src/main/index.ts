@@ -24,7 +24,7 @@ import { APPLICATION_AGENT_MODEL_ID, buildApplicationAgentStartPrompt, prepareAp
 import { checkAppExists, resolveAppPath, wslPath } from "./apps"
 import { CHANNEL, UPDATER_ENABLED } from "./constants"
 import { registerIpcHandlers, sendDeepLinks, sendMenuCommand, sendSqliteMigrationProgress } from "./ipc"
-import { initLogging } from "./logging"
+import { initLogging, logFilePath } from "./logging"
 import { parseMarkdown } from "./markdown"
 import { createMenu } from "./menu"
 import {
@@ -250,6 +250,21 @@ const main = Effect.gen(function* () {
     return `${text.slice(0, max).trimEnd()}\n...`
   }
 
+  const applicationAgentLogHelp = (session: ApplicationAgentSession) =>
+    [
+      `OpenCode / 桌面日志：${logFilePath()}`,
+      `Agent 工作区日志：${join(session.workspacePath, "04_logs/agent_log.md")}`,
+      `工具审计：${join(session.workspacePath, "03_state/agent_execution_audit.json")}`,
+    ].join("\n")
+
+  const summarizeOpenCodeReadError = (error: unknown) => {
+    if (!error) return "OpenCode 消息接口读取失败。"
+    const message = error instanceof Error ? error.message : String(error)
+    const redacted = message.replace(/Basic\s+[A-Za-z0-9+/=]+/g, "Basic [redacted]")
+    if (redacted.includes("Unexpected server error")) return "OpenCode 原生会话接口返回 Unexpected server error。"
+    return redacted || "OpenCode 消息接口读取失败。"
+  }
+
   type PendingQuestionRequest = {
     id: string
     sessionID: string
@@ -343,13 +358,39 @@ const main = Effect.gen(function* () {
       parts: SidecarPart[]
     }
 
+    let readError: unknown
     const messages = await getSidecarJson<SidecarMessage[]>(
       `/session/${session.sessionID}/message?limit=80`,
       session.directory,
-    )
+    ).catch((error) => {
+      readError = error
+      logger.warn("failed to read application-agent messages", error)
+      return null
+    })
+    if (!messages) {
+      return [
+        {
+          id: `${session.sessionID}:message-read-error`,
+          role: "system",
+          title: "OpenCode 消息读取失败",
+          body: `${summarizeOpenCodeReadError(readError)}\n\n${applicationAgentLogHelp(session)}\n\n可以先点“重新发送启动指令”；如果仍失败，再点“重建 OpenCode 会话”。`,
+          status: "error",
+          time: Date.now(),
+        },
+      ]
+    }
     const items: ApplicationAgentChatItem[] = []
+    let latestAssistantActivity = 0
 
     for (const message of messages) {
+      if (message.info.role === "assistant") {
+        latestAssistantActivity = Math.max(
+          latestAssistantActivity,
+          message.info.time?.created ?? 0,
+          message.info.time?.completed ?? 0,
+          ...message.parts.flatMap((part) => [part.time?.start ?? 0, part.time?.end ?? 0]),
+        )
+      }
       const text = message.parts
         .filter((part) => part.type === "text" && part.text?.trim())
         .map((part) => part.text!.trim())
@@ -424,12 +465,15 @@ const main = Effect.gen(function* () {
 
     const last = messages.at(-1)
     if (last?.info.role === "assistant" && !last.info.time?.completed) {
+      const stalled = latestAssistantActivity > 0 && Date.now() - latestAssistantActivity > 3 * 60 * 1000
       items.push({
         id: `${last.info.id}:thinking`,
         role: "system",
-        title: "OpenCode Agent 正在运行",
-        body: "Agent 正在处理当前申请任务。这里会自动刷新新的回复、工具调用和结果。",
-        status: "running",
+        title: stalled ? "Agent 可能卡住" : "OpenCode Agent 正在运行",
+        body: stalled
+          ? `Assistant 已超过 3 分钟没有新的回复、part 或工具结果。\n\n${applicationAgentLogHelp(session)}\n\n可以先点“重新发送启动指令”；如果仍失败，再点“重建 OpenCode 会话”。`
+          : "Agent 正在处理当前申请任务。这里会自动刷新新的回复、工具调用和结果。",
+        status: stalled ? "error" : "running",
         time: last.info.time?.created,
       })
     }
@@ -532,6 +576,24 @@ const main = Effect.gen(function* () {
     return session
   }
 
+  const resendApplicationAgentStartPrompt = async (session: ApplicationAgentSession, task: ApplicationTask) => {
+    await prepareApplicationAgentConfig(task.sessionDirectory)
+    await ensureApplicationAgentQuota("resend_start_prompt", task.workspacePath, session.sessionID)
+    await postSidecarJson<void>(
+      `/session/${session.sessionID}/prompt_async`,
+      session.directory,
+      {
+        agent: "application-agent",
+        model: {
+          providerID: "opencode-go",
+          modelID: APPLICATION_AGENT_MODEL_ID,
+        },
+        parts: [{ type: "text", text: buildApplicationAgentStartPrompt(task) }],
+      },
+      false,
+    )
+  }
+
   const sendApplicationAgentPrompt = async (session: ApplicationAgentSession, prompt: string) => {
     await ensureApplicationAgentQuota("send_agent_prompt", session.workspacePath, session.sessionID)
     const questions = await getSidecarJson<PendingQuestionRequest[]>("/question", session.directory).catch(() => [])
@@ -623,6 +685,7 @@ const main = Effect.gen(function* () {
     installUpdate: async () => installUpdate(killSidecar),
     setBackgroundColor: (color) => setBackgroundColor(color),
     startApplicationAgentSession,
+    resendApplicationAgentStartPrompt,
     sendApplicationAgentPrompt,
     getApplicationAgentMessages,
     findApplicationAgentSession,

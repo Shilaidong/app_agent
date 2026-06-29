@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs"
-import { chmod, mkdir, writeFile } from "node:fs/promises"
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
@@ -132,7 +132,7 @@ export function buildApplicationAgentStartPrompt(task: ApplicationTask) {
   const inputJson = JSON.stringify(task.input, null, 2)
   return `你现在是 Terra-Edu 申请 Agent，请立刻接管这个申请任务。不要等待顾问再输入第一条指令。
 
-这条消息就是启动信号。除非遇到必须由顾问确认的信息或登录动作，否则请从“创建申请工作区”开始自动执行完整流程。
+这条消息就是启动信号。请先执行稳定启动阶段：建立 todowrite、初始化工作区、同步状态并汇报结果；完成后再逐步进入材料读取、分类、申请要求抓取和填表。
 
 重要交互规则：遇到不确定信息、材料用途、学校要求解释或申请平台字段选择时，优先调用 OpenCode 内置 question 工具向顾问提出清晰选项；顾问回复后，把确认结果写入 task_state.json、missing_items.json 或 application_progress.json，再继续执行。
 
@@ -164,12 +164,15 @@ ${inputJson}
 - application-agent_login：从 03_state/login_credentials.json 读取本机保存的申请平台账号状态，并通过钥匙串读取密码后填写登录页；不会把密码输出给 Agent。
 - application-agent_risk：识别并阻断最终提交、付款、不可逆推荐信邀请、保存账号密码等高风险动作。
 - application-agent_requirements：保存 webfetch/websearch 得到的学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
+- application-agent_runtime：客户机兼容兜底工具。仅在某个 OpenCode 内置工具实际失败一次后使用；启动阶段不要主动调用。
 
 ## 工具调用硬性约束
 
-- 启动后先调用 OpenCode 内置 todowrite，建立默认 10 步任务清单；每完成或阻塞一步，都更新 todowrite，并调用 application-agent_state 同步 application_progress.json。
+- 启动阶段只做三件事：输出简短进度、优先调用 OpenCode 内置 todowrite 建立默认计划、调用 application-agent_workspace 初始化工作区并复制材料副本。todowrite 如果失败一次，不要重试、不要调用 runtime、不要阻塞启动；改用文字列出计划并继续 workspace 初始化。
+- 启动阶段不要调用 webfetch、websearch、application-agent_requirements、application-agent_runtime、ego-browser 或填表相关工具；这些放到工作区初始化成功后的后续阶段逐步执行。
 - 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
-- 学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方学校/项目/申请要求页面。抓取结果必须调用 application-agent_requirements 落盘。
+- 后续阶段中，学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方学校/项目/申请要求页面。抓取结果必须调用 application-agent_requirements 落盘。
+- 如果 OpenCode 内置工具实际失败一次，不要在同一个工具上循环重试；简短说明失败原因，然后使用 application-agent_runtime 按工具 schema 继续。
 - bash 允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用普通 bash 临时脚本替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
@@ -181,53 +184,21 @@ ${inputJson}
 - 如果任务需要顾问登录、验证码、MFA 或人工接管，调用 ego-browser 的 handOffTaskSpace(task.id)，并在顾问明确回复继续后用 takeOverTaskSpace(task.id) 恢复。不要自动抢回控制。
 - 点击 SAVE 前，必须在 ego-browser 脚本内检查当前 modal/page 的必填空项和 validation 文案；保存后必须再次读取页面，确认没有错误提示，才调用 application-agent_cua 的 record_save_verified 写入 savedPages。
 
-## 你必须由 OpenCode 自己执行的工作
+## 启动阶段（第一轮只做这些）
+
+1. 先用 1-2 句话告诉顾问：申请任务已接管，正在创建隔离工作区。
+2. 优先调用 OpenCode 内置 todowrite 创建默认 10 步计划；如果 todowrite 调用失败一次，直接用文字列出默认计划并继续下一步。
+3. 调用 application-agent_workspace，action 使用 initialize，初始化目标申请工作区并复制原始材料副本。
+4. 调用 application-agent_state，把状态更新为“正在读取文件”或写入 workspace 初始化结果。
+5. 输出工作区路径、材料副本位置和下一步计划。
+
+启动阶段不要读取材料正文、不要抓取学校网页、不要打开申请平台、不要调用 runtime 兜底。完成上述步骤后，再按下面的后续阶段逐步推进。
+
+## 后续阶段执行顺序
 
 在执行过程中，你必须像真正的申请 Agent 聊天助手一样持续输出可读进度。每开始一个大步骤前先用 1-3 句话告诉顾问“正在做什么、为什么做、预计产出什么”；每完成一个大步骤后说明“已完成什么、文件保存在哪里、下一步是什么”。不要长时间只调用工具而不输出任何对顾问可见的文字。
 
-1. 调用 application-agent_workspace 初始化目标申请工作区并复制原始材料副本。
-2. 在目标申请工作区确认标准目录：
-   - 00_original_backup
-   - 01_classified_materials/identity
-   - 01_classified_materials/academic
-   - 01_classified_materials/language
-   - 01_classified_materials/essays
-   - 01_classified_materials/recommendation
-   - 01_classified_materials/financial
-   - 01_classified_materials/platform_related
-   - 01_classified_materials/other
-   - 01_classified_materials/needs_review
-   - 02_generated
-   - 03_state
-   - 04_logs
-   - 05_screenshots
-   - 06_new_materials
-3. 只读取原始学生资料文件夹，不修改它；后续只操作 00_original_backup 和申请工作区内部文件。
-4. 实际读取 PDF、Word、图片、表格等材料内容；不能只根据文件名生成学生档案。如果某个文件无法解析，请记录到 needs_review 和不确定项。
-5. 调用 application-agent_materials 分类材料到 01_classified_materials。无法确认用途的材料必须进入 needs_review。
-6. 生成并维护这些文件：
-   - 02_generated/student_profile.md
-   - 02_generated/info_collection_form.md
-   - 02_generated/material_collection_form.md
-   - 02_generated/missing_materials.docx
-   - 02_generated/application_requirements.md
-   - 02_generated/task_summary.md
-   - 03_state/task_state.json
-   - 03_state/missing_items.json
-   - 03_state/application_progress.json
-   - 03_state/application_requirements.json
-   - 04_logs/agent_log.md
-   - 04_logs/cua_log.md
-7. 生成学生档案前，先用 webfetch 读取申请链接；如不能确认学校/项目要求，用 websearch 搜索官方页面，然后调用 application-agent_requirements 落盘。
-8. student_profile.md 必须是基于材料内容和申请要求的结构化学生申请档案，包含材料路径、已确认信息、缺失项、不确定项和申请目标。
-9. missing_materials.docx 必须通过 application-agent_documents 从 03_state/missing_items.json 生成，面向顾问、学生和家长，避免技术语言。
-10. 进入填表阶段时，先调用 application-agent_cua 的 prepare_ego_task 记录 ego-browser 后端、申请链接和 task space 名称；然后严格使用官方 ego-browser skill 的 Bash heredoc 操作申请平台。首次脚本必须 useOrCreateTaskSpace、openOrReuseTab、snapshotText，并把 task.id、pageInfo 和页面摘要用 cliLog 输出。
-11. 如需登录，优先使用顾问在 ego lite / Chrome 迁移后的真实登录态；如 03_state/login_credentials.json 里有已保存平台账号密码，可调用 application-agent_login 辅助填写登录页，但不能输出明文密码。需要 MFA/验证码时，调用 handOffTaskSpace 交给顾问，顾问回复继续后再 takeOverTaskSpace。
-12. 登录完成后必须按 ego-browser 真人式循环推进：snapshotText/pageInfo 观察页面和 modal，填 1-3 个字段后再次 snapshotText 或 pageInfo 复查，遇到新菜单/新字段就调整策略，最后保存前后都做验证，并调用 application-agent_cua record_save_verified 记录。
-13. 遇到 select、combobox、dropdown、degree program、state、school、test type 等下拉选择时，优先用 ego-browser 的语义 workflow：snapshotText refs/locators、fillInput、click、js DOM/CDP 和键盘 typeahead；必要时再用 visual workflow 截图辅助，但不能回退到 cua-driver。
-14. 如果浏览器弹出 alert/confirm/prompt 或“离开此网站？”确认框，在 ego-browser 脚本里用 pageInfo/dialog 与 cdp('Page.handleJavaScriptDialog', { accept:false }) 或安全取消策略处理；处理结果再调用 application-agent_cua record_blocker 写入进度。
-15. 不确定内容用 question 提供 2-3 个顾问可选答案；每个关键阶段都要在对话里告诉顾问进度，并调用 application-agent_state 同步更新 03_state/task_state.json。
-16. 完成当前可做内容后，检查 agent_execution_audit.json，输出阶段性总结和下一步需要顾问补充的内容。
+后续阶段按 agent prompt 和 skills 中的 SOP 逐步执行：读取材料副本、分类材料、生成学生档案、抓取官方申请要求、记录缺失项、生成清单、再进入 ego-browser 填表。不要把这些后续工作塞进启动阶段一次性并行执行。
 
 ## 安全边界
 
@@ -238,7 +209,7 @@ ${inputJson}
 - 严禁瞎填、猜填不确定字段。
 - 遇到最终提交、付款、不可逆确认、推荐信邀请时，必须停止并写入 task_summary.md 的人工处理事项。
 
-请现在开始执行第 1 步：创建目标申请工作区。`
+请现在只执行“启动阶段”：优先创建 todowrite 计划；如果 todowrite 不可用就用文字计划继续；初始化目标申请工作区、同步状态并汇报结果。`
 }
 
 
@@ -246,10 +217,10 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 
 你的目标是帮助顾问自动完成学生资料整理、申请信息生成、申请平台填写、缺失材料识别和补充材料清单输出。
 
-顾问已经在任务创建页填写基础信息，包括学生姓名、学生资料文件夹、申请学校、申请项目、申请类型、申请平台或申请链接。任务开始后，你必须自动执行申请流程，不要等待顾问一步一步指挥。
+顾问已经在任务创建页填写基础信息，包括学生姓名、学生资料文件夹、申请学校、申请项目、申请类型、申请平台或申请链接。任务开始后，你先完成稳定启动阶段，再按默认流程逐步执行，不要等待顾问一步一步指挥。
 
 默认流程：
-1. 先调用 OpenCode 内置 todowrite 创建 10 步计划，并在每个阶段更新进度。
+1. 优先调用 OpenCode 内置 todowrite 创建 10 步计划，并在每个阶段更新进度；如果 todowrite 调用失败一次，用文字计划继续，不要阻塞工作区初始化。
 2. 调用 application-agent_workspace 创建/刷新专属申请工作区，并把原始资料复制到 00_original_backup。
 3. 读取学生资料副本，识别申请相关文件。
 4. 调用 application-agent_materials 整理材料，无法判断的文件放入 needs_review。
@@ -270,11 +241,13 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - application-agent_login：用本机钥匙串保存的申请平台账号密码填写登录页；不会向 Agent 输出明文密码。
 - application-agent_risk：高风险动作识别和硬拦截。
 - application-agent_requirements：保存学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
+- application-agent_runtime：客户机兼容兜底工具。仅在某个 OpenCode 内置工具实际失败一次后使用；启动阶段不要主动调用。
 
 工具调用硬性约束：
-- 启动后必须调用 todowrite，建立默认 10 步计划；每完成一步要同步 todowrite 和 application-agent_state。
-- 学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方页面。抓取结果必须调用 application-agent_requirements 落盘。
+- 启动阶段只做 todowrite、application-agent_workspace initialize 和 application-agent_state 状态同步；todowrite 如果失败一次，用文字计划继续，不要阻塞工作区初始化；不要在启动阶段调用 webfetch、websearch、application-agent_requirements、application-agent_runtime 或 ego-browser。
+- 后续阶段中，学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方页面。抓取结果必须调用 application-agent_requirements 落盘。
 - 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
+- 如果 OpenCode 内置工具实际失败一次，不要在同一个工具上循环重试；简短说明失败原因，然后使用 application-agent_runtime 按工具 schema 继续。
 - bash 允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用普通 bash 临时脚本替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
@@ -302,7 +275,8 @@ const SKILL_DEFINITIONS = [
 1. 读取任务创建页输入，确认学生姓名、资料文件夹、申请学校、项目、类型和申请链接均存在。
 2. 说明本次任务边界：Agent 可以整理、填写、保存和上传可确认材料，但不能最终提交、付款或发送不可逆推荐信邀请。
 3. 立即调用 todowrite 创建 10 步默认计划，并调用 application-agent_state，把状态更新为“正在创建申请工作区”。
-4. 调用 workspace-building skill，进入默认 10 步流程，不等待顾问再输入第一条指令。
+4. 调用 workspace-building skill，只完成工作区初始化和材料副本复制。
+5. 向顾问汇报工作区路径、材料副本位置和下一步计划；后续再进入材料读取、分类、申请要求抓取和填表阶段。
 
 输出要求：
 - 对话里用 1-3 句话说明当前开始做什么。
@@ -529,7 +503,7 @@ ${command[2]}
 function renderApplicationAgentTools() {
   return String.raw`import { existsSync } from "node:fs"
 import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises"
-import { basename, dirname, extname, join, relative } from "node:path"
+import { basename, dirname, extname, join, relative, resolve } from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
@@ -724,6 +698,160 @@ async function listFiles(dir: string): Promise<string[]> {
   }
   await walk(dir)
   return out
+}
+
+function resolveWorkspacePath(workspace: string, value?: string) {
+  const raw = String(value || ".").trim()
+  if (!raw || raw === ".") return workspace
+  if (raw === "~") return process.env.HOME || raw
+  if (raw.startsWith("~/")) return join(process.env.HOME || "", raw.slice(2))
+  return raw.startsWith("/") ? raw : resolve(workspace, raw)
+}
+
+function isSensitivePath(path: string) {
+  const name = basename(path).toLowerCase()
+  if (name === ".env" || name.startsWith(".env.")) return true
+  if (/password|secret|token|credential|keychain/.test(path.toLowerCase()) && !/login_credentials\.json$/.test(path)) return true
+  return false
+}
+
+function clipRuntimeText(value: unknown, max = 30000) {
+  const text = redactSensitiveText(value)
+  if (text.length <= max) return text
+  return text.slice(0, max) + "\n...[truncated " + String(text.length - max) + " chars]"
+}
+
+function globToRegExp(pattern: string) {
+  const escaped = pattern
+    .replace(/[.+^$()|[\]\\{}]/g, "\\$&")
+    .replace(/\*\*/g, "__DOUBLE_STAR__")
+    .replace(/\*/g, "[^/]*")
+    .replace(/__DOUBLE_STAR__/g, ".*")
+    .replace(/\?/g, ".")
+  return new RegExp("^" + escaped + "$", "i")
+}
+
+function matchesRuntimePattern(path: string, workspace: string, pattern?: string) {
+  const raw = String(pattern || "").trim()
+  if (!raw || raw === "**/*" || raw === "*") return true
+  const rel = relative(workspace, path)
+  try {
+    return globToRegExp(raw).test(rel) || globToRegExp(raw).test(basename(path))
+  } catch {
+    return rel.toLowerCase().includes(raw.toLowerCase()) || basename(path).toLowerCase().includes(raw.toLowerCase())
+  }
+}
+
+function isDangerousRuntimeCommand(command: string) {
+  const normalized = command.replace(/\s+/g, " ").trim().toLowerCase()
+  if (/\brm\s+-rf\s+(\/|~|\*|\$home|\.)/.test(normalized)) return true
+  if (/\bgit\s+push\b/.test(normalized)) return true
+  if (/\b(shutdown|reboot|halt)\b/.test(normalized)) return true
+  if (/\bsecurity\s+find-generic-password\b/.test(normalized)) return true
+  if (/osascript .*tell application .*system events/i.test(command)) return true
+  return false
+}
+
+async function runtimeRunShell(command: string, cwd: string, timeout: number) {
+  if (isDangerousRuntimeCommand(command)) {
+    return { exitCode: 126, stdout: "", stderr: "Blocked by Terra-Edu runtime safety policy." }
+  }
+  const shell = process.env.SHELL || "/bin/zsh"
+  const pathParts = [join(cwd, ".opencode/bin"), process.env.PATH || ""].filter(Boolean)
+  try {
+    const result = await execFileAsync(shell, ["-lc", command], {
+      cwd,
+      timeout,
+      maxBuffer: 1024 * 1024 * 8,
+      env: { ...process.env, PATH: pathParts.join(":") },
+    } as any)
+    return { exitCode: 0, stdout: String(result.stdout || ""), stderr: String(result.stderr || "") }
+  } catch (error: any) {
+    return {
+      exitCode: typeof error?.code === "number" ? error.code : 1,
+      stdout: String(error?.stdout || ""),
+      stderr: String(error?.stderr || error?.message || error),
+    }
+  }
+}
+
+function decodeHtmlEntities(text: string) {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+}
+
+function stripHtml(text: string) {
+  return decodeHtmlEntities(String(text || "").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim())
+}
+
+async function runtimeFetchText(url: string, timeout: number) {
+  const fetchFn = (globalThis as any).fetch
+  if (typeof fetchFn !== "function") throw new Error("fetch is unavailable in this OpenCode runtime")
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : undefined
+  const timer = controller ? setTimeout(() => controller.abort(), timeout) : undefined
+  try {
+    const response = await fetchFn(url, {
+      signal: controller?.signal,
+      headers: {
+        "user-agent": "Terra-Edu Application Agent/1.0",
+        accept: "text/html,application/xhtml+xml,application/xml,text/plain;q=0.9,*/*;q=0.8",
+      },
+    })
+    const text = await response.text()
+    return {
+      ok: Boolean(response.ok),
+      status: Number(response.status || 0),
+      url: String(response.url || url),
+      contentType: String(response.headers?.get?.("content-type") || ""),
+      text,
+    }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+async function runtimeSearchWeb(query: string, maxResults: number) {
+  const target = "https://duckduckgo.com/html/?q=" + encodeURIComponent(query)
+  const fetched = await runtimeFetchText(target, 20000)
+  const html = fetched.text
+  const results = []
+  const regex = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(html)) && results.length < maxResults) {
+    const url = decodeHtmlEntities(match[1] || "")
+    const title = stripHtml(match[2] || "")
+    if (url && title) results.push({ title, url })
+  }
+  if (results.length === 0) {
+    return {
+      source: target,
+      results: [],
+      excerpt: clipRuntimeText(stripHtml(html), 4000),
+    }
+  }
+  return { source: target, results }
+}
+
+async function runtimeLoadSkill(workspace: string, name: string) {
+  const skillName = String(name || "").trim()
+  if (!skillName) throw new Error("Skill name is required")
+  const candidates = [
+    join(workspace, ".opencode/skills", skillName, "SKILL.md"),
+    join(workspace, ".opencode/skills", skillName.replace(/^.*:/, ""), "SKILL.md"),
+    join(workspace, ".opencode/skill", skillName, "SKILL.md"),
+  ]
+  for (const file of candidates) {
+    if (!existsSync(file)) continue
+    const body = await readFile(file, "utf8")
+    const related = (await listFiles(dirname(file))).slice(0, 50).map((item) => relative(workspace, item))
+    return { name: skillName, path: relative(workspace, file), body: clipRuntimeText(body, 40000), relatedFiles: related }
+  }
+  return { name: skillName, status: "not_found", searched: candidates.map((item) => relative(workspace, item)) }
 }
 
 function generatedFiles(workspace: string) {
@@ -1109,6 +1237,132 @@ export const documents = {
     await saveTask(workspace, task, missing.some((item: any) => item.blocksProgress) ? "等待补充材料" : "阶段性完成", "已生成信息表、材料表、Word 缺失清单和阶段总结。")
     await appendAudit(workspace, "documents", action, "completed", "generated documents from missing_items.json")
     return "文档已生成到 02_generated。Word 清单基于 03_state/missing_items.json。"
+  },
+}
+
+export const runtime = {
+  description: "Fallback runtime for installed Macs when OpenCode built-in bash/read/glob/webfetch/websearch/skill fail with the same low-level error. Prefer native built-ins first, then use this tool once a built-in class is confirmed broken.",
+  args: inputArg({
+    action: { type: "string", enum: ["diagnose", "record_builtin_failure", "read_file", "list_files", "run_bash", "fetch_url", "search_web", "load_skill"], description: "Fallback action to execute" },
+    toolName: { type: "string", description: "Name of the failed OpenCode built-in tool, for record_builtin_failure" },
+    error: { type: "string", description: "Original low-level error from the built-in tool" },
+    path: { type: "string", description: "Relative or absolute path for read_file/list_files" },
+    pattern: { type: "string", description: "Optional glob-like filter for list_files" },
+    command: { type: "string", description: "Shell command for run_bash. Dangerous commands are blocked." },
+    workdir: { type: "string", description: "Optional working directory for run_bash" },
+    timeout: { type: "number", description: "Optional timeout in milliseconds" },
+    url: { type: "string", description: "URL for fetch_url" },
+    query: { type: "string", description: "Search query for search_web" },
+    name: { type: "string", description: "Skill name for load_skill" },
+    maxResults: { type: "number", description: "Maximum web search results or file entries" },
+  }, ["action"]),
+  async execute(args, ctx) {
+    const input = args.input || {}
+    const action = String(input.action || "")
+    const workspace = root(ctx)
+    await appendAudit(workspace, "runtime", action, "started", input.toolName || input.path || input.command || input.url || input.query || input.name || "", ctx)
+    try {
+      if (action === "diagnose") {
+        const skillDir = join(workspace, ".opencode/skills")
+        const result = {
+          status: "ok",
+          workspace,
+          exists: existsSync(workspace),
+          stateDir: existsSync(join(workspace, "03_state")),
+          toolsFile: existsSync(join(workspace, ".opencode/tools/application-agent.ts")),
+          skillsDir: existsSync(skillDir),
+          egoBrowserWrapper: existsSync(join(workspace, ".opencode/bin/ego-browser")),
+          path: process.env.PATH || "",
+        }
+        await appendAudit(workspace, "runtime", action, "completed", "diagnose ok", ctx)
+        return JSON.stringify(result, null, 2)
+      }
+
+      if (action === "record_builtin_failure") {
+        const progress = ensureCuaProgress(await readJson(join(workspace, "03_state/application_progress.json"), {}))
+        appendLimited(progress, "failedActions", {
+          at: new Date().toISOString(),
+          action: "opencode_builtin_tool_failure",
+          toolName: String(input.toolName || "unknown"),
+          reason: redactSensitiveText(input.error || "OpenCode built-in tool failed"),
+        })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendLog(workspace, "agent", "OpenCode 内置工具失败，已切换到 application-agent_runtime 兜底：" + String(input.toolName || "unknown"))
+        await appendAudit(workspace, "runtime", action, "completed", String(input.toolName || "unknown"), ctx)
+        return JSON.stringify({ status: "recorded", fallbackTool: "application-agent_runtime", failedTool: String(input.toolName || "unknown") }, null, 2)
+      }
+
+      if (action === "read_file") {
+        const file = resolveWorkspacePath(workspace, input.path)
+        if (isSensitivePath(file)) throw new Error("Refusing to read sensitive file: " + basename(file))
+        const body = await readFile(file, "utf8")
+        const result = { status: "completed", path: file, relativePath: relative(workspace, file), content: clipRuntimeText(body, 50000) }
+        await appendAudit(workspace, "runtime", action, "completed", relative(workspace, file), ctx)
+        return JSON.stringify(result, null, 2)
+      }
+
+      if (action === "list_files") {
+        const dir = resolveWorkspacePath(workspace, input.path)
+        const maxResults = Math.max(1, Math.min(1000, Number(input.maxResults || 300)))
+        const files = (await listFiles(dir))
+          .filter((file) => matchesRuntimePattern(file, workspace, input.pattern))
+          .slice(0, maxResults)
+          .map((file) => ({ path: file, relativePath: relative(workspace, file), name: basename(file), extension: extname(file).toLowerCase() }))
+        await appendAudit(workspace, "runtime", action, "completed", "files " + files.length, ctx)
+        return JSON.stringify({ status: "completed", root: dir, pattern: input.pattern || "", files }, null, 2)
+      }
+
+      if (action === "run_bash") {
+        const command = String(input.command || "").trim()
+        if (!command) throw new Error("command is required")
+        const cwd = resolveWorkspacePath(workspace, input.workdir || ".")
+        const timeout = Math.max(1000, Math.min(300000, Number(input.timeout || 120000)))
+        const output = await runtimeRunShell(command, cwd, timeout)
+        await appendAudit(workspace, "runtime", action, output.exitCode === 0 ? "completed" : "failed", "exit " + output.exitCode, ctx)
+        return JSON.stringify({
+          status: output.exitCode === 0 ? "completed" : "failed",
+          exitCode: output.exitCode,
+          cwd,
+          stdout: clipRuntimeText(output.stdout, 50000),
+          stderr: clipRuntimeText(output.stderr, 20000),
+        }, null, 2)
+      }
+
+      if (action === "fetch_url") {
+        const url = String(input.url || "").trim()
+        if (!/^https?:\/\//i.test(url)) throw new Error("fetch_url requires an http(s) URL")
+        const timeout = Math.max(1000, Math.min(60000, Number(input.timeout || 20000)))
+        const fetched = await runtimeFetchText(url, timeout)
+        await appendAudit(workspace, "runtime", action, fetched.ok ? "completed" : "failed", url + " status " + fetched.status, ctx)
+        return JSON.stringify({
+          status: fetched.ok ? "completed" : "failed",
+          httpStatus: fetched.status,
+          url: fetched.url,
+          contentType: fetched.contentType,
+          text: clipRuntimeText(stripHtml(fetched.text) || fetched.text, 50000),
+        }, null, 2)
+      }
+
+      if (action === "search_web") {
+        const query = String(input.query || "").trim()
+        if (!query) throw new Error("query is required")
+        const maxResults = Math.max(1, Math.min(10, Number(input.maxResults || 5)))
+        const result = await runtimeSearchWeb(query, maxResults)
+        await appendAudit(workspace, "runtime", action, "completed", query, ctx)
+        return JSON.stringify({ status: "completed", query, ...result }, null, 2)
+      }
+
+      if (action === "load_skill") {
+        const result = await runtimeLoadSkill(workspace, String(input.name || ""))
+        await appendAudit(workspace, "runtime", action, result.status === "not_found" ? "failed" : "completed", input.name || "", ctx)
+        return JSON.stringify(result, null, 2)
+      }
+
+      throw new Error("Unsupported runtime action: " + action)
+    } catch (error: any) {
+      await appendAudit(workspace, "runtime", action, "failed", String(error?.message || error), ctx)
+      return JSON.stringify({ status: "failed", action, error: redactSensitiveText(error?.message || error) }, null, 2)
+    }
   },
 }
 
@@ -1623,6 +1877,11 @@ export async function writeOpenCodeConfig(workspacePath: string) {
   await mkdir(join(base, "commands"), { recursive: true })
   await mkdir(join(base, "prompts"), { recursive: true })
   await mkdir(join(base, "tools"), { recursive: true })
+  await Promise.all(
+    ["node_modules", "package.json", "package-lock.json", "bun.lock"].map((name) =>
+      rm(join(base, name), { recursive: true, force: true }),
+    ),
+  )
   await writeJson(join(base, "opencode.json"), {
     $schema: "https://opencode.ai/config.json",
     model: APPLICATION_AGENT_MODEL,
@@ -1663,13 +1922,26 @@ export async function writeOpenCodeConfig(workspacePath: string) {
         mode: "primary",
         model: APPLICATION_AGENT_MODEL,
         prompt: "{file:./prompts/application-agent.md}",
-        permission: {
+      permission: {
+        "*": "allow",
+        read: {
           "*": "allow",
-          question: "allow",
-          skill: { "*": "allow" },
-          todowrite: "allow",
-          webfetch: "allow",
-          websearch: "allow",
+          "*.env": "deny",
+          "*.env.*": "deny",
+          "*.env.example": "allow",
+        },
+        glob: "allow",
+        grep: "allow",
+        bash: {
+          "*": "allow",
+          "rm -rf *": "deny",
+          "git push*": "deny",
+        },
+        question: "allow",
+        skill: { "*": "allow" },
+        todowrite: "allow",
+        webfetch: "allow",
+        websearch: "allow",
         },
       },
     },
@@ -1694,6 +1966,17 @@ mode: primary
 model: opencode-go/deepseek-v4-pro
 permission:
   "*": allow
+  read:
+    "*": allow
+    "*.env": deny
+    "*.env.*": deny
+    "*.env.example": allow
+  glob: allow
+  grep: allow
+  bash:
+    "*": allow
+    "rm -rf *": deny
+    "git push*": deny
   question: allow
   skill:
     "*": allow

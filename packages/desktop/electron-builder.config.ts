@@ -100,6 +100,8 @@ const channel = (() => {
   return "dev"
 })()
 
+const macTarget = process.env.TERRA_EDU_MAC_TARGET === "zip" ? ["zip"] : ["dmg", "zip"]
+
 const getBase = (): Configuration => ({
   artifactName: "terra-edu-application-agent-${os}-${arch}.${ext}",
   directories: {
@@ -134,7 +136,7 @@ const getBase = (): Configuration => ({
     entitlements: "resources/entitlements.plist",
     entitlementsInherit: "resources/entitlements.plist",
     notarize: false,
-    target: ["dmg", "zip"],
+    target: macTarget,
   },
   dmg: {
     sign: true,

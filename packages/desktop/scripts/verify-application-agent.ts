@@ -6,9 +6,15 @@ const root = fileURLToPath(new URL("..", import.meta.url))
 const sourcePath = join(root, "src/main/application-agent.ts")
 const applicationSource = readFileSync(sourcePath, "utf8")
 const opencodeSource = readFileSync(join(root, "src/main/application-agent-opencode.ts"), "utf8")
+const mainSource = readFileSync(join(root, "src/main/index.ts"), "utf8")
 const modelSource = readFileSync(join(root, "src/main/application-agent-model.ts"), "utf8")
 const constantsSource = readFileSync(join(root, "src/main/constants.ts"), "utf8")
 const builderSource = readFileSync(join(root, "electron-builder.config.ts"), "utf8")
+const prebuildSource = readFileSync(join(root, "scripts/prebuild.ts"), "utf8")
+const releaseMacSource = readFileSync(join(root, "scripts/release-mac.ts"), "utf8")
+const desktopServerSource = readFileSync(join(root, "src/main/server.ts"), "utf8")
+const opencodeConfigSource = readFileSync(join(root, "../opencode/src/config/config.ts"), "utf8")
+const opencodeToolRegistrySource = readFileSync(join(root, "../opencode/src/tool/registry.ts"), "utf8")
 const egoSkillSource = readFileSync(join(root, "resources/ego-browser/SKILL.md"), "utf8")
 const egoInstallSource = readFileSync(join(root, "resources/ego-browser/references/install.md"), "utf8")
 const egoInstallScript = readFileSync(join(root, "resources/ego-browser/scripts/install.sh"), "utf8")
@@ -17,6 +23,7 @@ const vendoredEgoLiteInfoPlist = join(vendoredEgoLiteApp, "Contents/Info.plist")
 const source = [applicationSource, opencodeSource, modelSource].join("\n")
 const authSource = readFileSync(join(root, "src/main/terra-auth.ts"), "utf8")
 const rendererSource = readFileSync(join(root, "src/renderer/index.tsx"), "utf8")
+const desktopUiSource = [source, mainSource, rendererSource].join("\n")
 
 const expectedSkills = [
   "task-initialization",
@@ -46,7 +53,7 @@ const expectedCommands = [
   "summarize-progress",
 ]
 
-const expectedTools = ["workspace", "materials", "state", "documents", "requirements", "login", "risk", "cua"]
+const expectedTools = ["workspace", "materials", "state", "documents", "runtime", "requirements", "login", "risk", "cua"]
 
 const expectedWorkspaceDirs = [
   "00_original_backup",
@@ -131,6 +138,14 @@ assert(source.includes("tail_turns: 18"), "Application Agent must preserve more 
 assert(source.includes("preserve_recent_tokens: 60000"), "Application Agent must preserve a larger recent-token budget")
 assert(source.includes("permission: {"), "OpenCode permission block is missing")
 assert(source.includes("\"*\": \"allow\""), "Workspace allow permissions are missing")
+assert(source.includes("glob: \"allow\""), "Application Agent must explicitly allow OpenCode glob")
+assert(source.includes("grep: \"allow\""), "Application Agent must explicitly allow OpenCode grep")
+assert(source.includes("read: {"), "Application Agent must explicitly allow OpenCode read")
+assert(source.includes("bash: {"), "Application Agent must explicitly allow OpenCode bash")
+assert(desktopServerSource.includes("OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL"), "Desktop sidecar must disable OpenCode project dependency auto-install")
+assert(opencodeConfigSource.includes("OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL"), "OpenCode config loader must support disabling project dependency auto-install")
+assert(opencodeToolRegistrySource.includes('providerID.startsWith("opencode")'), "OpenCode Go models must expose websearch")
+assert(source.includes('rm(join(base, name), { recursive: true, force: true })'), "Workspace config writer must remove stale OpenCode dependency install artifacts")
 
 assert(source.includes("application-agent_workspace"), "Start prompt must mention workspace tool")
 assert(source.includes("application-agent_materials"), "Start prompt must mention materials tool")
@@ -173,6 +188,16 @@ assert(vendoredHelpers.some((file) => (statSync(file).mode & 0o111) !== 0), "Ven
 assert(source.includes("application-agent_login"), "Start prompt must mention login tool")
 assert(source.includes("application-agent_risk"), "Start prompt must mention risk tool")
 assert(source.includes("application-agent_requirements"), "Start prompt must mention requirements tool")
+assert(source.includes("application-agent_runtime"), "Runtime fallback tool must remain available")
+assert(source.includes("record_builtin_failure"), "Runtime fallback must record OpenCode built-in tool failures")
+assert(source.includes("read_file") && source.includes("list_files") && source.includes("run_bash"), "Runtime fallback file/shell actions are missing")
+assert(source.includes("fetch_url") && source.includes("search_web") && source.includes("load_skill"), "Runtime fallback web/skill actions are missing")
+assert(source.includes("diagnose"), "Runtime fallback diagnose action is missing")
+assert(source.includes("启动阶段只做"), "Startup prompt must constrain the first turn to a minimal startup phase")
+assert(source.includes("不要在启动阶段调用 webfetch"), "Startup prompt must keep web research out of the first turn")
+assert(source.includes("todowrite 如果失败一次"), "Startup prompt must not block workspace initialization on todowrite failure")
+assert(!source.includes("OpenCode 内置工具参数必须严格使用官方字段名"), "Startup prompt must not include brittle built-in field-name contracts")
+assert(!source.includes("read -> read_file"), "Startup prompt must not include a fallback mapping table")
 assert(source.includes("工具调用硬性约束"), "Start prompt must include hard tool-call constraints")
 assert(source.includes("appendAudit"), "Custom tools must write execution audit records")
 assert(source.includes("agent_execution_audit.json"), "Execution audit output file is missing")
@@ -193,6 +218,17 @@ assert(rendererSource.includes("notifyTaskProgress"), "Renderer must notify task
 assert(rendererSource.includes("申请 Agent 步骤已更新"), "Step progress notification title is missing")
 assert(rendererSource.includes("isSameApplicationTaskInput"), "Renderer duplicate task guard is missing")
 assert(rendererSource.includes("不会再创建重复任务"), "Renderer duplicate task user notice is missing")
+assert(desktopUiSource.includes("Agent 可能卡住"), "Renderer/main message projection must expose stalled agent state")
+assert(desktopUiSource.includes("OpenCode 消息读取失败"), "Renderer/main message projection must expose message read failures")
+assert(rendererSource.includes("重新发送启动指令"), "Renderer must allow resending the startup prompt")
+assert(rendererSource.includes("重建 OpenCode 会话"), "Renderer must allow rebuilding the OpenCode session")
+assert(mainSource.includes("resendApplicationAgentStartPrompt"), "Main process must expose startup prompt resend")
+assert(prebuildSource.includes("MODELS_DEV_API_JSON"), "Desktop prebuild must use a local models.dev snapshot")
+assert(prebuildSource.includes("models-api.json"), "Desktop prebuild must point MODELS_DEV_API_JSON to the vendored fixture")
+assert(releaseMacSource.includes("ELECTRON_BUILDER_CACHE"), "mac release must keep electron-builder cache inside the workspace")
+assert(builderSource.includes("TERRA_EDU_MAC_TARGET"), "mac builder config must allow ZIP-only fallback when hdiutil is unavailable")
+assert(releaseMacSource.includes("hdiutil create"), "mac release must probe DMG capability before packaging")
+assert(releaseMacSource.includes("ZIP-only"), "mac release must explain ZIP-only fallback")
 
 assert(source.includes("prepare_ego_task"), "ego-browser prepare action is missing")
 assert(source.includes("record_observation"), "ego-browser observation record action is missing")

@@ -189,6 +189,7 @@ export type ElectronAPI = {
   setBackgroundColor: (color: string) => Promise<void>
   createApplicationTask: (input: ApplicationTaskInput) => Promise<ApplicationTask>
   startApplicationAgentSession: (task: ApplicationTask) => Promise<ApplicationAgentSession>
+  resendApplicationAgentStartPrompt: (session: ApplicationAgentSession, task: ApplicationTask) => Promise<void>
   sendApplicationAgentPrompt: (session: ApplicationAgentSession, prompt: string) => Promise<void>
   getApplicationAgentMessages: (session: ApplicationAgentSession) => Promise<ApplicationAgentChatItem[]>
   getApplicationTask: (workspacePath: string) => Promise<ApplicationTask>

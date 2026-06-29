@@ -61,6 +61,7 @@ type Deps = {
   installUpdate: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
   startApplicationAgentSession: (task: ApplicationTask) => Promise<ApplicationAgentSession>
+  resendApplicationAgentStartPrompt: (session: ApplicationAgentSession, task: ApplicationTask) => Promise<void>
   sendApplicationAgentPrompt: (session: ApplicationAgentSession, prompt: string) => Promise<void>
   getApplicationAgentMessages: (session: ApplicationAgentSession) => Promise<ApplicationAgentChatItem[]>
   findApplicationAgentSession: (workspacePath: string) => Promise<ApplicationAgentSession | null>
@@ -234,6 +235,11 @@ export function registerIpcHandlers(deps: Deps) {
   )
   ipcMain.handle("application-agent:start-session", (_event: IpcMainInvokeEvent, task: ApplicationTask) =>
     deps.startApplicationAgentSession(task),
+  )
+  ipcMain.handle(
+    "application-agent:resend-start-prompt",
+    (_event: IpcMainInvokeEvent, session: ApplicationAgentSession, task: ApplicationTask) =>
+      deps.resendApplicationAgentStartPrompt(session, task),
   )
   ipcMain.handle(
     "application-agent:send-prompt",

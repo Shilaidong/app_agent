@@ -68,6 +68,8 @@ const api: ElectronAPI = {
   setBackgroundColor: (color: string) => ipcRenderer.invoke("set-background-color", color),
   createApplicationTask: (input) => ipcRenderer.invoke("application-agent:create-task", input),
   startApplicationAgentSession: (task) => ipcRenderer.invoke("application-agent:start-session", task),
+  resendApplicationAgentStartPrompt: (session, task) =>
+    ipcRenderer.invoke("application-agent:resend-start-prompt", session, task),
   sendApplicationAgentPrompt: (session, prompt) => ipcRenderer.invoke("application-agent:send-prompt", session, prompt),
   getApplicationAgentMessages: (session) => ipcRenderer.invoke("application-agent:get-messages", session),
   getApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:get-task", workspacePath),
