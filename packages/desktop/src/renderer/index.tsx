@@ -23,6 +23,7 @@ import pkg from "../../package.json"
 import type {
   ApplicationAgentChatItem,
   ApplicationAgentSession,
+  ApplicationSelectionListPreview,
   ApplicationTask,
   ApplicationTaskInput,
   TerraAuthStatus,
@@ -582,8 +583,11 @@ function ApplicationAgentShell(props: {
   const [authStatus, setAuthStatus] = createSignal<TerraAuthStatus | null>(null)
   const [loginEmail, setLoginEmail] = createSignal("")
   const [loginPassword, setLoginPassword] = createSignal("")
-  const [platformPassword, setPlatformPassword] = createSignal("")
-  const [savedPlatformCredential, setSavedPlatformCredential] = createSignal<{ username: string; hasPassword: boolean; updatedAt: string } | null>(null)
+  const [creationMode, setCreationMode] = createSignal<"manual" | "selection-list">("manual")
+  const [selectionListPath, setSelectionListPath] = createSignal("")
+  const [selectionListPreview, setSelectionListPreview] = createSignal<ApplicationSelectionListPreview | null>(null)
+  const [selectedSelectionRows, setSelectedSelectionRows] = createSignal<number[]>([])
+  const [savedPlatformAccount, setSavedPlatformAccount] = createSignal<{ username: string; updatedAt: string } | null>(null)
   let agentChatListRef: HTMLDivElement | undefined
   let pendingScrollRestore: { top: number; height: number } | null = null
   let lastAgentMessageSignature = ""
@@ -691,15 +695,54 @@ function ApplicationAgentShell(props: {
     if (typeof folder === "string") update("sourceFolder", folder)
   }
 
-  const loadPlatformCredential = async (applicationUrl = input().applicationUrl) => {
+  const pickSelectionList = async () => {
+    const file = await window.api.openFilePicker({
+      title: "选择选校清单（Excel）",
+      extensions: ["xlsx"],
+    })
+    if (typeof file !== "string") return
+    setBusy(true)
+    setError(null)
+    try {
+      const preview = await window.api.previewApplicationSelectionList(file)
+      setSelectionListPath(file)
+      setSelectionListPreview(preview)
+      setSelectedSelectionRows(preview.rows.filter((row) => row.status === "ready" || row.status === "needs_research").map((row) => row.rowNumber))
+    } catch (err) {
+      setSelectionListPath("")
+      setSelectionListPreview(null)
+      setSelectedSelectionRows([])
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const downloadSelectionListTemplate = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const destination = await window.api.downloadApplicationSelectionListTemplate()
+      if (destination) setRestoreNotice(`已下载无密码选校清单模板：${destination}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleSelectionRow = (rowNumber: number, checked: boolean) => {
+    setSelectedSelectionRows((current) => (checked ? [...new Set([...current, rowNumber])] : current.filter((row) => row !== rowNumber)))
+  }
+
+  const loadPlatformAccount = async (applicationUrl = input().applicationUrl || "") => {
     if (!applicationUrl.trim()) {
-      setSavedPlatformCredential(null)
+      setSavedPlatformAccount(null)
       return
     }
-    const saved = await window.api.getApplicationPlatformCredential(applicationUrl).catch(() => null)
-    setSavedPlatformCredential(saved ? { username: saved.username, hasPassword: saved.hasPassword, updatedAt: saved.updatedAt } : null)
+    const saved = await window.api.getApplicationPlatformAccount(applicationUrl).catch(() => null)
+    setSavedPlatformAccount(saved ? { username: saved.username, updatedAt: saved.updatedAt } : null)
     if (saved?.username && !input().platformUsername?.trim()) update("platformUsername", saved.username)
-    if (saved?.hasPassword) update("rememberPlatformPassword", true)
   }
 
   const loadApplicationTasks = async () => {
@@ -744,15 +787,13 @@ function ApplicationAgentShell(props: {
     }
   }
 
-  const clearPlatformCredential = async () => {
-    if (!input().applicationUrl.trim()) return
+  const clearPlatformAccount = async () => {
+    if (!(input().applicationUrl || "").trim()) return
     setBusy(true)
     setError(null)
     try {
-      await window.api.clearApplicationPlatformCredential(input().applicationUrl)
-      setSavedPlatformCredential(null)
-      setPlatformPassword("")
-      update("rememberPlatformPassword", false)
+      await window.api.clearApplicationPlatformAccount(input().applicationUrl || "")
+      setSavedPlatformAccount(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -771,15 +812,12 @@ function ApplicationAgentShell(props: {
         await switchTask(existingTask, "已找到已有申请，已切换到原工作区；不会再创建重复任务。", true)
         return
       }
-      if (input().applicationUrl.trim() && input().platformUsername?.trim()) {
-        const saved = await window.api.saveApplicationPlatformCredential({
-          applicationUrl: input().applicationUrl,
+      if ((input().applicationUrl || "").trim() && input().platformUsername?.trim()) {
+        const saved = await window.api.saveApplicationPlatformAccount({
+          applicationUrl: input().applicationUrl || "",
           username: input().platformUsername || "",
-          password: platformPassword(),
-          rememberPassword: Boolean(input().rememberPlatformPassword),
         })
-        setSavedPlatformCredential(saved ? { username: saved.username, hasPassword: saved.hasPassword, updatedAt: saved.updatedAt } : null)
-        setPlatformPassword("")
+        setSavedPlatformAccount(saved ? { username: saved.username, updatedAt: saved.updatedAt } : null)
       }
       const created = await window.api.createApplicationTask(input())
       if (created.reusedExisting) {
@@ -791,6 +829,43 @@ function ApplicationAgentShell(props: {
       setOpenCodeSession(session)
       persistActiveSession(session)
       setShowOpenCode(false)
+      await refreshAgentMessages(session)
+      await refreshAuthStatus()
+      await loadApplicationTasks()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const createTasksFromSelectionList = async () => {
+    if (!selectionListPath() || !selectionListPreview()) {
+      setError("请先选择并解析选校清单。")
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const batch = await window.api.createApplicationTasksFromSelectionList({
+        studentName: input().studentName,
+        sourceFolder: input().sourceFolder,
+        applicationType: input().applicationType,
+        selectionListPath: selectionListPath(),
+        selectedRows: selectedSelectionRows(),
+        outputLanguage: input().outputLanguage,
+        allowUpload: input().allowUpload,
+        taskGoal: input().taskGoal,
+      })
+      const firstTask = batch.tasks[0]
+      if (!firstTask) throw new Error("没有创建可启动的申请任务。")
+      setApplicationTasks((current) => [...batch.tasks, ...current.filter((item) => !batch.tasks.some((task) => task.workspacePath === item.workspacePath))])
+      setTask(firstTask)
+      const session = await window.api.startApplicationAgentSession(firstTask)
+      setOpenCodeSession(session)
+      persistActiveSession(session)
+      setShowOpenCode(false)
+      setRestoreNotice(`已创建 ${batch.tasks.length} 个学校任务；学生材料已在批次工作区统一暂存，将从第 1 个任务开始依次处理。`)
       await refreshAgentMessages(session)
       await refreshAuthStatus()
       await loadApplicationTasks()
@@ -915,6 +990,12 @@ function ApplicationAgentShell(props: {
 
   const resetToHome = () => {
     clearActiveSession()
+    setInput(defaultTaskInput())
+    setCreationMode("manual")
+    setSelectionListPath("")
+    setSelectionListPreview(null)
+    setSelectedSelectionRows([])
+    setSavedPlatformAccount(null)
     setTask(null)
     setOpenCodeSession(null)
     setShowOpenCode(false)
@@ -945,6 +1026,19 @@ function ApplicationAgentShell(props: {
     } finally {
       setBusy(false)
     }
+  }
+
+  const switchToNextBatchTask = async () => {
+    const current = task()
+    if (!current?.input.batchId) return
+    const next = applicationTasks()
+      .filter((item) => item.input.batchId === current.input.batchId && (item.input.batchOrder ?? 0) > (current.input.batchOrder ?? 0))
+      .sort((a, b) => (a.input.batchOrder ?? Number.MAX_SAFE_INTEGER) - (b.input.batchOrder ?? Number.MAX_SAFE_INTEGER))[0]
+    if (!next) {
+      setRestoreNotice("这是本批次最后一个学校任务。")
+      return
+    }
+    await switchTask(next, `已切换到批次第 ${next.input.batchOrder} 所学校，继续复用同一份材料来源。`)
   }
 
   const renderTaskList = () => (
@@ -979,7 +1073,7 @@ function ApplicationAgentShell(props: {
                       disabled={busy()}
                       onClick={() => switchTask(item)}
                     >
-                      <strong>{item.input.school || "未填写学校"}</strong>
+                      <strong>{item.input.batchOrder ? `第 ${item.input.batchOrder} 所 · ` : ""}{item.input.school || "未填写学校"}</strong>
                       <span>{item.input.program || "未填写项目"}</span>
                       <small>{item.status} · {new Date(item.updatedAt).toLocaleString()}</small>
                     </button>
@@ -1072,10 +1166,10 @@ function ApplicationAgentShell(props: {
   })
 
   createEffect(() => {
-    const applicationUrl = input().applicationUrl
+    const applicationUrl = input().applicationUrl || ""
     if (!applicationUrl.trim() || !URL.canParse(applicationUrl)) return
     const timer = window.setTimeout(() => {
-      void loadPlatformCredential(applicationUrl)
+      void loadPlatformAccount(applicationUrl)
     }, 350)
     onCleanup(() => window.clearTimeout(timer))
   })
@@ -1242,6 +1336,24 @@ function ApplicationAgentShell(props: {
               }
             >
             <section class="application-agent-form">
+              <div class="creation-mode-picker" role="group" aria-label="创建申请任务方式">
+                <button
+                  type="button"
+                  classList={{ active: creationMode() === "manual" }}
+                  onClick={() => setCreationMode("manual")}
+                >
+                  <strong>单个学校</strong>
+                  <span>手动填写一所学校和项目</span>
+                </button>
+                <button
+                  type="button"
+                  classList={{ active: creationMode() === "selection-list" }}
+                  onClick={() => setCreationMode("selection-list")}
+                >
+                  <strong>导入选校清单</strong>
+                  <span>从 Excel 批量创建学校任务</span>
+                </button>
+              </div>
               <div class="field-grid">
                 <label>
                   学生姓名
@@ -1255,14 +1367,6 @@ function ApplicationAgentShell(props: {
                   </div>
                 </label>
                 <label>
-                  申请学校
-                  <input value={input().school} onInput={(event) => update("school", event.currentTarget.value)} />
-                </label>
-                <label>
-                  申请项目 / 专业
-                  <input value={input().program} onInput={(event) => update("program", event.currentTarget.value)} />
-                </label>
-                <label>
                   申请类型
                   <select
                     value={input().applicationType}
@@ -1272,66 +1376,10 @@ function ApplicationAgentShell(props: {
                   </select>
                 </label>
                 <label>
-                  申请平台链接
-                  <input
-                    value={input().applicationUrl}
-                    onInput={(event) => update("applicationUrl", event.currentTarget.value)}
-                    onBlur={() => void loadPlatformCredential()}
-                    placeholder="https://..."
-                  />
-                </label>
-                <label>
-                  申请平台账号
-                  <input
-                    value={input().platformUsername || ""}
-                    onInput={(event) => update("platformUsername", event.currentTarget.value)}
-                    placeholder="申请系统登录邮箱/账号"
-                  />
-                </label>
-                <label>
-                  申请平台密码
-                  <input
-                    type="password"
-                    value={platformPassword()}
-                    onInput={(event) => setPlatformPassword(event.currentTarget.value)}
-                    placeholder={savedPlatformCredential()?.hasPassword ? "已保存，可留空继续使用" : "可选：用于自动登录"}
-                  />
-                </label>
-                <div class="credential-card wide">
-                  <label class="check-row">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(input().rememberPlatformPassword)}
-                      onChange={(event) => update("rememberPlatformPassword", event.currentTarget.checked)}
-                    />
-                    记住此申请平台密码，下次自动登录
-                  </label>
-                  <Show
-                    when={savedPlatformCredential()}
-                    fallback={<small>密码只保存在本机钥匙串，不写入申请工作区、聊天或生成文件。</small>}
-                  >
-                    {(saved) => (
-                      <div class="credential-status">
-                        <span>{saved().username}</span>
-                        <strong>{saved().hasPassword ? "已保存密码" : "仅保存账号"}</strong>
-                        <button type="button" disabled={busy()} onClick={clearPlatformCredential}>清除</button>
-                      </div>
-                    )}
-                  </Show>
-                </div>
-                <label>
-                  申请截止日期
-                  <input type="date" value={input().deadline} onInput={(event) => update("deadline", event.currentTarget.value)} />
-                </label>
-                <label>
                   本次任务目标
                   <select value={input().taskGoal} onChange={(event) => update("taskGoal", event.currentTarget.value)}>
                     <For each={taskGoals}>{(item) => <option value={item}>{item}</option>}</For>
                   </select>
-                </label>
-                <label>
-                  登录方式
-                  <input value={input().loginMethod} onInput={(event) => update("loginMethod", event.currentTarget.value)} />
                 </label>
                 <label>
                   输出语言
@@ -1343,11 +1391,101 @@ function ApplicationAgentShell(props: {
                     <option value="en">English</option>
                   </select>
                 </label>
-                <label class="wide">
-                  顾问备注
-                  <textarea value={input().notes} onInput={(event) => update("notes", event.currentTarget.value)} />
-                </label>
               </div>
+              <Show
+                when={creationMode() === "manual"}
+                fallback={
+                  <section class="selection-list-import">
+                    <header>
+                      <div>
+                        <h2>选校清单导入</h2>
+                        <p>一个学校/项目创建一个申请任务。学生原始材料会先统一暂存一次，再按学校依次处理。</p>
+                      </div>
+                      <button type="button" disabled={busy()} onClick={downloadSelectionListTemplate}>下载无密码模板</button>
+                    </header>
+                    <div class="folder-picker-row">
+                      <input value={selectionListPath()} readonly placeholder="选择已填写的 .xlsx 选校清单" />
+                      <button type="button" disabled={busy()} onClick={pickSelectionList}>选择 Excel</button>
+                    </div>
+                    <Show when={selectionListPreview()}>
+                      {(preview) => (
+                        <div class="selection-list-preview">
+                          <p>已读取 {preview().sourceName}：勾选要创建的学校项目；没有申请链接的行会先由 Agent 核验。</p>
+                          <For each={preview().rows}>
+                            {(row) => {
+                              const selectable = row.status === "ready" || row.status === "needs_research"
+                              return (
+                                <label classList={{ "selection-list-row": true, invalid: !selectable }}>
+                                  <input
+                                    type="checkbox"
+                                    disabled={!selectable}
+                                    checked={selectedSelectionRows().includes(row.rowNumber)}
+                                    onChange={(event) => toggleSelectionRow(row.rowNumber, event.currentTarget.checked)}
+                                  />
+                                  <span>第 {row.rowNumber} 行</span>
+                                  <strong>{row.school || "未填学校"} · {row.program || "未填项目"}</strong>
+                                  <small>{row.warnings.join("；") || (row.status === "ready" ? "信息齐全" : "待核验链接")}</small>
+                                </label>
+                              )
+                            }}
+                          </For>
+                          <For each={preview().warnings}>{(warning) => <p class="application-agent-error">{warning}</p>}</For>
+                        </div>
+                      )}
+                    </Show>
+                  </section>
+                }
+              >
+                <div class="field-grid">
+                  <label>
+                    申请学校
+                    <input value={input().school} onInput={(event) => update("school", event.currentTarget.value)} />
+                  </label>
+                  <label>
+                    申请项目 / 专业
+                    <input value={input().program} onInput={(event) => update("program", event.currentTarget.value)} />
+                  </label>
+                  <label>
+                    申请平台链接
+                    <input
+                      value={input().applicationUrl || ""}
+                      onInput={(event) => update("applicationUrl", event.currentTarget.value)}
+                      onBlur={() => void loadPlatformAccount()}
+                      placeholder="https://..."
+                    />
+                  </label>
+                  <label>
+                    申请平台账号
+                    <input
+                      value={input().platformUsername || ""}
+                      onInput={(event) => update("platformUsername", event.currentTarget.value)}
+                      placeholder="申请系统登录邮箱/账号"
+                    />
+                  </label>
+                  <div class="credential-card wide">
+                    <Show
+                      when={savedPlatformAccount()}
+                      fallback={<small>只保存申请平台账号；密码不收集、不保存，登录时由顾问在平台页面手动输入。</small>}
+                    >
+                      {(saved) => (
+                        <div class="credential-status">
+                          <span>{saved().username}</span>
+                          <strong>已保存账号</strong>
+                          <button type="button" disabled={busy()} onClick={clearPlatformAccount}>清除</button>
+                        </div>
+                      )}
+                    </Show>
+                  </div>
+                  <label>
+                    申请截止日期
+                    <input type="date" value={input().deadline || ""} onInput={(event) => update("deadline", event.currentTarget.value)} />
+                  </label>
+                  <label class="wide">
+                    顾问备注
+                    <textarea value={input().notes || ""} onInput={(event) => update("notes", event.currentTarget.value)} />
+                  </label>
+                </div>
+              </Show>
               <label class="check-row">
                 <input
                   type="checkbox"
@@ -1357,8 +1495,13 @@ function ApplicationAgentShell(props: {
                 允许 Agent 尝试上传可确认匹配的材料
               </label>
               <Show when={error()}>{(message) => <p class="application-agent-error">{message()}</p>}</Show>
-              <button class="primary-action" type="button" disabled={busy()} onClick={createTask}>
-                {busy() ? "正在交给 OpenCode Agent..." : "开始申请任务"}
+              <button
+                class="primary-action"
+                type="button"
+                disabled={busy() || (creationMode() === "selection-list" && selectedSelectionRows().length === 0)}
+                onClick={creationMode() === "manual" ? createTask : createTasksFromSelectionList}
+              >
+                {busy() ? "正在交给 OpenCode Agent..." : creationMode() === "manual" ? "开始申请任务" : `创建 ${selectedSelectionRows().length} 个申请任务`}
               </button>
             </section>
             </Show>
@@ -1387,10 +1530,17 @@ function ApplicationAgentShell(props: {
                   <dd><span class="status-pill">{currentTask().status}</span></dd>
                 </dl>
 	              </section>
-		              <section class="side-section task-switcher">
-		                <h2>申请列表</h2>
+              <section class="side-section task-switcher">
+	                <h2>申请列表</h2>
                     {renderTaskList()}
-		              </section>
+	              </section>
+              <Show when={currentTask().input.batchId}>
+                <section class="side-section">
+                  <h2>批次处理</h2>
+                  <p>当前为第 {currentTask().input.batchOrder || "?"} 所学校。完成本校后再进入下一所，OCR 会复用批次结果。</p>
+                  <button type="button" disabled={busy()} onClick={switchToNextBatchTask}>进入下一所学校</button>
+                </section>
+              </Show>
               <section class="side-section">
                 <h2>缺失统计</h2>
                 <div class="stat-grid">

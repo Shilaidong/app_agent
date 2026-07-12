@@ -25,22 +25,66 @@ export type ApplicationTaskInput = {
   school: string
   program: string
   applicationType: string
-  applicationUrl: string
+  applicationUrl?: string
   deadline?: string
   notes?: string
   loginMethod?: string
   platformUsername?: string
-  rememberPlatformPassword?: boolean
+  batchId?: string
+  batchWorkspacePath?: string
+  batchOrder?: number
+  selectionListPath?: string
+  selectionListRow?: number
   outputLanguage?: "zh" | "en"
   allowUpload?: boolean
   taskGoal?: string
 }
 
-export type ApplicationPlatformCredentialSummary = {
+export type ApplicationPlatformAccount = {
   key: string
   username: string
-  hasPassword: boolean
+  platformHost: string
   updatedAt: string
+}
+
+export type ApplicationSelectionListRow = {
+  rowNumber: number
+  school: string
+  program: string
+  programUrl?: string
+  deadline?: string
+  applicationUrl?: string
+  platformUsername?: string
+  notes?: string
+  status: "ready" | "needs_research" | "invalid" | "duplicate"
+  warnings: string[]
+}
+
+export type ApplicationSelectionListPreview = {
+  sourcePath: string
+  sourceName: string
+  rows: ApplicationSelectionListRow[]
+  warnings: string[]
+}
+
+export type ApplicationSelectionListInput = {
+  studentName: string
+  sourceFolder: string
+  applicationType: string
+  selectionListPath: string
+  selectedRows: number[]
+  outputLanguage?: "zh" | "en"
+  allowUpload?: boolean
+  taskGoal?: string
+}
+
+export type ApplicationSelectionListBatch = {
+  id: string
+  workspacePath: string
+  sourceFolder: string
+  selectionListPath: string
+  createdAt: string
+  tasks: ApplicationTask[]
 }
 
 export type ApplicationTaskStatus =
@@ -189,6 +233,9 @@ export type ElectronAPI = {
   installUpdate: () => Promise<void>
   setBackgroundColor: (color: string) => Promise<void>
   createApplicationTask: (input: ApplicationTaskInput) => Promise<ApplicationTask>
+  previewApplicationSelectionList: (sourcePath: string) => Promise<ApplicationSelectionListPreview>
+  createApplicationTasksFromSelectionList: (input: ApplicationSelectionListInput) => Promise<ApplicationSelectionListBatch>
+  downloadApplicationSelectionListTemplate: () => Promise<string | null>
   startApplicationAgentSession: (task: ApplicationTask) => Promise<ApplicationAgentSession>
   resendApplicationAgentStartPrompt: (session: ApplicationAgentSession, task: ApplicationTask) => Promise<void>
   sendApplicationAgentPrompt: (session: ApplicationAgentSession, prompt: string) => Promise<void>
@@ -201,14 +248,12 @@ export type ElectronAPI = {
   openApplicationPlatform: (workspacePath: string) => Promise<ApplicationTask>
   blockHighRiskAction: (workspacePath: string, action: string) => Promise<ApplicationTask>
   stopApplicationAutomation: (workspacePath?: string) => Promise<{ stopped: string[] }>
-  getApplicationPlatformCredential: (applicationUrl: string) => Promise<ApplicationPlatformCredentialSummary | null>
-  saveApplicationPlatformCredential: (input: {
+  getApplicationPlatformAccount: (applicationUrl: string) => Promise<ApplicationPlatformAccount | null>
+  saveApplicationPlatformAccount: (input: {
     applicationUrl: string
     username: string
-    password?: string
-    rememberPassword?: boolean
-  }) => Promise<ApplicationPlatformCredentialSummary | null>
-  clearApplicationPlatformCredential: (applicationUrl: string) => Promise<void>
+  }) => Promise<ApplicationPlatformAccount | null>
+  clearApplicationPlatformAccount: (applicationUrl: string) => Promise<void>
   setOpenCodeGoApiKey: (key: string | null) => Promise<void>
   hasOpenCodeGoApiKey: () => Promise<boolean>
   getTerraAuthStatus: () => Promise<TerraAuthStatus>

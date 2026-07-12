@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { mkdir, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { BrowserWindow, Notification, app, clipboard, dialog, ipcMain, shell } from "electron"
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
@@ -7,6 +7,7 @@ import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 import type {
   ApplicationAgentChatItem,
   ApplicationAgentSession,
+  ApplicationSelectionListInput,
   ApplicationTask,
   ApplicationTaskInput,
   InitStep,
@@ -20,16 +21,18 @@ import {
   blockHighRiskAction,
   continueApplicationTask,
   createApplicationTask,
+  createApplicationTasksFromSelectionList,
   getApplicationTask,
   listApplicationTasks,
   openApplicationPlatform,
   runApplicationCommand,
 } from "./application-agent"
+import { previewSelectionList } from "./application-selection-list"
 import {
-  clearApplicationPlatformCredential,
-  getApplicationPlatformCredential,
-  saveApplicationPlatformCredential,
-} from "./application-credentials"
+  clearApplicationPlatformAccount,
+  getApplicationPlatformAccount,
+  saveApplicationPlatformAccount,
+} from "./application-accounts"
 import { hasOpenCodeGoApiKey, setOpenCodeGoApiKey } from "./opencode-go"
 import { getStore } from "./store"
 import { getTerraAuthStatus, loginTerraAdvisor, logoutTerraAdvisor } from "./terra-auth"
@@ -38,6 +41,10 @@ import { setTitlebar, updateTitlebar } from "./windows"
 const pickerFilters = (ext?: string[]) => {
   if (!ext || ext.length === 0) return undefined
   return [{ name: "Files", extensions: ext }]
+}
+
+function selectionListTemplatePath() {
+  return join(app.getAppPath(), "resources", "templates", "terra-edu-selection-list-template.xlsx")
 }
 
 type Deps = {
@@ -233,6 +240,23 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("application-agent:create-task", (_event: IpcMainInvokeEvent, input: ApplicationTaskInput) =>
     createApplicationTask(input),
   )
+  ipcMain.handle("application-agent:preview-selection-list", (_event: IpcMainInvokeEvent, sourcePath: string) =>
+    previewSelectionList(sourcePath),
+  )
+  ipcMain.handle(
+    "application-agent:create-selection-list-tasks",
+    (_event: IpcMainInvokeEvent, input: ApplicationSelectionListInput) => createApplicationTasksFromSelectionList(input),
+  )
+  ipcMain.handle("application-agent:download-selection-list-template", async () => {
+    const destination = await dialog.showSaveDialog({
+      title: "下载选校清单模板",
+      defaultPath: join(app.getPath("downloads"), "Terra-Edu-选校清单模板.xlsx"),
+      filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
+    })
+    if (destination.canceled || !destination.filePath) return null
+    await copyFile(selectionListTemplatePath(), destination.filePath)
+    return destination.filePath
+  })
   ipcMain.handle("application-agent:start-session", (_event: IpcMainInvokeEvent, task: ApplicationTask) =>
     deps.startApplicationAgentSession(task),
   )
@@ -321,16 +345,15 @@ export function registerIpcHandlers(deps: Deps) {
     app.focus({ steal: true })
     return { stopped }
   })
-  ipcMain.handle("application-agent:get-platform-credential", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
-    getApplicationPlatformCredential(applicationUrl),
+  ipcMain.handle("application-agent:get-platform-account", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
+    getApplicationPlatformAccount(applicationUrl),
   )
   ipcMain.handle(
-    "application-agent:save-platform-credential",
-    (_event: IpcMainInvokeEvent, input: { applicationUrl: string; username: string; password?: string; rememberPassword?: boolean }) =>
-      saveApplicationPlatformCredential(input),
+    "application-agent:save-platform-account",
+    (_event: IpcMainInvokeEvent, input: { applicationUrl: string; username: string }) => saveApplicationPlatformAccount(input),
   )
-  ipcMain.handle("application-agent:clear-platform-credential", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
-    clearApplicationPlatformCredential(applicationUrl),
+  ipcMain.handle("application-agent:clear-platform-account", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
+    clearApplicationPlatformAccount(applicationUrl),
   )
   ipcMain.handle("application-agent:set-go-api-key", (_event: IpcMainInvokeEvent, key: string | null) => {
     setOpenCodeGoApiKey(key)

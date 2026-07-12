@@ -28,6 +28,8 @@ const vendoredEgoLiteInfoPlist = join(vendoredEgoLiteApp, "Contents/Info.plist")
 const source = [applicationSource, opencodeSource, modelSource].join("\n")
 const authSource = readFileSync(join(root, "src/main/terra-auth.ts"), "utf8")
 const rendererSource = readFileSync(join(root, "src/renderer/index.tsx"), "utf8")
+const selectionListSource = readFileSync(join(root, "src/main/application-selection-list.ts"), "utf8")
+const selectionListTemplate = join(root, "resources/templates/terra-edu-selection-list-template.xlsx")
 const desktopUiSource = [source, mainSource, rendererSource].join("\n")
 
 const expectedSkills = [
@@ -58,7 +60,7 @@ const expectedCommands = [
   "summarize-progress",
 ]
 
-const expectedTools = ["workspace", "materials", "state", "documents", "requirements", "login", "risk", "cua"]
+const expectedTools = ["workspace", "materials", "state", "documents", "requirements", "risk", "cua"]
 
 const expectedWorkspaceDirs = [
   "00_original_backup",
@@ -90,7 +92,6 @@ const expectedGeneratedFiles = [
   "03_state/application_requirements.json",
   "02_generated/application_requirements.md",
   "03_state/cua_control.json",
-  "03_state/login_credentials.json",
   "03_state/agent_execution_audit.json",
   "04_logs/agent_log.md",
   "04_logs/cua_log.md",
@@ -197,7 +198,9 @@ assert(!vendoredPaths.some((file) => /EgoUpdater\.app|EgoSoftwareUpdate\.bundle|
 const vendoredHelpers = vendoredPaths.filter((file) => file.endsWith("/ego-browser"))
 assert(vendoredHelpers.length > 0, "Vendored ego lite must include ego-browser helper")
 assert(vendoredHelpers.some((file) => (statSync(file).mode & 0o111) !== 0), "Vendored ego-browser helper must be executable")
-assert(source.includes("application-agent_login"), "Start prompt must mention login tool")
+assert(!source.includes("application-agent_login"), "Application Agent must not expose a password login tool")
+assert(!source.includes("login_credentials.json"), "Application Agent must not create a password credential workspace file")
+assert(!source.includes("find-generic-password"), "Application Agent must not read the macOS keychain")
 assert(source.includes("application-agent_risk"), "Start prompt must mention risk tool")
 assert(source.includes("application-agent_requirements"), "Start prompt must mention requirements tool")
 assert(source.includes("Direct distribution intentionally omits the legacy runtime fallback"), "Customer build must not expose the legacy runtime fallback")
@@ -220,7 +223,6 @@ assert(source.includes("appendAudit"), "Custom tools must write execution audit 
 assert(source.includes("agent_execution_audit.json"), "Execution audit output file is missing")
 assert(source.includes("application_requirements.json"), "Application requirements JSON contract is missing")
 assert(source.includes("application_requirements.md"), "Application requirements Markdown contract is missing")
-assert(source.includes("login_credentials.json"), "Application login credential state contract is missing")
 assert(source.includes("sessionID") && source.includes("messageID") && source.includes("threadID"), "Execution audit context fields are missing")
 
 assert(rendererSource.includes("question-card"), "Renderer question confirmation card is missing")
@@ -290,6 +292,14 @@ assert(authSource.includes("output * 4") || authSource.includes("tokens.output *
 assert(authSource.includes("shilaidong"), "Quota exhaustion contact WeChat is missing")
 assert(rendererSource.includes("Terra-Edu 顾问登录"), "Desktop consultant login gate is missing")
 assert(rendererSource.includes("AI 额度"), "Desktop AI quota display is missing")
+assert(existsSync(selectionListTemplate), "Passwordless selection-list template is missing")
+assert(selectionListSource.includes("申请平台密码"), "Selection-list importer must reject legacy password templates")
+assert(selectionListSource.includes("normalizeSelectionListRows"), "Selection-list importer must normalize Excel rows")
+assert(applicationSource.includes("createApplicationTasksFromSelectionList"), "Application Agent must create tasks from selection lists")
+assert(applicationSource.includes("00_shared_materials"), "Selection-list batch must stage source materials once")
+assert(rendererSource.includes("下载无密码模板"), "Renderer must expose the selection-list template download")
+assert(rendererSource.includes("创建 ${selectedSelectionRows().length} 个申请任务"), "Renderer must support multi-row task creation")
+assert(!rendererSource.includes("申请平台密码"), "Renderer must not collect application platform passwords")
 
 const workspace = process.env.APPLICATION_AGENT_WORKSPACE
 if (workspace) {

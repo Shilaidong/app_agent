@@ -2,7 +2,7 @@
   "name": "@terra-edu/application-agent-desktop",
   "private": true,
   "description": "Terra-Edu independent application automation Agent desktop app.",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "type": "module",
   "license": "MIT",
   "homepage": "https://terra-edu.local/application-agent",
@@ -29,14 +29,15 @@
   },
   "main": "./out/main/index.js",
   "dependencies": {
+    "drizzle-orm": "catalog:",
     "effect": "catalog:",
     "electron-context-menu": "4.1.2",
     "electron-log": "^5",
     "electron-store": "^10",
     "electron-updater": "^6",
     "electron-window-state": "^5.0.3",
-    "drizzle-orm": "catalog:",
-    "marked": "^15"
+    "marked": "^15",
+    "xlsx": "0.18.5"
   },
   "devDependencies": {
     "@actions/artifact": "4.0.0",

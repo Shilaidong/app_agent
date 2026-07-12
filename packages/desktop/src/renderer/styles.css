@@ -405,6 +405,108 @@ button {
   gap: 16px;
 }
 
+.creation-mode-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.creation-mode-picker button {
+  display: grid;
+  gap: 3px;
+  min-height: 72px;
+  border: 1px solid #cbd7ca;
+  border-radius: 12px;
+  background: #fff;
+  color: #425046;
+  padding: 12px 14px;
+  text-align: left;
+}
+
+.creation-mode-picker button.active {
+  border-color: #4a7c59;
+  background: #f0f8f1;
+  box-shadow: inset 0 0 0 1px #4a7c59;
+}
+
+.creation-mode-picker strong {
+  color: #2f5d3e;
+}
+
+.creation-mode-picker span,
+.selection-list-import p,
+.selection-list-row small {
+  color: #6b6358;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.selection-list-import {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.selection-list-import header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.selection-list-import h2,
+.selection-list-import p {
+  margin: 0;
+}
+
+.selection-list-import h2 {
+  color: #2f5d3e;
+  font-size: 17px;
+}
+
+.selection-list-import header button {
+  min-height: 34px;
+  border: 1px solid rgba(47, 93, 62, 0.25);
+  border-radius: 9px;
+  background: #fff;
+  color: #2f5d3e;
+  font-weight: 800;
+  padding: 0 12px;
+}
+
+.selection-list-preview {
+  display: grid;
+  gap: 7px;
+  max-height: 330px;
+  overflow: auto;
+  border: 1px solid #d7dfd6;
+  border-radius: 12px;
+  background: #fbfdfb;
+  padding: 10px;
+}
+
+.selection-list-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px 9px;
+  border: 1px solid #e0e8df;
+  border-radius: 9px;
+  background: #fff;
+  color: #405045;
+  padding: 9px 10px;
+}
+
+.selection-list-row small {
+  grid-column: 2 / -1;
+}
+
+.selection-list-row.invalid {
+  opacity: 0.62;
+  background: #faf8f6;
+}
+
 .field-grid label,
 .check-row {
   display: grid;
@@ -1520,5 +1622,13 @@ button {
 
   .field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .creation-mode-picker {
+    grid-template-columns: 1fr;
+  }
+
+  .selection-list-import header {
+    display: grid;
   }
 }

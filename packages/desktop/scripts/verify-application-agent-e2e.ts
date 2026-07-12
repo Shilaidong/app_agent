@@ -214,7 +214,7 @@ for (const tool of ["workspace", "materials", "state", "documents", "risk", "cua
   assert(tools.includes(`export const ${tool} =`), `Missing custom tool export: ${tool}`)
 }
 if (!tools.includes("export const requirements =")) warnings.push("Legacy workspace custom tools do not yet include application-agent_requirements; reopening the task will regenerate .opencode config.")
-if (!tools.includes("export const login =")) warnings.push("Legacy workspace custom tools do not yet include application-agent_login; reopening the task will regenerate .opencode config.")
+if (tools.includes("export const login =")) warnings.push("Legacy workspace still exposes the retired application-agent_login tool; reopening the task will regenerate its no-password configuration.")
 if (!tools.includes("extract_text")) warnings.push("Legacy workspace custom tools do not yet include bundled OCR extraction; reopening the task will regenerate .opencode config.")
 for (const action of ["prepare_ego_task", "record_observation", "record_field_verified", "record_select_verified", "record_save_verified", "record_blocker", "handoff_to_consultant"]) {
   if (!tools.includes(action)) warnings.push(`Legacy workspace CUA coordination tool does not yet include ego-browser action: ${action}.`)
@@ -234,7 +234,6 @@ const progress = readJson(join(workspace, "03_state/application_progress.json"))
 const materials = readJson(join(workspace, "03_state/materials_index.json"))
 const requirementsPath = join(workspace, "03_state/application_requirements.json")
 const requirementsMdPath = join(workspace, "02_generated/application_requirements.md")
-const loginCredentialPath = join(workspace, "03_state/login_credentials.json")
 const cuaControlPath = join(workspace, "03_state/cua_control.json")
 
 assert(task && typeof task === "object", "task_state.json must be an object.")
@@ -251,12 +250,6 @@ if (existsSync(requirementsPath)) {
 }
 if (!existsSync(requirementsMdPath)) {
   warnings.push("Legacy workspace has no application_requirements.md yet. New tasks will create it; old tasks will get it after requirement research runs.")
-}
-if (existsSync(loginCredentialPath)) {
-  const loginCredential = readJson(loginCredentialPath)
-  assert(!JSON.stringify(loginCredential).toLowerCase().includes("password\":\""), "login_credentials.json must not store plaintext password.")
-} else {
-  warnings.push("Legacy workspace has no login_credentials.json yet. New tasks will create it; old tasks will get it after reopening.")
 }
 if (existsSync(cuaControlPath)) {
   const cuaControl = readJson(cuaControlPath)

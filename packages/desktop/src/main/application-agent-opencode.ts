@@ -176,19 +176,20 @@ ${inputJson}
 - OpenCode 当前会话目录：${task.sessionDirectory}
 - 目标申请工作区：${task.workspacePath}
 - 原始学生资料文件夹（只读来源）：${task.input.sourceFolder}
-- 申请平台链接：${task.input.applicationUrl}
+- 申请平台链接：${task.input.applicationUrl || "待官方核验"}
+${task.input.batchWorkspacePath ? `- 选校批次工作区：${task.input.batchWorkspacePath}
+- 当前批次顺序：第 ${task.input.batchOrder || "?"} 所；原始材料已统一暂存。OCR 时会自动复用批次共享结果，后续学校请按顺序处理，不要重复扫描同一份材料。` : ""}
 
 ## 申请专用 Custom Tools
 
 你必须优先使用这些 OpenCode Custom Tools 完成可工具化步骤，不要只靠普通 shell 临时拼流程：
 
 - application-agent_workspace：创建目录、复制原始材料到 00_original_backup、刷新文件计数。
-- application-agent_materials：调用随包 PaddleOCR 提取扫描 PDF/图片文字，再分类 00_original_backup 中的材料，写入 materials_index。
+- application-agent_materials：调用随包 PaddleOCR 提取扫描 PDF/图片文字，再分类 00_original_backup 中的材料，写入 materials_index；选校批次会复用已完成的共享 OCR 结果。
 - application-agent_documents：从 missing_items.json 生成信息表、材料表、Word 清单和任务总结。
 - application-agent_state：按统一 task_state.json schema 更新状态、统计和进度。
 - ego-browser skill：macOS 申请平台填表的唯一浏览器自动化后端。通过 ego lite 的独立 task space 打开/复用申请平台，使用 snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace、completeTaskSpace 完成真人式观察、填写、复查和保存。
 - application-agent_cua：不再直接控制 Chrome，也不再调用 cua-driver；它只记录 ego-browser 填表阶段的 task space、观察结果、已验证字段、保存页面、上传材料、阻塞弹窗、失败原因和审计链。
-- application-agent_login：从 03_state/login_credentials.json 读取本机保存的申请平台账号状态，并通过钥匙串读取密码后填写登录页；不会把密码输出给 Agent。
 - application-agent_risk：识别并阻断最终提交、付款、不可逆推荐信邀请、保存账号密码等高风险动作。
 - application-agent_requirements：保存 webfetch/websearch 得到的学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
 
@@ -233,7 +234,7 @@ ${inputJson}
 - 严禁自动最终提交申请。
 - 严禁自动付款。
 - 严禁发送不可逆推荐信邀请。
-- 严禁把账号密码写入聊天、日志、档案或工作区；只允许读取本机加密凭证库执行登录。
+- 严禁收集、保存或读取申请平台密码。页面需要登录、验证码或 MFA 时，必须交由顾问在浏览器中手动完成，再等待顾问明确回复继续。
 - 严禁瞎填、猜填不确定字段。
 - 遇到最终提交、付款、不可逆确认、推荐信邀请时，必须停止并写入 task_summary.md 的人工处理事项。
 
@@ -266,7 +267,6 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - application-agent_state：更新 task_state.json。
 - ego-browser skill：macOS 申请平台填表后端。必须使用官方 helper：useOrCreateTaskSpace、openOrReuseTab、snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace、completeTaskSpace。
 - application-agent_cua：记录 ego-browser 填表状态、task space、观察结果、已验证字段、已保存页面、上传材料、阻塞弹窗和失败原因；不直接控制浏览器。
-- application-agent_login：用本机钥匙串保存的申请平台账号密码填写登录页；不会向 Agent 输出明文密码。
 - application-agent_risk：高风险动作识别和硬拦截。
 - application-agent_requirements：保存学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
 
@@ -289,7 +289,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - 不自动点击最终提交申请。
 - 不自动付款。
 - 不自动发送不可逆推荐信邀请。
-- 可以使用 application-agent_login 调用本机加密凭证库自动登录，但不得把密码写入任何文件、聊天或日志。
+- 不收集、不保存、不读取申请平台密码；页面需要登录时交由顾问手动完成。
 - 可以填写、上传和保存，但最终提交必须由顾问人工确认。
 
 你必须在每个关键阶段通过对话框告诉顾问当前进度。`
@@ -299,7 +299,7 @@ const SKILL_DEFINITIONS = [
     name: "task-initialization",
     description: "创建申请任务上下文，读取任务创建页信息并自动启动默认申请流程。",
     body: `执行步骤：
-1. 读取任务创建页输入，确认学生姓名、资料文件夹、申请学校、项目、类型和申请链接均存在。
+1. 读取任务创建页输入，确认学生姓名、资料文件夹、申请学校、项目和类型；申请链接为空时标记为待官方核验，不阻塞材料整理。
 2. 说明本次任务边界：Agent 可以整理、填写、保存和上传可确认材料，但不能最终提交、付款或发送不可逆推荐信邀请。
 3. 立即调用 todowrite 创建 10 步默认计划，并调用 application-agent_state，把状态更新为“正在创建申请工作区”。
 4. 调用 workspace-building skill，只完成工作区初始化和材料副本复制。
@@ -415,7 +415,7 @@ const SKILL_DEFINITIONS = [
 1. 首次进入平台前调用 application-agent_cua，action 使用 prepare_ego_task，记录申请链接、taskSpaceName 和本轮目标。
 2. 按官方 ego-browser skill 使用 Bash heredoc：PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF' ... EOF。每个 heredoc 里先 useOrCreateTaskSpace(name) 或 takeOverTaskSpace(id)，不要新建多个无关 Space。
 3. 首次脚本用 openOrReuseTab(applicationUrl, { wait:true }) 打开申请链接，然后 cliLog 输出 task.id、pageInfo() 和 snapshotText() 摘要。
-4. 如果页面需要登录，优先复用 ego lite 从 Chrome 迁移来的登录态；如需要账号密码，可调用 application-agent_login 辅助登录，但不能输出明文密码。
+4. 如果页面需要登录，优先复用 ego lite 从 Chrome 迁移来的登录态；仍未登录时 handOffTaskSpace 给顾问手动完成账号、密码、验证码或 MFA，再等待顾问明确回复继续。
 5. 如果需要 MFA、验证码、邮箱验证或顾问手动确认，调用 ego-browser 的 handOffTaskSpace(task.id)，并提示顾问完成。顾问明确回复继续后，再用 takeOverTaskSpace(task.id) 恢复，不要自动抢回控制。
 6. 登录后先用 snapshotText() 和 pageInfo() 观察页面、modal、必填字段、保存按钮、错误提示和当前 URL；随后调用 application-agent_cua record_observation 写入 application_progress.json。
 7. 对每个字段，先从 student_profile.md 查找可确认答案；无法确认则记录缺失，不瞎填。
@@ -583,7 +583,6 @@ const generated = [
   ["申请进度记录", "03_state/application_progress.json", "json"],
   ["申请要求记录", "03_state/application_requirements.json", "json"],
   ["申请要求摘要", "02_generated/application_requirements.md", "markdown"],
-  ["登录凭证状态", "03_state/login_credentials.json", "json"],
   ["工具执行审计", "03_state/agent_execution_audit.json", "json"],
   ["Agent 日志", "04_logs/agent_log.md", "log"],
   ["CUA 日志", "04_logs/cua_log.md", "log"],
@@ -743,7 +742,7 @@ function resolveWorkspacePath(workspace: string, value?: string) {
 function isSensitivePath(path: string) {
   const name = basename(path).toLowerCase()
   if (name === ".env" || name.startsWith(".env.")) return true
-  if (/password|secret|token|credential|keychain/.test(path.toLowerCase()) && !/login_credentials\.json$/.test(path)) return true
+  if (/password|secret|token|credential/.test(path.toLowerCase())) return true
   return false
 }
 
@@ -779,7 +778,6 @@ function isDangerousRuntimeCommand(command: string) {
   if (/\brm\s+-rf\s+(\/|~|\*|\$home|\.)/.test(normalized)) return true
   if (/\bgit\s+push\b/.test(normalized)) return true
   if (/\b(shutdown|reboot|halt)\b/.test(normalized)) return true
-  if (/\bsecurity\s+find-generic-password\b/.test(normalized)) return true
   if (/osascript .*tell application .*system events/i.test(command)) return true
   return false
 }
@@ -1139,6 +1137,15 @@ async function uniquePath(path: string) {
   return candidate
 }
 
+function sharedOcrState(task: any) {
+  const batchWorkspace = String(task.input?.batchWorkspacePath || "").trim()
+  if (!batchWorkspace || !existsSync(batchWorkspace)) return undefined
+  return {
+    outputDir: join(batchWorkspace, "03_state", "shared_extracted_text"),
+    indexPath: join(batchWorkspace, "03_state", "shared_ocr_index.json"),
+  }
+}
+
 export const workspace = {
   description: "Create or refresh the isolated Terra-Edu application workspace. Copies the original student folder into 00_original_backup without modifying the source folder.",
   args: inputArg({
@@ -1163,8 +1170,9 @@ export const workspace = {
         const to = await uniquePath(join(workspace, "00_original_backup", entry.name))
         await cp(from, to, { recursive: true, force: false, errorOnExist: false })
       }
-      await appendLog(workspace, "agent", "已初始化申请工作区，并把原始资料复制到 00_original_backup。")
-      await saveTask(workspace, task, "正在读取文件", "申请工作区已创建，原始材料副本已进入 00_original_backup。")
+      const batchNote = task.input?.batchWorkspacePath ? "本任务属于选校批次，已从批次共享材料区创建副本。" : ""
+      await appendLog(workspace, "agent", "已初始化申请工作区，并把原始资料复制到 00_original_backup。" + batchNote)
+      await saveTask(workspace, task, "正在读取文件", "申请工作区已创建，原始材料副本已进入 00_original_backup。" + batchNote)
     } else {
       await saveTask(workspace, task, task.status, "已刷新申请工作区状态和材料计数。")
     }
@@ -1186,7 +1194,18 @@ export const materials = {
     if (action === "extract_text") {
       const ocr = join(workspace, ".opencode", "bin", "terra-ocr")
       if (!existsSync(ocr)) throw new Error("Terra-Edu bundled OCR wrapper is missing: " + ocr)
-      const outputDir = join(workspace, "03_state", "extracted_text")
+      const shared = sharedOcrState(task)
+      const localOutputDir = join(workspace, "03_state", "extracted_text")
+      if (shared && existsSync(shared.indexPath)) {
+        await cp(shared.outputDir, localOutputDir, { recursive: true, force: false, errorOnExist: false })
+        const results = await readJson(shared.indexPath, [])
+        await writeJson(join(workspace, "03_state", "ocr_index.json"), results)
+        await appendLog(workspace, "agent", "已复用选校批次共享的 PaddleOCR 提取结果，无需重复 OCR。")
+        await saveTask(workspace, task, "正在读取文件", "已复用选校批次的扫描材料 OCR 结果。")
+        await appendAudit(workspace, "materials", action, "completed", "reused shared ocr " + results.length, ctx)
+        return JSON.stringify({ status: "completed", reusedSharedOcr: true, completed: results.length, files: results }, null, 2)
+      }
+      const outputDir = shared?.outputDir || localOutputDir
       await mkdir(outputDir, { recursive: true })
       const candidates = (await listFiles(join(workspace, "00_original_backup"))).filter((file) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(file))
       const results = []
@@ -1202,6 +1221,7 @@ export const materials = {
       const completed = results.filter((result) => result.textLength > 0)
       const failed = results.filter((result) => result.error || result.textLength === 0)
       await writeJson(join(workspace, "03_state", "ocr_index.json"), results)
+      if (shared) await writeJson(shared.indexPath, results)
       await appendLog(workspace, "agent", "已使用随包 PaddleOCR 提取 " + completed.length + "/" + results.length + " 份扫描材料文字。")
       await saveTask(workspace, task, "正在读取文件", "已完成扫描材料 OCR：成功 " + completed.length + " 份，失败或无文字 " + failed.length + " 份。")
       await appendAudit(workspace, "materials", action, "completed", "ocr " + completed.length + "/" + results.length)
@@ -1490,99 +1510,6 @@ export const requirements = {
       materialRequirements: requirements.materialRequirements.length,
       missingItemsMerged: incomingMissing.length,
     }, null, 2)
-  },
-}
-
-export const login = {
-  description: "Prepare ego-browser login with credentials saved by the Terra-Edu desktop app. The password stays in the macOS keychain and is never returned to the agent, logs, or workspace files.",
-  args: inputArg({
-    action: { type: "string", enum: ["fill_saved_credentials", "record_mfa_required", "record_login_failure"], description: "Use fill_saved_credentials to prepare an ego-browser keychain-login snippet; use record_mfa_required when MFA/CAPTCHA/email verification appears." },
-    taskSpaceId: { type: "string", description: "Optional ego-browser task space id to reuse with takeOverTaskSpace." },
-    taskSpaceName: { type: "string", description: "Optional ego-browser task space name to use with useOrCreateTaskSpace." },
-    usernameSelector: { type: "string", description: "Optional CSS selector for username/email input" },
-    passwordSelector: { type: "string", description: "Optional CSS selector for password input" },
-    submitSelector: { type: "string", description: "Optional CSS selector for login/continue button" },
-    submit: { type: "boolean", description: "Whether to click the detected login/continue button after filling credentials. Defaults to true." },
-    detail: { type: "string", description: "Human-readable login page or failure detail" },
-  }, ["action"]),
-  async execute(args, ctx) {
-    const input = args.input || {}
-    const workspace = root(ctx)
-    await appendAudit(workspace, "login", String(input.action || "login"), "started", input.detail || "", ctx)
-    const task = await loadTask(workspace)
-    const progress = await readJson(join(workspace, "03_state/application_progress.json"), { currentPage: "", completedPages: [], savedPages: [], uploadedMaterials: [], failedActions: [], highRiskBlocks: [] })
-    if (input.action === "record_mfa_required") {
-      await appendLog(workspace, "cua", "登录需要顾问处理 MFA/验证码/邮箱验证：" + (input.detail || ""))
-      await saveTask(workspace, task, "等待顾问登录", "申请平台需要 MFA、验证码或邮箱验证，请顾问手动完成后让 Agent 继续。")
-      await appendAudit(workspace, "login", "record_mfa_required", "completed", input.detail || "", ctx)
-      return JSON.stringify({ status: "needs_human", reason: "mfa_or_captcha_required" })
-    }
-    if (input.action === "record_login_failure") {
-      if (!Array.isArray(progress.failedActions)) progress.failedActions = []
-      progress.failedActions.push({ at: new Date().toISOString(), action: "login", reason: input.detail || "登录失败", page: progress.currentPage || "登录页" })
-      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", "登录失败：" + (input.detail || "未提供原因"))
-      await saveTask(workspace, task, "等待顾问登录", "自动登录失败，请顾问检查账号、密码、验证码或平台状态。")
-      await appendAudit(workspace, "login", "record_login_failure", "failed", input.detail || "", ctx)
-      return JSON.stringify({ status: "failed", reason: input.detail || "login_failed" })
-    }
-    const credential = await readJson(join(workspace, "03_state/login_credentials.json"), null)
-    if (!credential?.username || !credential?.serviceName || !credential?.hasSavedPassword) {
-      await saveTask(workspace, task, "等待顾问登录", "当前申请平台没有保存密码，请顾问手动登录或在任务创建页保存平台账号密码。")
-      await appendAudit(workspace, "login", "fill_saved_credentials", "failed", "missing saved credentials", ctx)
-      return JSON.stringify({ status: "needs_human", reason: "missing_saved_credentials" })
-    }
-    let password = ""
-    try {
-      const res = await execFileAsync("security", ["find-generic-password", "-s", String(credential.serviceName), "-a", String(credential.username), "-w"], { timeout: 10000 })
-      password = String(res.stdout || "").trim()
-    } catch (error: any) {
-      await appendAudit(workspace, "login", "fill_saved_credentials", "failed", "keychain read failed", ctx)
-      return JSON.stringify({ status: "needs_human", reason: "keychain_password_unavailable" })
-    }
-    if (!password) return JSON.stringify({ status: "needs_human", reason: "empty_saved_password" })
-    password = ""
-    const usernameSelector = String(input.usernameSelector || "")
-    const passwordSelector = String(input.passwordSelector || "")
-    const submitSelector = String(input.submitSelector || "")
-    const shouldSubmit = input.submit !== false
-    const taskSpaceSelector = input.taskSpaceId
-      ? "const task = await takeOverTaskSpace(" + JSON.stringify(String(input.taskSpaceId)) + ")"
-      : "const task = await useOrCreateTaskSpace(" + JSON.stringify(String(input.taskSpaceName || ["Terra-Edu", task.input?.studentName, task.input?.school].filter(Boolean).join(" / "))) + ")"
-    const snippet = [
-      "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
-      "import { execFileSync } from 'node:child_process'",
-      taskSpaceSelector,
-      "const username = " + JSON.stringify(String(credential.username)),
-      "const serviceName = " + JSON.stringify(String(credential.serviceName)),
-      "const password = execFileSync('security', ['find-generic-password', '-s', serviceName, '-a', username, '-w'], { encoding: 'utf8' }).trim()",
-      "const usernameSelector = " + JSON.stringify(usernameSelector),
-      "const passwordSelector = " + JSON.stringify(passwordSelector),
-      "const submitSelector = " + JSON.stringify(submitSelector),
-      "const shouldSubmit = " + JSON.stringify(shouldSubmit),
-      "await js(({ username, password, usernameSelector, passwordSelector, submitSelector, shouldSubmit }) => {",
-      "  const visible = (el) => !!(el && el.offsetParent !== null && !el.disabled && el.getAttribute('aria-disabled') !== 'true')",
-      "  const setNative = (el, value) => { const proto = Object.getPrototypeOf(el); const desc = Object.getOwnPropertyDescriptor(proto, 'value') || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value'); if (desc && desc.set) desc.set.call(el, value); else el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })) }",
-      "  const pick = (selector, fallbacks) => { if (selector) { const hit = document.querySelector(selector); if (visible(hit)) return hit } return Array.from(document.querySelectorAll(fallbacks)).find(visible) }",
-      "  const userEl = pick(usernameSelector, 'input[type=email],input[name*=email i],input[id*=email i],input[name*=user i],input[id*=user i],input[type=text]')",
-      "  const passEl = pick(passwordSelector, 'input[type=password]')",
-      "  if (!userEl || !passEl) return { ok:false, reason:'login_fields_not_found' }",
-      "  setNative(userEl, username); setNative(passEl, password)",
-      "  let submitted = false",
-      "  if (shouldSubmit) {",
-      "    let submitEl = submitSelector ? document.querySelector(submitSelector) : null",
-      "    if (!visible(submitEl)) submitEl = Array.from(document.querySelectorAll('button,input[type=submit],[role=button]')).find((el) => visible(el) && /log in|login|sign in|continue|next|登录|登入|继续|下一步/i.test(String(el.innerText || el.value || el.getAttribute('aria-label') || '')))",
-      "    if (visible(submitEl)) { submitEl.click(); submitted = true } else { passEl.dispatchEvent(new KeyboardEvent('keydown', { key:'Enter', bubbles:true })); submitted = true }",
-      "  }",
-      "  return { ok:true, usernameFilled:true, passwordFilled:true, submitted }",
-      "}, { username, password, usernameSelector, passwordSelector, submitSelector, shouldSubmit })",
-      "cliLog(JSON.stringify({ loginAttempted: true, taskSpaceId: task.id, info: await pageInfo(), snapshot: await snapshotText() }, null, 2))",
-      "EOF",
-    ].join("\n")
-    await appendLog(workspace, "cua", "已确认本机钥匙串存在申请平台凭证；已生成 ego-browser 登录步骤，密码不会写入日志。")
-    await saveTask(workspace, task, "等待顾问登录", "已准备通过 ego-browser 使用本机钥匙串填写登录页；如页面要求 MFA、验证码或邮箱验证，请顾问手动完成。")
-    await appendAudit(workspace, "login", "fill_saved_credentials", "completed", "prepared ego-browser keychain login snippet", ctx)
-    return JSON.stringify({ status: "prepared", usernameAvailable: true, passwordSource: "macOS keychain", snippet }, null, 2)
   },
 }
 
