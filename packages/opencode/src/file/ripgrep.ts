@@ -287,6 +287,12 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
 
       const filepath = yield* Effect.cached(
         Effect.gen(function* () {
+          const bundled = process.env.OPENCODE_RIPGREP_PATH
+          if (bundled) {
+            if (yield* fs.isFile(bundled).pipe(Effect.orDie)) return bundled
+            return yield* Effect.fail(new Error(`Configured ripgrep binary is missing: ${bundled}`))
+          }
+
           const system = yield* Effect.sync(() => which(process.platform === "win32" ? "rg.exe" : "rg"))
           if (system && (yield* fs.isFile(system).pipe(Effect.orDie))) return system
 

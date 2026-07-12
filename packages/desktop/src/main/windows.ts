@@ -90,12 +90,6 @@ export function createMainWindow() {
     title: "Terra-Edu Application Agent",
     icon: iconPath(),
     backgroundColor,
-    ...(process.platform === "darwin"
-      ? {
-          titleBarStyle: "hidden" as const,
-          trafficLightPosition: { x: 12, y: 14 },
-        }
-      : {}),
     ...(process.platform === "win32"
       ? {
           frame: false,
@@ -153,7 +147,6 @@ export function createLoadingWindow() {
     autoHideMenuBar: true,
     icon: iconPath(),
     backgroundColor,
-    ...(process.platform === "darwin" ? { titleBarStyle: "hidden" as const } : {}),
     ...(process.platform === "win32"
       ? {
           frame: false,

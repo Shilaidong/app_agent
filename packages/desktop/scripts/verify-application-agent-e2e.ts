@@ -213,11 +213,9 @@ const tools = readText(join(workspace, ".opencode/tools/application-agent.ts"))
 for (const tool of ["workspace", "materials", "state", "documents", "risk", "cua"]) {
   assert(tools.includes(`export const ${tool} =`), `Missing custom tool export: ${tool}`)
 }
-if (!tools.includes("export const runtime =")) warnings.push("Legacy workspace custom tools do not yet include application-agent_runtime; reopening the task will regenerate .opencode config.")
 if (!tools.includes("export const requirements =")) warnings.push("Legacy workspace custom tools do not yet include application-agent_requirements; reopening the task will regenerate .opencode config.")
 if (!tools.includes("export const login =")) warnings.push("Legacy workspace custom tools do not yet include application-agent_login; reopening the task will regenerate .opencode config.")
-if (!tools.includes("record_builtin_failure")) warnings.push("Legacy workspace runtime fallback cannot record built-in tool failures yet; reopening the task will regenerate .opencode config.")
-if (!tools.includes("fetch_url") || !tools.includes("search_web") || !tools.includes("load_skill")) warnings.push("Legacy workspace runtime fallback actions are incomplete; reopening the task will regenerate .opencode config.")
+if (!tools.includes("extract_text")) warnings.push("Legacy workspace custom tools do not yet include bundled OCR extraction; reopening the task will regenerate .opencode config.")
 for (const action of ["prepare_ego_task", "record_observation", "record_field_verified", "record_select_verified", "record_save_verified", "record_blocker", "handoff_to_consultant"]) {
   if (!tools.includes(action)) warnings.push(`Legacy workspace CUA coordination tool does not yet include ego-browser action: ${action}.`)
 }

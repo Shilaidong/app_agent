@@ -355,8 +355,36 @@ function agentMessageTime(message: ApplicationAgentChatItem) {
 
 function AgentQuestionCard(props: { message: ApplicationAgentChatItem; onReply: (text: string) => void }) {
   const [customAnswer, setCustomAnswer] = createSignal("")
+  const [selectedOptions, setSelectedOptions] = createSignal<Record<number, string[]>>({})
   const questions = () => props.message.question?.questions ?? []
-  const sendOption = (header: string, label: string) => props.onReply(`关于「${header || "顾问确认"}」：${label}`)
+  const selected = (index: number) => selectedOptions()[index] ?? []
+  const chooseOption = (index: number, question: NonNullable<ApplicationAgentChatItem["question"]>["questions"][number], label: string) => {
+    setSelectedOptions((current) => {
+      const previous = current[index] ?? []
+      const next = question.multiple
+        ? previous.includes(label)
+          ? previous.filter((item) => item !== label)
+          : [...previous, label]
+        : [label]
+      return { ...current, [index]: next }
+    })
+  }
+  const canSubmitOptions = () =>
+    questions().some((question) => question.options?.length) &&
+    questions().every((question, index) => !question.options?.length || selected(index).length > 0)
+  const submitOptions = () => {
+    if (!canSubmitOptions()) return
+    props.onReply(
+      questions()
+        .map((question, index) => {
+          const labels = selected(index)
+          if (labels.length === 0) return ""
+          return `关于「${question.header || "顾问确认"}」：${labels.join("、")}`
+        })
+        .filter(Boolean)
+        .join("\n"),
+    )
+  }
   const sendCustom = () => {
     const text = customAnswer().trim()
     if (!text) return
@@ -371,19 +399,22 @@ function AgentQuestionCard(props: { message: ApplicationAgentChatItem; onReply: 
       </div>
       <div class="question-card-body">
         <For each={questions()}>
-          {(question) => (
+          {(question, index) => (
             <section>
               <h3>{question.header || "确认问题"}</h3>
               <p>{question.question}</p>
               <Show when={question.options?.length}>
+                <small class="question-selection-hint">{question.multiple ? "可多选，选完后统一提交。" : "请选择一项，选完后统一提交。"}</small>
                 <div class="question-options">
                   <For each={question.options}>
                     {(option) => (
                       <button
                         type="button"
+                        classList={{ selected: selected(index()).includes(option.label) }}
+                        aria-pressed={selected(index()).includes(option.label)}
                         onClick={(event) => {
                           event.currentTarget.blur()
-                          sendOption(question.header, option.label)
+                          chooseOption(index(), question, option.label)
                         }}
                       >
                         <strong>{option.label}</strong>
@@ -396,6 +427,11 @@ function AgentQuestionCard(props: { message: ApplicationAgentChatItem; onReply: 
             </section>
           )}
         </For>
+        <Show when={questions().some((question) => question.options?.length)}>
+          <button type="button" class="question-submit" disabled={!canSubmitOptions()} onClick={submitOptions}>
+            确认并提交所选项
+          </button>
+        </Show>
         <div class="question-custom-reply">
           <input
             value={customAnswer()}

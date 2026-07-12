@@ -271,6 +271,7 @@ const main = Effect.gen(function* () {
     questions: {
       question: string
       header: string
+      multiple?: boolean
       options?: { label: string; description?: string }[]
     }[]
   }
@@ -279,7 +280,7 @@ const main = Effect.gen(function* () {
     request.questions
       .map((item, index) => {
         const options = item.options?.length
-          ? `\n可选项：${item.options.map((option) => option.label).join(" / ")}`
+          ? `\n可选项${item.multiple ? "（可多选）" : ""}：${item.options.map((option) => option.label).join(" / ")}`
           : ""
         return `${index + 1}. ${item.header ? `${item.header}：` : ""}${item.question}${options}`
       })
@@ -290,30 +291,30 @@ const main = Effect.gen(function* () {
     const pick = (question: PendingQuestionRequest["questions"][number]) => {
       const options = question.options ?? []
       const header = `${question.header} ${question.question}`.toLowerCase()
-      const matched = options.find((option) => {
+      const matched = options.filter((option) => {
         const label = option.label.toLowerCase()
         const description = option.description?.toLowerCase() ?? ""
         return source.includes(label) || (description.length > 0 && source.includes(description))
       })
-      if (matched) return matched.label
+      if (matched.length > 0) return question.multiple ? matched.map((option) => option.label) : [matched[0].label]
 
       if (header.includes("地址")) {
-        if (prompt.includes("北京") || prompt.includes("户籍")) return options[0]?.label ?? prompt
-        if (prompt.includes("深圳") || prompt.includes("现居")) return options[1]?.label ?? prompt
+        if (prompt.includes("北京") || prompt.includes("户籍")) return [options[0]?.label ?? prompt]
+        if (prompt.includes("深圳") || prompt.includes("现居")) return [options[1]?.label ?? prompt]
       }
       if (header.includes("出生")) {
-        if (/2002|8月21|08\/?21|确认|是的|正确/.test(prompt)) return options[0]?.label ?? prompt
+        if (/2002|8月21|08\/?21|确认|是的|正确/.test(prompt)) return [options[0]?.label ?? prompt]
       }
       if (header.includes("语言") || header.includes("toefl") || header.includes("ielts")) {
-        if (/豁免|无需|不需要|美国本科/.test(prompt)) return options[0]?.label ?? prompt
-        if (/需要|toefl|ielts|语言成绩/.test(prompt)) return options[1]?.label ?? prompt
-        if (/不确定|跳过|先不填/.test(prompt)) return options[2]?.label ?? prompt
+        if (/豁免|无需|不需要|美国本科/.test(prompt)) return [options[0]?.label ?? prompt]
+        if (/需要|toefl|ielts|语言成绩/.test(prompt)) return [options[1]?.label ?? prompt]
+        if (/不确定|跳过|先不填/.test(prompt)) return [options[2]?.label ?? prompt]
       }
 
-      return prompt
+      return [prompt]
     }
 
-    return request.questions.map((question) => [pick(question).trim()].filter(Boolean))
+    return request.questions.map((question) => pick(question).map((answer) => answer.trim()).filter(Boolean))
   }
 
   const summarizePrompt = (text: string) => {

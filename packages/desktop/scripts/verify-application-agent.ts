@@ -12,7 +12,12 @@ const constantsSource = readFileSync(join(root, "src/main/constants.ts"), "utf8"
 const builderSource = readFileSync(join(root, "electron-builder.config.ts"), "utf8")
 const prebuildSource = readFileSync(join(root, "scripts/prebuild.ts"), "utf8")
 const releaseMacSource = readFileSync(join(root, "scripts/release-mac.ts"), "utf8")
+const windowsSource = readFileSync(join(root, "src/main/windows.ts"), "utf8")
 const desktopServerSource = readFileSync(join(root, "src/main/server.ts"), "utf8")
+const desktopSidecarSource = readFileSync(join(root, "src/main/sidecar.ts"), "utf8")
+const ripgrepSource = readFileSync(join(root, "../opencode/src/file/ripgrep.ts"), "utf8")
+const databaseSource = readFileSync(join(root, "../opencode/src/storage/db.ts"), "utf8")
+const permissionRepairSource = readFileSync(join(root, "../opencode/src/storage/permission-schema-repair.ts"), "utf8")
 const opencodeConfigSource = readFileSync(join(root, "../opencode/src/config/config.ts"), "utf8")
 const opencodeToolRegistrySource = readFileSync(join(root, "../opencode/src/tool/registry.ts"), "utf8")
 const egoSkillSource = readFileSync(join(root, "resources/ego-browser/SKILL.md"), "utf8")
@@ -53,7 +58,7 @@ const expectedCommands = [
   "summarize-progress",
 ]
 
-const expectedTools = ["workspace", "materials", "state", "documents", "runtime", "requirements", "login", "risk", "cua"]
+const expectedTools = ["workspace", "materials", "state", "documents", "requirements", "login", "risk", "cua"]
 
 const expectedWorkspaceDirs = [
   "00_original_backup",
@@ -142,7 +147,14 @@ assert(source.includes("glob: \"allow\""), "Application Agent must explicitly al
 assert(source.includes("grep: \"allow\""), "Application Agent must explicitly allow OpenCode grep")
 assert(source.includes("read: {"), "Application Agent must explicitly allow OpenCode read")
 assert(source.includes("bash: {"), "Application Agent must explicitly allow OpenCode bash")
+assert(source.includes('"python*": "deny"') && source.includes('"python3*": "deny"'), "Application Agent must block ad-hoc Python commands")
 assert(desktopServerSource.includes("OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL"), "Desktop sidecar must disable OpenCode project dependency auto-install")
+assert(desktopServerSource.includes("TERRA_EDU_LEGACY_XDG_DATA_HOME"), "Desktop must preserve the legacy OpenCode data location before isolation")
+assert(desktopServerSource.includes("XDG_DATA_HOME: join(userDataPath, \"data\")"), "Desktop must isolate OpenCode data by application")
+assert(desktopSidecarSource.includes("copyLegacyDatabase"), "Desktop sidecar must migrate an existing OpenCode database into its isolated data directory")
+assert(desktopSidecarSource.includes("VACUUM INTO"), "Desktop must copy the legacy database through a consistent SQLite snapshot")
+assert(databaseSource.includes("repairLegacyPermissionSchema"), "OpenCode database startup must repair legacy permission schemas")
+assert(permissionRepairSource.includes("before-permission-repair"), "Legacy permission repair must create a recoverable database backup")
 assert(opencodeConfigSource.includes("OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL"), "OpenCode config loader must support disabling project dependency auto-install")
 assert(opencodeToolRegistrySource.includes('providerID.startsWith("opencode")'), "OpenCode Go models must expose websearch")
 assert(source.includes('rm(join(base, name), { recursive: true, force: true })'), "Workspace config writer must remove stale OpenCode dependency install artifacts")
@@ -188,11 +200,16 @@ assert(vendoredHelpers.some((file) => (statSync(file).mode & 0o111) !== 0), "Ven
 assert(source.includes("application-agent_login"), "Start prompt must mention login tool")
 assert(source.includes("application-agent_risk"), "Start prompt must mention risk tool")
 assert(source.includes("application-agent_requirements"), "Start prompt must mention requirements tool")
-assert(source.includes("application-agent_runtime"), "Runtime fallback tool must remain available")
-assert(source.includes("record_builtin_failure"), "Runtime fallback must record OpenCode built-in tool failures")
-assert(source.includes("read_file") && source.includes("list_files") && source.includes("run_bash"), "Runtime fallback file/shell actions are missing")
-assert(source.includes("fetch_url") && source.includes("search_web") && source.includes("load_skill"), "Runtime fallback web/skill actions are missing")
-assert(source.includes("diagnose"), "Runtime fallback diagnose action is missing")
+assert(source.includes("Direct distribution intentionally omits the legacy runtime fallback"), "Customer build must not expose the legacy runtime fallback")
+assert(desktopServerSource.includes("OPENCODE_RIPGREP_PATH"), "Customer build must use the bundled ripgrep path")
+assert(ripgrepSource.includes("Configured ripgrep binary is missing"), "OpenCode must prefer the bundled ripgrep binary")
+assert(source.includes("terra-ocr"), "Customer build must install the bundled OCR wrapper")
+assert(source.includes("extract_text"), "Materials tool must expose deterministic OCR extraction")
+assert(source.includes("record_dynamic_form_verified") && source.includes("DYNAMIC_FORM_SCAN_REQUIRED"), "Dynamic form rescan gate is missing")
+assert(desktopUiSource.includes("multiple?: boolean") && desktopUiSource.includes("确认并提交所选项"), "Consultant multi-select question submission is missing")
+assert(!windowsSource.includes("trafficLightPosition"), "macOS windows must keep the native draggable titlebar")
+assert(prebuildSource.includes("bundle-ripgrep") && prebuildSource.includes("build-terra-paddleocr"), "Desktop build must prepare bundled local tools")
+assert(builderSource.includes("resources/vendor/ripgrep/") && builderSource.includes("resources/vendor/terra-paddleocr/"), "Desktop package must include bundled local tools")
 assert(source.includes("启动阶段只做"), "Startup prompt must constrain the first turn to a minimal startup phase")
 assert(source.includes("不要在启动阶段调用 webfetch"), "Startup prompt must keep web research out of the first turn")
 assert(source.includes("todowrite 如果失败一次"), "Startup prompt must not block workspace initialization on todowrite failure")
@@ -261,7 +278,7 @@ assert(source.includes("推荐信邀请"), "Recommendation invite risk rule is m
 assert(source.includes("保存密码"), "Credential-storage risk rule is missing")
 
 assert(source.includes("扫描 PDF"), "Scanned PDF/OCR SOP is missing")
-assert(source.includes("本地 OCR"), "Local OCR/MCP SOP is missing")
+assert(source.includes("PaddleOCR"), "Bundled PaddleOCR SOP is missing")
 assert(source.includes("03_state/extracted_text"), "OCR result output path is missing")
 assert(source.includes("不要假装读懂"), "OCR failure rule is missing")
 

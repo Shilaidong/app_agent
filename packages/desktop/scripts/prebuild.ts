@@ -9,5 +9,7 @@ const modelsDevApiJson = new URL("../../opencode/test/tool/fixtures/models-api.j
 await $`bun ./scripts/copy-icons.ts ${channel}`
 await $`bun ./scripts/copy-metainfo.ts ${channel}`
 await $`bun ./scripts/write-supabase-public-config.ts`
+await $`bun ./scripts/bundle-ripgrep.ts`
+await $`bun ./scripts/build-terra-paddleocr.ts`
 
 await $`cd ../opencode && MODELS_DEV_API_JSON=${modelsDevApiJson} bun script/build-node.ts`

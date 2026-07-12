@@ -1,5 +1,9 @@
 import { drizzle } from "drizzle-orm/node-sqlite/driver"
+import { existsSync, mkdirSync } from "node:fs"
 import * as http from "node:http"
+import { homedir } from "node:os"
+import { dirname, join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import * as tls from "node:tls"
 
 type NodeHttpWithEnvProxy = typeof http & {
@@ -54,6 +58,7 @@ parentPort.on("message", (event) => {
 async function start(command: StartCommand) {
   try {
     prepareSidecarEnv(command.password, command.userDataPath)
+    copyLegacyDatabase()
     ensureLoopbackNoProxy()
     useSystemCertificates()
     useEnvProxy()
@@ -105,6 +110,23 @@ function prepareSidecarEnv(password: string, userDataPath: string) {
     OPENCODE_SERVER_PASSWORD: password,
     XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
   })
+}
+
+function copyLegacyDatabase() {
+  if (process.env.OPENCODE_DB) return
+
+  const source = join(process.env.TERRA_EDU_LEGACY_XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opencode", "opencode.db")
+  const target = join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opencode", "opencode.db")
+  if (!existsSync(source) || existsSync(target) || source === target) return
+
+  mkdirSync(dirname(target), { recursive: true })
+  const database = new DatabaseSync(source, { readOnly: true })
+  try {
+    database.exec("PRAGMA busy_timeout = 5000")
+    database.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`)
+  } finally {
+    database.close()
+  }
 }
 
 function ensureLoopbackNoProxy() {

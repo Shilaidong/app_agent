@@ -10,16 +10,6 @@ const execFileAsync = promisify(execFile)
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const signScript = path.join(rootDir, "script", "sign-windows.ps1")
 
-type PackContext = {
-  appOutDir: string
-  electronPlatformName?: string
-  packager: {
-    appInfo: {
-      productFilename: string
-    }
-  }
-}
-
 async function signWindows(configuration: { path: string }) {
   if (process.platform !== "win32") return
   if (process.env.GITHUB_ACTIONS !== "true") return
@@ -55,32 +45,27 @@ function isExecutableCode(file: string) {
   const basename = path.basename(file)
   return (
     (stat.mode & 0o111) !== 0 ||
-    basename.endsWith(".dylib") ||
+    basename.includes(".dylib") ||
     basename.endsWith(".so") ||
     basename.endsWith(".node") ||
     basename === "ego Framework"
   )
 }
 
-async function adHocSign(target: string) {
-  await execFileAsync("codesign", ["--sign", "-", "--force", "--timestamp=none", target])
+async function adHocSign(target: string, options: string[] = []) {
+  await execFileAsync("codesign", ["--sign", "-", "--force", "--timestamp=none", ...options, target])
 }
 
-async function signBundledEgoLite(context: PackContext) {
+async function signBundledEgoLite(app: string) {
   if (process.platform !== "darwin") return
-  if (context.electronPlatformName && context.electronPlatformName !== "darwin") return
 
-  const app = path.join(
-    context.appOutDir,
-    `${context.packager.appInfo.productFilename}.app`,
-    "Contents/Resources/vendor/ego-lite/ego lite.app",
-  )
-  if (!existsSync(app)) return
+  const egoLite = path.join(app, "Contents/Resources/vendor/ego-lite/ego lite.app")
+  if (!existsSync(egoLite)) return
 
-  const files = walkFiles(app)
+  const files = walkFiles(egoLite)
     .filter(isExecutableCode)
     .sort((a, b) => b.length - a.length)
-  const bundles = walkDirectories(app)
+  const bundles = walkDirectories(egoLite)
     .filter((directory) => directory.endsWith(".app") || directory.endsWith(".framework"))
     .filter((directory) => !lstatSync(directory).isSymbolicLink())
     .sort((a, b) => b.length - a.length)
@@ -91,7 +76,37 @@ async function signBundledEgoLite(context: PackContext) {
   for (const bundle of bundles) {
     await adHocSign(bundle)
   }
-  await adHocSign(app)
+  await adHocSign(egoLite)
+}
+
+async function signBundledTerraTools(app: string) {
+  if (process.platform !== "darwin") return
+
+  const resources = path.join(app, "Contents/Resources/vendor")
+  for (const target of [path.join(resources, "ripgrep/rg")]) {
+    if (!existsSync(target)) throw new Error(`Missing bundled Terra-Edu tool: ${target}`)
+    await adHocSign(target)
+  }
+  const paddleOcr = path.join(resources, "terra-paddleocr")
+  const files = walkFiles(paddleOcr)
+    .filter(isExecutableCode)
+    .sort((a, b) => b.length - a.length)
+  if (files.length === 0) throw new Error(`Missing bundled Terra-Edu PaddleOCR tool: ${paddleOcr}`)
+  for (const file of files) await adHocSign(file)
+}
+
+async function signMacApplication(configuration: { app: string }) {
+  if (process.platform !== "darwin") return
+
+  await signBundledEgoLite(configuration.app)
+  await signBundledTerraTools(configuration.app)
+  await adHocSign(configuration.app, [
+    "--deep",
+    "--options",
+    "runtime",
+    "--entitlements",
+    path.join(rootDir, "packages/desktop/resources/entitlements.plist"),
+  ])
 }
 
 const channel = (() => {
@@ -116,6 +131,16 @@ const getBase = (): Configuration => ({
       filter: ["opencode-go-key.txt", "supabase-public.json"],
     },
     {
+      from: "resources/vendor/ripgrep/",
+      to: "vendor/ripgrep/",
+      filter: ["rg"],
+    },
+    {
+      from: "resources/vendor/terra-paddleocr/",
+      to: "vendor/terra-paddleocr/",
+      filter: ["**/*"],
+    },
+    {
       from: "native/",
       to: "native/",
       filter: ["index.js", "index.d.ts", "build/Release/mac_window.node", "swift-build/**"],
@@ -136,12 +161,12 @@ const getBase = (): Configuration => ({
     entitlements: "resources/entitlements.plist",
     entitlementsInherit: "resources/entitlements.plist",
     notarize: false,
+    sign: signMacApplication,
     target: macTarget,
   },
   dmg: {
     sign: true,
   },
-  afterPack: signBundledEgoLite,
   protocols: {
     name: "Terra-Edu Application Agent",
     schemes: ["terra-application-agent"],

@@ -26,6 +26,9 @@ out/
 .cache/
 
 resources/opencode-cli*
+resources/vendor/ripgrep/
+resources/vendor/terra-ocr/
+resources/vendor/terra-paddleocr/
 resources/icons
 resources/*.metainfo.xml
 

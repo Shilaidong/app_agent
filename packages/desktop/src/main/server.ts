@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, utilityProcess } from "electron"
@@ -58,12 +59,27 @@ export function setWslConfig(config: WslConfig) {
 
 export function preferAppEnv(userDataPath: string) {
   const shell = process.platform === "win32" ? null : getUserShell()
-  Object.assign(process.env, {
-    ...(shell ? loadShellEnv(shell) : null),
+  const shellEnv = shell ? loadShellEnv(shell) : undefined
+  const common = {
+    ...shellEnv,
     OPENCODE_EXPERIMENTAL_ICON_DISCOVERY: "true",
     OPENCODE_EXPERIMENTAL_FILEWATCHER: "true",
     OPENCODE_CLIENT: "desktop",
-    XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
+  }
+
+  if (process.env.OPENCODE_DB === ":memory:") {
+    Object.assign(process.env, common)
+    return
+  }
+
+  const legacyDataHome = shellEnv?.XDG_DATA_HOME ?? process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share")
+  Object.assign(process.env, {
+    ...common,
+    TERRA_EDU_LEGACY_XDG_DATA_HOME: legacyDataHome,
+    XDG_DATA_HOME: join(userDataPath, "data"),
+    XDG_CONFIG_HOME: join(userDataPath, "config"),
+    XDG_CACHE_HOME: join(userDataPath, "cache"),
+    XDG_STATE_HOME: join(userDataPath, "state"),
   })
 }
 
@@ -234,6 +250,7 @@ function createSidecarEnv(): Record<string, string> {
   )
   const goAuth = openCodeGoAuthContent()
   if (goAuth && !env.OPENCODE_AUTH_CONTENT) env.OPENCODE_AUTH_CONTENT = goAuth
+  if (app.isPackaged) env.OPENCODE_RIPGREP_PATH = join(process.resourcesPath, "vendor", "ripgrep", "rg")
   env.OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL = "1"
   delete env.DEBUG
   if (process.platform === "linux") delete env.LD_PRELOAD

@@ -105,6 +105,7 @@ export type ApplicationAgentChatItem = {
     questions: {
       header: string
       question: string
+      multiple?: boolean
       options?: { label: string; description?: string }[]
     }[]
   }

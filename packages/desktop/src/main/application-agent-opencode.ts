@@ -39,6 +39,17 @@ function bundledEgoLiteAppPath() {
   return candidates[0]
 }
 
+function bundledTerraPaddleOcrPath() {
+  const candidates = [
+    join(root, "../../resources/vendor/terra-paddleocr/terra-paddleocr"),
+    join(process.resourcesPath ?? "", "vendor/terra-paddleocr/terra-paddleocr"),
+  ]
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) return candidate
+  }
+  return candidates[0]
+}
+
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
@@ -128,6 +139,22 @@ async function writeEgoBrowserWrapper(base: string) {
   await chmod(wrapper, 0o755)
 }
 
+async function writeTerraPaddleOcrWrapper(base: string) {
+  const wrapper = join(base, "bin", "terra-ocr")
+  await writeFile(
+    wrapper,
+    `#!/bin/sh
+set -eu
+
+OCR=${shellQuote(bundledTerraPaddleOcrPath())}
+[ -x "$OCR" ] || { printf '%s\\n' "Terra-Edu bundled OCR is missing: $OCR" >&2; exit 127; }
+exec "$OCR" "$@"
+`,
+    "utf8",
+  )
+  await chmod(wrapper, 0o755)
+}
+
 export function buildApplicationAgentStartPrompt(task: ApplicationTask) {
   const inputJson = JSON.stringify(task.input, null, 2)
   return `你现在是 Terra-Edu 申请 Agent，请立刻接管这个申请任务。不要等待顾问再输入第一条指令。
@@ -156,7 +183,7 @@ ${inputJson}
 你必须优先使用这些 OpenCode Custom Tools 完成可工具化步骤，不要只靠普通 shell 临时拼流程：
 
 - application-agent_workspace：创建目录、复制原始材料到 00_original_backup、刷新文件计数。
-- application-agent_materials：分类 00_original_backup 中的材料，写入 materials_index。
+- application-agent_materials：调用随包 PaddleOCR 提取扫描 PDF/图片文字，再分类 00_original_backup 中的材料，写入 materials_index。
 - application-agent_documents：从 missing_items.json 生成信息表、材料表、Word 清单和任务总结。
 - application-agent_state：按统一 task_state.json schema 更新状态、统计和进度。
 - ego-browser skill：macOS 申请平台填表的唯一浏览器自动化后端。通过 ego lite 的独立 task space 打开/复用申请平台，使用 snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace、completeTaskSpace 完成真人式观察、填写、复查和保存。
@@ -164,22 +191,23 @@ ${inputJson}
 - application-agent_login：从 03_state/login_credentials.json 读取本机保存的申请平台账号状态，并通过钥匙串读取密码后填写登录页；不会把密码输出给 Agent。
 - application-agent_risk：识别并阻断最终提交、付款、不可逆推荐信邀请、保存账号密码等高风险动作。
 - application-agent_requirements：保存 webfetch/websearch 得到的学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
-- application-agent_runtime：客户机兼容兜底工具。仅在某个 OpenCode 内置工具实际失败一次后使用；启动阶段不要主动调用。
 
 ## 工具调用硬性约束
 
 - 启动阶段只做三件事：输出简短进度、优先调用 OpenCode 内置 todowrite 建立默认计划、调用 application-agent_workspace 初始化工作区并复制材料副本。todowrite 如果失败一次，不要重试、不要调用 runtime、不要阻塞启动；改用文字列出计划并继续 workspace 初始化。
-- 启动阶段不要调用 webfetch、websearch、application-agent_requirements、application-agent_runtime、ego-browser 或填表相关工具；这些放到工作区初始化成功后的后续阶段逐步执行。
+- 启动阶段不要调用 webfetch、websearch、application-agent_requirements、ego-browser 或填表相关工具；这些放到工作区初始化成功后的后续阶段逐步执行。
 - 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
 - 后续阶段中，学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方学校/项目/申请要求页面。抓取结果必须调用 application-agent_requirements 落盘。
-- 如果 OpenCode 内置工具实际失败一次，不要在同一个工具上循环重试；简短说明失败原因，然后使用 application-agent_runtime 按工具 schema 继续。
-- bash 允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用普通 bash 临时脚本替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
+- 客户端已随包提供 ripgrep 和 OCR，不要下载工具、不要使用 application-agent_runtime、不要用 Python，也不要用 bash 读写状态 JSON。文件读取使用 OpenCode 内置 read/glob/grep；扫描材料调用 application-agent_materials 的 extract_text；状态更新只调用 application-agent_state 和其他申请专用工具。
+- bash 只允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及有限诊断；不得用普通 bash 临时脚本替代申请专用工具链。
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
 - 如果看到 OpenCode compaction/summary/上下文压缩相关消息，必须把它当作正常维护动作：先读取最新状态文件恢复任务现场，然后继续执行 todowrite 中未完成的下一步。
 - ego-browser skill 和 ego lite 浏览器都是 Terra-Edu 随软件打包的固定快照。每次运行 ego-browser heredoc 必须使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF'\`，命中 .opencode/bin/ego-browser wrapper；不能调用系统 PATH 中的 ego-browser，不能自动更新、替换、下载或从 ego lite 应用中重新复制。
 - ego-browser 操作必须符合官方 skill：每轮 Bash 用 useOrCreateTaskSpace 或 takeOverTaskSpace 选中同一个申请 task space；用 openOrReuseTab 打开申请链接；用 snapshotText() 观察；用 fillInput、click、js、cdp、pressKey、typeText 等 helper 一次推进一组动作；所有对顾问可见输出必须用 cliLog(...)。
+- 上传文件只能调用 ego-browser 的 uploadFile(selector, absolutePath)，不得用 CDP 直接设置文件、不得改成原生文件选择器操作；上传后必须 snapshotText/pageInfo 复查并调用 application-agent_cua record_upload。
 - 页面里出现下拉、autocomplete、Slate 动态菜单、浏览器 alert/confirm/prompt 时，不要再切回 cua-driver 或坐标硬点。先通过 pageInfo()、snapshotText()、js(...) 或 cdp(...) 判断页面状态；必要时用键盘 typeahead 和 DOM/CDP 组合处理，并在保存前后再次 snapshotText() 或 pageInfo() 验证。
+- 任何 select、radio、checkbox、Yes/No、autocomplete 或“添加一项”点击都可能显示新的必填项。每次选择后先调用 application-agent_cua record_select_verified 记录该选择（它会使旧复查失效），再立即 snapshotText/pageInfo，并用 DOM 扫描当前可见的 required/aria-required 控件和 validation 文案；补齐新字段时调用 record_field_verified，随后再扫描，直到页面稳定且没有新增空必填项。每次扫描通过都必须以 remainingRequiredFields:[] 调用 application-agent_cua record_dynamic_form_verified；选择或填写后该验证自动失效。没有这条验证不得 SAVE。
 - 如果 pageInfo() 返回 dialog 信息，必须用 ego-browser 官方建议的 cdp('Page.handleJavaScriptDialog', { accept: false }) 或更安全的取消策略处理；“离开此网站？”/“Leave site?” 一律取消或留在页面，防止未保存表单丢失。
 - 如果任务需要顾问登录、验证码、MFA 或人工接管，调用 ego-browser 的 handOffTaskSpace(task.id)，并在顾问明确回复继续后用 takeOverTaskSpace(task.id) 恢复。不要自动抢回控制。
 - 点击 SAVE 前，必须在 ego-browser 脚本内检查当前 modal/page 的必填空项和 validation 文案；保存后必须再次读取页面，确认没有错误提示，才调用 application-agent_cua 的 record_save_verified 写入 savedPages。
@@ -222,8 +250,8 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 默认流程：
 1. 优先调用 OpenCode 内置 todowrite 创建 10 步计划，并在每个阶段更新进度；如果 todowrite 调用失败一次，用文字计划继续，不要阻塞工作区初始化。
 2. 调用 application-agent_workspace 创建/刷新专属申请工作区，并把原始资料复制到 00_original_backup。
-3. 读取学生资料副本，识别申请相关文件。
-4. 调用 application-agent_materials 整理材料，无法判断的文件放入 needs_review。
+3. 调用 application-agent_materials，action 使用 extract_text，对扫描 PDF/图片运行随包 PaddleOCR，并读取生成的文字索引。
+4. 调用 application-agent_materials，action 使用 classify 整理材料，无法判断的文件放入 needs_review。
 5. 使用 webfetch 读取申请链接；信息不足时用 websearch 查找官方学校/项目要求，并调用 application-agent_requirements 落盘。
 6. 生成结构化 student_profile.md。
 7. 检查缺失信息和缺失材料，已有信息不要重复要求，并写入 03_state/missing_items.json。
@@ -241,14 +269,13 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - application-agent_login：用本机钥匙串保存的申请平台账号密码填写登录页；不会向 Agent 输出明文密码。
 - application-agent_risk：高风险动作识别和硬拦截。
 - application-agent_requirements：保存学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
-- application-agent_runtime：客户机兼容兜底工具。仅在某个 OpenCode 内置工具实际失败一次后使用；启动阶段不要主动调用。
 
 工具调用硬性约束：
-- 启动阶段只做 todowrite、application-agent_workspace initialize 和 application-agent_state 状态同步；todowrite 如果失败一次，用文字计划继续，不要阻塞工作区初始化；不要在启动阶段调用 webfetch、websearch、application-agent_requirements、application-agent_runtime 或 ego-browser。
+- 启动阶段只做 todowrite、application-agent_workspace initialize 和 application-agent_state 状态同步；todowrite 如果失败一次，用文字计划继续，不要阻塞工作区初始化；不要在启动阶段调用 webfetch、websearch、application-agent_requirements 或 ego-browser。
 - 后续阶段中，学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方页面。抓取结果必须调用 application-agent_requirements 落盘。
 - 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
-- 如果 OpenCode 内置工具实际失败一次，不要在同一个工具上循环重试；简短说明失败原因，然后使用 application-agent_runtime 按工具 schema 继续。
-- bash 允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及读取文件内容、OCR/文本提取、检查环境或辅助诊断；不得用普通 bash 临时脚本替代 application-agent_workspace、application-agent_materials、application-agent_documents、application-agent_state、application-agent_cua、application-agent_risk。
+- 客户端已随包提供 ripgrep 和 OCR，不要下载工具、不要用 Python，也不要用 bash 读写状态 JSON。文件读取使用 OpenCode 内置 read/glob/grep；扫描材料调用 application-agent_materials 的 extract_text；状态更新只调用申请专用工具。
+- bash 只允许用于官方 ego-browser skill 指定的 ego-browser nodejs heredoc 浏览器操作，以及有限诊断；不得用普通 bash 临时脚本替代申请专用工具链。
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
 - ego-browser skill 和 ego lite 浏览器都是 Terra-Edu 随软件打包的固定快照。每次运行 ego-browser heredoc 必须使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF'\`，命中 .opencode/bin/ego-browser wrapper；不能调用系统 PATH 中的 ego-browser，不能自动更新、替换、下载或从 ego lite 应用中重新复制。
@@ -258,7 +285,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 安全规则：
 - 不删除或覆盖原始学生文件。
 - 不在信息不确定时猜测填写。
-- 可调用 OpenCode 内置 question 工具；所有问题必须短、清楚、带 2-3 个顾问可执行选项，并接受自定义回复。
+- 可调用 OpenCode 内置 question 工具；所有问题必须短、清楚、带 2-3 个顾问可执行选项，并接受自定义回复。可多选的问题必须显式传 multiple:true，等待顾问勾选后点击“确认并提交”。
 - 不自动点击最终提交申请。
 - 不自动付款。
 - 不自动发送不可逆推荐信邀请。
@@ -288,8 +315,8 @@ const SKILL_DEFINITIONS = [
     body: `执行步骤：
 1. 只读取 00_original_backup，不读取或修改原始学生文件夹。
 2. 列出所有文件路径、扩展名、大小和可能用途。
-3. 对有文本层的 PDF、doc/docx、xlsx/csv、txt/md 优先提取文字摘要；对扫描 PDF、图片、护照照片、成绩单截图，调用可用的 OpenCode MCP、本地 OCR 或系统工具提取文字。
-4. OCR 或文本提取结果必须写入 03_state/extracted_text/ 或 02_generated/material_text_index.md；如果工具不可用，记录失败原因，不要假装读懂。
+3. 先调用 application-agent_materials，action 使用 extract_text；它会使用随包 PaddleOCR，并把 PDF/图片结果写入 03_state/extracted_text/ 和 ocr_index.json。
+4. 再对有文本层的 PDF、doc/docx、xlsx/csv、txt/md 提取文字摘要；OCR 失败必须记录失败原因，不要假装读懂。
 5. 无法识别用途的材料标记为 needs_review。
 
 输出要求：
@@ -313,8 +340,8 @@ const SKILL_DEFINITIONS = [
     name: "material-organization",
     description: "按身份、学术、语言、文书、推荐、财务、平台相关、其他、待确认分类材料。",
     body: `执行步骤：
-1. 调用 application-agent_materials 对 00_original_backup 中的文件分类。
-2. 优先结合文件名、文本提取/OCR 结果和文件内容判断用途。
+1. 调用 application-agent_materials，先用 extract_text 生成扫描材料文字，再用 classify 对 00_original_backup 中的文件分类。
+2. 优先结合文件名、03_state/extracted_text/ 中的文字和文件内容判断用途。
 3. 分类目录必须覆盖 identity、academic、language、essays、recommendation、financial、platform_related、other、needs_review。
 4. 不确定材料进入 needs_review，并在 missing_items.json 中加入“待确认材料用途”。
 5. 分类完成后调用 application-agent_state 更新为“正在生成学生资料”。
@@ -478,12 +505,12 @@ ${skill.body}
 ## 执行原则
 
 - 在申请工作区内操作，不修改原始学生资料。
-- 只要步骤有对应 application-agent_* Custom Tool，必须优先调用该工具；bash 只能做 OCR、文本提取、环境检查和有限诊断，不能替代申请专用工具链。
+- 只要步骤有对应 application-agent_* Custom Tool，必须优先调用该工具；bash 只可执行 ego-browser heredoc 和有限诊断，不能替代申请专用工具链，也不能用 Python 读写状态。
 - 每次关键工具调用后检查 03_state/agent_execution_audit.json 或对应状态文件，确认工具链留下可回归的执行证据。
 - 启动和复杂流程必须使用 todowrite 管理 10 步计划，并在 application_progress.json 同步关键状态。
 - 申请学校、项目和平台要求必须优先用 webfetch/websearch 获取官方来源，再调用 application-agent_requirements 落盘。
 - 已有信息不要重复要求。
-- 遇到扫描 PDF 或图片材料，先调用可用 MCP、本地 OCR 或系统工具提取文字；失败要记录，不要猜。
+- 遇到扫描 PDF 或图片材料，先调用 application-agent_materials 的 extract_text；失败要记录，不要猜。
 - 不确定内容必须使用 OpenCode question 询问顾问，给出 2-3 个清楚选项并允许自定义回复。
 - 最终提交、付款、推荐信邀请和不可逆确认必须停止并交给顾问。
 `
@@ -657,7 +684,12 @@ function ensureCuaProgress(progress: any) {
   if (!Array.isArray(progress.blockedDialogs)) progress.blockedDialogs = []
   if (!Array.isArray(progress.validationMessages)) progress.validationMessages = []
   if (!Array.isArray(progress.requiredEmptyFields)) progress.requiredEmptyFields = []
+  if (!Array.isArray(progress.dynamicFormChecks)) progress.dynamicFormChecks = []
   return progress
+}
+
+function hasVerifiedBrowserSave(progress: any) {
+  return Array.isArray(progress?.savedPages) && progress.savedPages.length > 0
 }
 
 function appendLimited(progress: any, key: string, item: any, limit = 120) {
@@ -1142,14 +1174,40 @@ export const workspace = {
 }
 
 export const materials = {
-  description: "Classify materials from 00_original_backup into 01_classified_materials and write materials_index files.",
+  description: "Extract text from scanned PDF/image materials with the bundled PaddleOCR, or classify backed-up materials and write materials_index files.",
   args: inputArg({
-    action: { type: "string", enum: ["classify"], description: "Classify all backed-up materials" },
-  }),
-  async execute(_args, ctx) {
+    action: { type: "string", enum: ["extract_text", "classify"], description: "Extract material text before classification, or classify all backed-up materials" },
+  }, ["action"]),
+  async execute(args, ctx) {
     const workspace = root(ctx)
-    await appendAudit(workspace, "materials", "classify", "started")
     const task = await loadTask(workspace)
+    const action = String(args.input?.action || "")
+    await appendAudit(workspace, "materials", action, "started")
+    if (action === "extract_text") {
+      const ocr = join(workspace, ".opencode", "bin", "terra-ocr")
+      if (!existsSync(ocr)) throw new Error("Terra-Edu bundled OCR wrapper is missing: " + ocr)
+      const outputDir = join(workspace, "03_state", "extracted_text")
+      await mkdir(outputDir, { recursive: true })
+      const candidates = (await listFiles(join(workspace, "00_original_backup"))).filter((file) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(file))
+      const results = []
+      for (const file of candidates) {
+        const output = join(outputDir, basename(file) + ".txt")
+        const result = await execFileAsync(ocr, [file], { maxBuffer: 16 * 1024 * 1024 }).then(
+          ({ stdout, stderr }) => ({ text: stdout.trim(), error: stderr.trim() }),
+          (error) => ({ text: "", error: error instanceof Error ? error.message : String(error) }),
+        )
+        if (result.text) await writeFile(output, result.text + "\n", "utf8")
+        results.push({ file: relative(workspace, file), output: relative(workspace, output), textLength: result.text.length, error: result.error })
+      }
+      const completed = results.filter((result) => result.textLength > 0)
+      const failed = results.filter((result) => result.error || result.textLength === 0)
+      await writeJson(join(workspace, "03_state", "ocr_index.json"), results)
+      await appendLog(workspace, "agent", "已使用随包 PaddleOCR 提取 " + completed.length + "/" + results.length + " 份扫描材料文字。")
+      await saveTask(workspace, task, "正在读取文件", "已完成扫描材料 OCR：成功 " + completed.length + " 份，失败或无文字 " + failed.length + " 份。")
+      await appendAudit(workspace, "materials", action, "completed", "ocr " + completed.length + "/" + results.length)
+      return JSON.stringify({ status: "completed", completed: completed.length, failed: failed.length, files: results }, null, 2)
+    }
+
     const files = await listFiles(join(workspace, "00_original_backup"))
     const records = []
     for (const file of files) {
@@ -1176,7 +1234,7 @@ export const materials = {
     await writeFile(join(workspace, "02_generated/materials_index.md"), md.join("\n") + "\n", "utf8")
     await appendLog(workspace, "agent", "已完成材料分类，共 " + records.length + " 个文件。")
     await saveTask(workspace, task, "正在生成学生资料", "材料已分类完成，materials_index 已更新。")
-    await appendAudit(workspace, "materials", "classify", "completed", "classified " + records.length + " files")
+    await appendAudit(workspace, "materials", action, "completed", "classified " + records.length + " files")
     return "已分类 " + records.length + " 个文件。无法确认用途的文件会留在 needs_review。"
   },
 }
@@ -1192,6 +1250,11 @@ export const state = {
     const workspace = root(ctx)
     const task = await loadTask(workspace)
     await appendAudit(workspace, "state", String(input.status || "update"), "started", input.message || "")
+    const progress = ensureCuaProgress(await readJson(join(workspace, "03_state/application_progress.json"), {}))
+    if (input.status === "阶段性完成" && progress.egoBrowser?.preparedAt && !hasVerifiedBrowserSave(progress)) {
+      await appendAudit(workspace, "state", String(input.status), "failed", "browser completion without verified save", ctx)
+      throw new Error("ego-browser 尚未记录任何验证保存。不得把填表阶段标记为完成；请先保存并复查页面后调用 application-agent_cua record_save_verified，或记录明确阻塞原因。")
+    }
     await saveTask(workspace, task, input.status, input.message)
     await appendLog(workspace, "agent", input.message)
     await appendAudit(workspace, "state", String(input.status || "update"), "completed", input.message || "")
@@ -1240,7 +1303,8 @@ export const documents = {
   },
 }
 
-export const runtime = {
+/* Direct distribution intentionally omits the legacy runtime fallback. Customer builds bundle the native tools they need instead of asking the model to repair tool failures with ad-hoc shell code. */
+const legacyRuntime = {
   description: "Fallback runtime for installed Macs when OpenCode built-in bash/read/glob/webfetch/websearch/skill fail with the same low-level error. Prefer native built-ins first, then use this tool once a built-in class is confirmed broken.",
   args: inputArg({
     action: { type: "string", enum: ["diagnose", "record_builtin_failure", "read_file", "list_files", "run_bash", "fetch_url", "search_web", "load_skill"], description: "Fallback action to execute" },
@@ -1553,7 +1617,7 @@ export const risk = {
 export const cua = {
   description: "Coordinate ego-browser / ego lite application-platform filling. This tool does not directly control Chrome or call cua-driver. Use the official ego-browser skill for browser actions, then call this tool to record task space, observations, verified fields, verified saves, uploads, blockers, failures, and audit state.",
   args: inputArg({
-    action: { type: "string", enum: ["prepare_ego_task", "resume_ego", "record_observation", "record_field_verified", "record_select_verified", "record_save_verified", "record_blocker", "handoff_to_consultant", "complete_ego_task", "record_failure", "record_saved", "record_upload", "block_high_risk"], description: "ego-browser coordination action. Browser control itself must be done through the official ego-browser skill, not this tool." },
+    action: { type: "string", enum: ["prepare_ego_task", "resume_ego", "record_observation", "record_field_verified", "record_select_verified", "record_dynamic_form_verified", "record_save_verified", "record_blocker", "handoff_to_consultant", "complete_ego_task", "record_failure", "record_saved", "record_upload", "block_high_risk"], description: "ego-browser coordination action. Browser control itself must be done through the official ego-browser skill, not this tool." },
     applicationUrl: { type: "string", description: "Application platform URL, defaults to task input." },
     taskSpaceName: { type: "string", description: "ego-browser task space name for this application task." },
     taskSpaceId: { type: "string", description: "ego-browser task space id returned by useOrCreateTaskSpace." },
@@ -1565,6 +1629,7 @@ export const cua = {
     optionLabel: { type: "string", description: "Selected option label for record_select_verified." },
     optionValue: { type: "string", description: "Selected option value for record_select_verified." },
     evidence: { type: "string", description: "Short verification evidence from snapshotText/pageInfo/screenshot/readback." },
+    remainingRequiredFields: { type: "array", items: { type: "string" }, description: "Required for record_dynamic_form_verified, including [] when the dynamic-form rescan found no visible empty required fields." },
     confirmed: { type: "boolean", description: "Required true for record_save_verified after ego-browser verified there are no required-field or validation errors." },
     detail: { type: "string", description: "Operation detail, failure reason, saved page, upload material, or high-risk action" },
   }, ["action"]),
@@ -1652,6 +1717,7 @@ export const cua = {
       const kind = input.action === "record_select_verified" ? "select" : "field"
       const label = String(input.fieldLabel || input.detail || (kind === "select" ? "下拉字段" : "普通字段"))
       const value = String(input.optionLabel || input.optionValue || input.text || input.expectedText || "")
+      progress.dynamicFormChecks = []
       appendLimited(progress, "filledFields", { at: new Date().toISOString(), kind, label, value, backend: "ego-browser", taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "" })
       appendLimited(progress, "verifiedFields", { at: new Date().toISOString(), kind, label, value, expected: input.expectedText || value, evidence: input.evidence || "", backend: "ego-browser" })
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
@@ -1659,6 +1725,36 @@ export const cua = {
       await saveTask(workspace, task, "正在填写申请平台", "已填写并复查字段：" + label)
       await appendAudit(workspace, "cua", auditAction, "completed", label + " verified via ego-browser")
       return (kind === "select" ? "下拉/选项" : "字段") + "已记录为 ego-browser 验证完成。继续每 1-3 个字段观察一次页面。"
+    }
+    if (input.action === "record_dynamic_form_verified") {
+      ensureCuaProgress(progress)
+      if (!Array.isArray(input.remainingRequiredFields)) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: "missing dynamic form required-field scan", page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendAudit(workspace, "cua", auditAction, "failed", "missing dynamic form required-field scan")
+        return "DYNAMIC_FORM_SCAN_REQUIRED: 必须提供 remainingRequiredFields（无空必填项时也传 []），证明已在最新选择或填写后完成页面复查。"
+      }
+      const remaining = input.remainingRequiredFields.map((field: unknown) => String(field).trim()).filter(Boolean)
+      if (remaining.length > 0) {
+        progress.requiredEmptyFields = remaining
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: "visible required fields remain", fields: remaining, page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendLog(workspace, "cua", "动态表单复查发现未填写必填项：" + remaining.join("、"))
+        await appendAudit(workspace, "cua", auditAction, "failed", "remaining required fields: " + remaining.join(", "))
+        return "DYNAMIC_FORM_INCOMPLETE: 当前仍有可见必填项：" + remaining.join("、") + "。不得保存；请补齐后再次 snapshotText/pageInfo 和 DOM required 扫描。"
+      }
+      progress.requiredEmptyFields = []
+      appendLimited(progress, "dynamicFormChecks", {
+        at: new Date().toISOString(),
+        page: input.pageTitle || progress.currentPage || "申请平台页面",
+        url: input.currentUrl || progress.currentUrl || "",
+        evidence: input.evidence || input.text || "visible required/validation scan completed",
+        backend: "ego-browser",
+      })
+      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      await appendLog(workspace, "cua", "已完成动态表单复查：当前无新增空必填项。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "dynamic form verified")
+      return "动态表单已复查通过。现在可以执行保存前最终检查；如果再点击、选择或填写任何字段，必须重新复查。"
     }
     if (input.action === "record_blocker") {
       ensureCuaProgress(progress)
@@ -1693,9 +1789,19 @@ export const cua = {
         await appendAudit(workspace, "cua", auditAction, "failed", "unverified save record")
         return "UNVERIFIED_SAVE_RECORDED: 必须在 ego-browser 脚本里完成保存前 required/validation 检查、点击 SAVE、保存后 snapshot/pageInfo 复查，并以 confirmed:true 调用 record_save_verified。"
       }
+      const saveUrl = String(input.currentUrl || progress.currentUrl || "")
+      const dynamicCheck = progress.dynamicFormChecks.findLast((check: { url?: string }) => !saveUrl || check.url === saveUrl)
+      if (!dynamicCheck) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "record_save_verified", reason: "missing dynamic form verification", page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendLog(workspace, "cua", "拒绝记录保存：本页没有最新的动态表单复查。")
+        await appendAudit(workspace, "cua", auditAction, "failed", "missing dynamic form verification")
+        return "UNVERIFIED_DYNAMIC_FORM: 任何选择或填写后都必须重新 snapshotText/pageInfo，并以 remainingRequiredFields:[] 调用 record_dynamic_form_verified；完成后才能记录保存。"
+      }
       const pageName = String(input.detail || input.pageTitle || progress.currentPage || "申请页面")
       if (!Array.isArray(progress.savedPages)) progress.savedPages = []
-      progress.savedPages.push({ at: new Date().toISOString(), page: pageName, url: input.currentUrl || progress.currentUrl || "", backend: "ego-browser", evidence: input.evidence || "" })
+      progress.savedPages.push({ at: new Date().toISOString(), page: pageName, url: saveUrl, backend: "ego-browser", evidence: input.evidence || "", dynamicFormEvidence: dynamicCheck.evidence || "" })
+      progress.dynamicFormChecks = []
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       const syncedMissing = syncMissingItemsWithProgress(normalizeMissingItems(await readJson(join(workspace, "03_state/missing_items.json"), [])), progress)
       const activeMissing = activeMissingItems(syncedMissing)
@@ -1718,6 +1824,10 @@ export const cua = {
     }
     if (input.action === "complete_ego_task") {
       ensureCuaProgress(progress)
+      if (!hasVerifiedBrowserSave(progress)) {
+        await appendAudit(workspace, "cua", auditAction, "failed", "completion without verified save", ctx)
+        return "UNVERIFIED_BROWSER_COMPLETION: 当前没有 record_save_verified 证据，不能完成填表阶段。请保存并复查页面，或用 record_blocker 记录无法继续的具体原因。"
+      }
       progress.egoBrowser = {
         ...(progress.egoBrowser || {}),
         taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "",
@@ -1911,6 +2021,8 @@ export async function writeOpenCodeConfig(workspacePath: string) {
         "*": "allow",
         "rm -rf *": "deny",
         "git push*": "deny",
+        "python*": "deny",
+        "python3*": "deny",
       },
       "cua_final_submit": "deny",
       "cua_payment": "deny",
@@ -1977,6 +2089,8 @@ permission:
     "*": allow
     "rm -rf *": deny
     "git push*": deny
+    "python*": deny
+    "python3*": deny
   question: allow
   skill:
     "*": allow
@@ -1996,6 +2110,7 @@ ${DEFAULT_APPLICATION_PROMPT}
   }
   await writeEgoBrowserSkill(base)
   await writeEgoBrowserWrapper(base)
+  await writeTerraPaddleOcrWrapper(base)
   for (const command of COMMAND_DEFINITIONS) {
     await writeFile(join(base, "commands", `${command[0]}.md`), renderCommand(command), "utf8")
   }
