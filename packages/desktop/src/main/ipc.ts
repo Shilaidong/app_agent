@@ -196,13 +196,18 @@ export function registerIpcHandlers(deps: Deps) {
     return { buffer, width: size.width, height: size.height }
   })
 
-  const showNotification = (title: string, body?: string) => {
+  const showNotification = (title: string, body?: string, urgent = false) => {
+    if (urgent && process.platform === "darwin") app.dock?.bounce("critical")
     if (!Notification.isSupported()) return
     new Notification({ title, body }).show()
   }
 
   ipcMain.on("show-notification", (_event: IpcMainEvent, title: string, body?: string) => {
     showNotification(title, body)
+  })
+
+  ipcMain.on("show-urgent-notification", (_event: IpcMainEvent, title: string, body?: string) => {
+    showNotification(title, body, true)
   })
 
   ipcMain.handle("get-window-count", () => BrowserWindow.getAllWindows().length)

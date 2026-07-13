@@ -588,9 +588,9 @@ function ApplicationAgentShell(props: {
   const [selectedSelectionRows, setSelectedSelectionRows] = createSignal<number[]>([])
   const [savedPlatformAccount, setSavedPlatformAccount] = createSignal<{ username: string; updatedAt: string } | null>(null)
   let agentChatListRef: HTMLDivElement | undefined
-  let pendingScrollRestore: { top: number; height: number } | null = null
   let lastAgentMessageSignature = ""
   let lastAutomationNotificationKey = ""
+  let lastBrowserHandoffNotificationKey = ""
   let lastProgressNotificationKey = ""
   let lastQuestionNotificationKey = ""
   const taskGroups = createMemo(() => groupedTasks(applicationTasks()))
@@ -617,34 +617,12 @@ function ApplicationAgentShell(props: {
     setInput((current) => ({ ...current, [key]: value }))
   }
 
-  const captureAgentScroll = () => {
-    const list = agentChatListRef
-    if (!list) return
-    pendingScrollRestore = { top: list.scrollTop, height: list.scrollHeight }
-  }
-
-  const agentListNearBottom = () => {
-    const list = agentChatListRef
-    if (!list) return true
-    return list.scrollHeight - list.scrollTop - list.clientHeight < 140
-  }
-
-  const scheduleAgentScroll = (mode: "restore" | "bottom", smooth = true) => {
+  const scrollAgentToLatest = () => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         const list = agentChatListRef
         if (!list) return
-        if (mode === "restore") {
-          if (!pendingScrollRestore) return
-          const delta = list.scrollHeight - pendingScrollRestore.height
-          list.scrollTop = Math.max(0, pendingScrollRestore.top + Math.min(delta, 0))
-          pendingScrollRestore = null
-          return
-        }
-        list.scrollTo({
-          top: list.scrollHeight,
-          behavior: smooth ? "smooth" : "auto",
-        })
+        list.scrollTop = list.scrollHeight
       })
     })
   }
@@ -677,6 +655,7 @@ function ApplicationAgentShell(props: {
   const notifyTaskProgress = (latestTask: ApplicationTask) => {
     const latestProgress = latestTask.progress.at(-1)
     if (!latestProgress) return
+    if (requiresBrowserHandoff(latestTask, latestProgress.message)) return
     const key = `${latestTask.workspacePath}:${latestProgress.at}:${latestProgress.status}:${latestProgress.message}`
     if (key === lastProgressNotificationKey) return
     if (!isRecentNotification(latestProgress.at)) return
@@ -687,6 +666,20 @@ function ApplicationAgentShell(props: {
       completed ? "申请 Agent 步骤已更新" : "申请 Agent 正在推进",
       latestProgress.message || `当前状态：${latestProgress.status}`,
     )
+  }
+
+  const requiresBrowserHandoff = (latestTask: ApplicationTask, message: string) =>
+    latestTask.status === "等待顾问登录" || /浏览器接管|顾问接管|handOffTaskSpace|验证码|MFA|人工确认/i.test(message)
+
+  const notifyBrowserHandoff = (latestTask: ApplicationTask) => {
+    const latestProgress = latestTask.progress.at(-1)
+    const message = latestProgress?.message || "请在 ego-lite 中完成登录、验证码或人工确认，然后回复继续任务。"
+    if (!requiresBrowserHandoff(latestTask, message)) return
+    const key = `${latestTask.workspacePath}:${latestTask.status}:${latestProgress?.at ?? latestTask.updatedAt}:${message}`
+    if (key === lastBrowserHandoffNotificationKey) return
+    if (!isRecentNotification(latestProgress?.at ?? latestTask.updatedAt)) return
+    lastBrowserHandoffNotificationKey = key
+    window.api.showUrgentNotification("⚠️ 顾问需要接管浏览器", message)
   }
 
   const pickFolder = async () => {
@@ -983,14 +976,12 @@ function ApplicationAgentShell(props: {
     const text = agentInput().trim()
     const session = opencodeSession()
     if (!session || !text) return
-    const wasNearBottom = agentListNearBottom()
     setBusy(true)
     setError(null)
     try {
       setAgentInput("")
       await window.api.sendApplicationAgentPrompt(session, text)
       await refreshAgentMessages(session)
-      if (wasNearBottom) scheduleAgentScroll("bottom", true)
       await refreshAuthStatus()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -1002,13 +993,11 @@ function ApplicationAgentShell(props: {
   const replyToAgentQuestion = async (text: string) => {
     const session = opencodeSession()
     if (!session || !text.trim()) return
-    captureAgentScroll()
     setBusy(true)
     setError(null)
     try {
       await window.api.sendApplicationAgentPrompt(session, text.trim())
       await refreshAgentMessages(session)
-      scheduleAgentScroll("restore", false)
       await refreshAuthStatus()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -1118,7 +1107,6 @@ function ApplicationAgentShell(props: {
 
   const refreshAgentMessages = async (session = opencodeSession()) => {
     if (!session) return
-    const wasNearBottom = agentListNearBottom()
     const [messages, latestTask] = await Promise.all([
       window.api.getApplicationAgentMessages(session),
       window.api.getApplicationTask(session.workspacePath).catch(() => null),
@@ -1129,10 +1117,10 @@ function ApplicationAgentShell(props: {
     if (changed) {
       lastAgentMessageSignature = nextSignature
       notifyPendingQuestion(messages)
-      if (pendingScrollRestore) scheduleAgentScroll("restore", false)
-      else if (wasNearBottom) scheduleAgentScroll("bottom", true)
+      scrollAgentToLatest()
     }
     if (latestTask) {
+      notifyBrowserHandoff(latestTask)
       notifyTaskProgress(latestTask)
       const stopKey = `${latestTask.workspacePath}:${latestTask.status}:${latestTask.updatedAt}`
       const latestProgressMessage = latestTask.progress.at(-1)?.message || ""

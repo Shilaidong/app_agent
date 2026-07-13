@@ -103,7 +103,8 @@ fi
 
 export TERRA_EGO_LITE_APP="$APP_PATH"
 export TERRA_EGO_BROWSER_HELPER="$HELPER"
-open -gj "$APP_PATH" >/dev/null 2>&1 || true
+# Keep Chromium's default-browser and first-run promotion out of the advisor workflow.
+open -gj "$APP_PATH" --args --no-default-browser-check --no-first-run >/dev/null 2>&1 || true
 exec "$HELPER" "$@"
 `
 }
