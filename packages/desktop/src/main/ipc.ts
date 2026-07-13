@@ -25,6 +25,8 @@ import {
   getApplicationTask,
   listApplicationTasks,
   openApplicationPlatform,
+  pauseApplicationTask,
+  resumeApplicationTask,
   runApplicationCommand,
 } from "./application-agent"
 import { previewSelectionList } from "./application-selection-list"
@@ -33,7 +35,7 @@ import {
   getApplicationPlatformAccount,
   saveApplicationPlatformAccount,
 } from "./application-accounts"
-import { hasOpenCodeGoApiKey, setOpenCodeGoApiKey } from "./opencode-go"
+import { hasOpenCodeGoApiKey } from "./opencode-go"
 import { getStore } from "./store"
 import { getTerraAuthStatus, loginTerraAdvisor, logoutTerraAdvisor } from "./terra-auth"
 import { setTitlebar, updateTitlebar } from "./windows"
@@ -285,6 +287,12 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("application-agent:continue-task", (_event: IpcMainInvokeEvent, workspacePath: string) =>
     continueApplicationTask(workspacePath),
   )
+  ipcMain.handle("application-agent:pause-task", (_event: IpcMainInvokeEvent, workspacePath: string) =>
+    pauseApplicationTask(workspacePath),
+  )
+  ipcMain.handle("application-agent:resume-task", (_event: IpcMainInvokeEvent, workspacePath: string) =>
+    resumeApplicationTask(workspacePath),
+  )
   ipcMain.handle(
     "application-agent:run-command",
     (_event: IpcMainInvokeEvent, workspacePath: string, command: string) => runApplicationCommand(workspacePath, command),
@@ -355,9 +363,6 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("application-agent:clear-platform-account", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
     clearApplicationPlatformAccount(applicationUrl),
   )
-  ipcMain.handle("application-agent:set-go-api-key", (_event: IpcMainInvokeEvent, key: string | null) => {
-    setOpenCodeGoApiKey(key)
-  })
   ipcMain.handle("application-agent:has-go-api-key", () => hasOpenCodeGoApiKey())
   ipcMain.handle("terra-auth:status", () => getTerraAuthStatus())
   ipcMain.handle("terra-auth:login", (_event: IpcMainInvokeEvent, email: string, password: string) =>

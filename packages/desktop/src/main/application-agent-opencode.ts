@@ -1075,6 +1075,13 @@ async function summarizeCounts(workspace: string) {
   }
 }
 
+async function ensureTaskIsActive(workspace: string) {
+  const control = await readJson<{ paused?: boolean }>(join(workspace, "03_state/task_control.json"), {})
+  if (control.paused) {
+    throw new Error("任务已由顾问暂停。请等待顾问在任务工作台点击“继续任务”。")
+  }
+}
+
 async function loadTask(workspace: string) {
   const fallbackInput = await readJson(join(workspace, "03_state/task_input.json"), {})
   const now = new Date().toISOString()
@@ -1155,6 +1162,7 @@ export const workspace = {
   async execute(args, ctx) {
     const input = args.input || {}
     const workspace = root(ctx)
+    await ensureTaskIsActive(workspace)
     for (const dir of workspaceDirs) await mkdir(join(workspace, dir), { recursive: true })
     const task = await loadTask(workspace)
     const action = input.action || "initialize"
@@ -1188,6 +1196,7 @@ export const materials = {
   }, ["action"]),
   async execute(args, ctx) {
     const workspace = root(ctx)
+    await ensureTaskIsActive(workspace)
     const task = await loadTask(workspace)
     const action = String(args.input?.action || "")
     await appendAudit(workspace, "materials", action, "started")
@@ -1209,7 +1218,11 @@ export const materials = {
       await mkdir(outputDir, { recursive: true })
       const candidates = (await listFiles(join(workspace, "00_original_backup"))).filter((file) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(file))
       const results = []
-      for (const file of candidates) {
+      await appendLog(workspace, "agent", "已启动随包 PaddleOCR，正在逐份扫描 " + candidates.length + " 份 PDF/图片材料。大型扫描件通常需要 3–8 分钟，请保持应用打开。")
+      await saveTask(workspace, task, "正在读取文件", "PaddleOCR 正在逐份扫描 " + candidates.length + " 份材料；大型扫描件通常需要 3–8 分钟，请保持应用打开。")
+      for (const [index, file] of candidates.entries()) {
+        await ensureTaskIsActive(workspace)
+        await saveTask(workspace, task, "正在读取文件", "PaddleOCR 正在扫描第 " + (index + 1) + "/" + candidates.length + " 份材料；大型扫描件通常需要 3–8 分钟。")
         const output = join(outputDir, basename(file) + ".txt")
         const result = await execFileAsync(ocr, [file], { maxBuffer: 16 * 1024 * 1024 }).then(
           ({ stdout, stderr }) => ({ text: stdout.trim(), error: stderr.trim() }),
@@ -1268,6 +1281,7 @@ export const state = {
   async execute(args, ctx) {
     const input = args.input || {}
     const workspace = root(ctx)
+    await ensureTaskIsActive(workspace)
     const task = await loadTask(workspace)
     await appendAudit(workspace, "state", String(input.status || "update"), "started", input.message || "")
     const progress = ensureCuaProgress(await readJson(join(workspace, "03_state/application_progress.json"), {}))
@@ -1291,6 +1305,7 @@ export const documents = {
     const inputArgs = args.input || {}
     const action = inputArgs.action || "generate_all"
     const workspace = root(ctx)
+    await ensureTaskIsActive(workspace)
     await appendAudit(workspace, "documents", action, "started")
     const task = await loadTask(workspace)
     const input = task.input || {}
@@ -1463,6 +1478,7 @@ export const requirements = {
   async execute(args, ctx) {
     const input = args.input || {}
     const workspace = root(ctx)
+    await ensureTaskIsActive(workspace)
     await appendAudit(workspace, "requirements", "update", "started", input.notes || "", ctx)
     const task = await loadTask(workspace)
     const existing = await readJson(join(workspace, "03_state/application_requirements.json"), {})
@@ -1563,6 +1579,7 @@ export const cua = {
   async execute(args, ctx) {
     const input = args.input || {}
     const workspace = root(ctx)
+    await ensureTaskIsActive(workspace)
     const task = await loadTask(workspace)
     const progress = await readJson(join(workspace, "03_state/application_progress.json"), { currentPage: "", completedPages: [], savedPages: [], uploadedMaterials: [], failedActions: [], highRiskBlocks: [] })
     const auditAction = String(input.action || "unknown")

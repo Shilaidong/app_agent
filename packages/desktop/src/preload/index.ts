@@ -81,6 +81,8 @@ const api: ElectronAPI = {
   listApplicationTasks: (limit) => ipcRenderer.invoke("application-agent:list-tasks", limit),
   findApplicationAgentSession: (workspacePath) => ipcRenderer.invoke("application-agent:find-session", workspacePath),
   continueApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:continue-task", workspacePath),
+  pauseApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:pause-task", workspacePath),
+  resumeApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:resume-task", workspacePath),
   runApplicationCommand: (workspacePath, command) =>
     ipcRenderer.invoke("application-agent:run-command", workspacePath, command),
   openApplicationPlatform: (workspacePath) => ipcRenderer.invoke("application-agent:open-platform", workspacePath),
@@ -90,7 +92,6 @@ const api: ElectronAPI = {
   getApplicationPlatformAccount: (applicationUrl) => ipcRenderer.invoke("application-agent:get-platform-account", applicationUrl),
   saveApplicationPlatformAccount: (input) => ipcRenderer.invoke("application-agent:save-platform-account", input),
   clearApplicationPlatformAccount: (applicationUrl) => ipcRenderer.invoke("application-agent:clear-platform-account", applicationUrl),
-  setOpenCodeGoApiKey: (key) => ipcRenderer.invoke("application-agent:set-go-api-key", key),
   hasOpenCodeGoApiKey: () => ipcRenderer.invoke("application-agent:has-go-api-key"),
   getTerraAuthStatus: () => ipcRenderer.invoke("terra-auth:status"),
   loginTerraAdvisor: (email, password) => ipcRenderer.invoke("terra-auth:login", email, password),

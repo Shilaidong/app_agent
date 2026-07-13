@@ -23,6 +23,7 @@ export type SidecarListener = { stop: () => Promise<void> }
 
 const SIDECAR_SERVICE_NAME = "opencode server"
 const SIDECAR_START_STALL_TIMEOUT = 60_000
+const SIDECAR_MIGRATION_STALL_TIMEOUT = 10 * 60_000
 const SIDECAR_STOP_TIMEOUT = 6_000
 
 type SpawnLocalServerOptions = {
@@ -127,16 +128,16 @@ export async function spawnLocalServer(
       reject(error)
     }
 
-    const refreshTimeout = () => {
+    const refreshTimeout = (timeoutMs = SIDECAR_START_STALL_TIMEOUT) => {
       clearTimeout(timeout)
       timeout = setTimeout(() => {
-        fail(new Error(`Sidecar did not become ready within ${SIDECAR_START_STALL_TIMEOUT}ms: ${sidecar}`))
-      }, SIDECAR_START_STALL_TIMEOUT)
+        fail(new Error(`Sidecar did not become ready within ${timeoutMs}ms: ${sidecar}`))
+      }, timeoutMs)
     }
 
     const onMessage = (message: SidecarMessage) => {
       if (message.type === "sqlite") {
-        refreshTimeout()
+        refreshTimeout(SIDECAR_MIGRATION_STALL_TIMEOUT)
         options.onSqliteProgress?.(message.progress)
         return
       }

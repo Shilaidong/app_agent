@@ -6,7 +6,10 @@ export type ServerReadyData = {
   password: string | null
 }
 
-export type SqliteMigrationProgress = { type: "InProgress"; value: number } | { type: "Done" }
+export type SqliteMigrationProgress =
+  | { type: "Stage"; stage: "copying_legacy_data" | "migrating_data" | "starting_server" }
+  | { type: "InProgress"; value: number }
+  | { type: "Done" }
 
 export type WslConfig = { enabled: boolean }
 
@@ -89,6 +92,7 @@ export type ApplicationSelectionListBatch = {
 
 export type ApplicationTaskStatus =
   | "已创建"
+  | "已暂停"
   | "正在复制原始材料"
   | "正在创建申请工作区"
   | "正在读取文件"
@@ -244,6 +248,8 @@ export type ElectronAPI = {
   listApplicationTasks: (limit?: number) => Promise<ApplicationTask[]>
   findApplicationAgentSession: (workspacePath: string) => Promise<ApplicationAgentSession | null>
   continueApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
+  pauseApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
+  resumeApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   runApplicationCommand: (workspacePath: string, command: string) => Promise<ApplicationTask>
   openApplicationPlatform: (workspacePath: string) => Promise<ApplicationTask>
   blockHighRiskAction: (workspacePath: string, action: string) => Promise<ApplicationTask>
@@ -254,7 +260,6 @@ export type ElectronAPI = {
     username: string
   }) => Promise<ApplicationPlatformAccount | null>
   clearApplicationPlatformAccount: (applicationUrl: string) => Promise<void>
-  setOpenCodeGoApiKey: (key: string | null) => Promise<void>
   hasOpenCodeGoApiKey: () => Promise<boolean>
   getTerraAuthStatus: () => Promise<TerraAuthStatus>
   loginTerraAdvisor: (email: string, password: string) => Promise<TerraAuthStatus>

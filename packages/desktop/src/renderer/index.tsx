@@ -572,7 +572,6 @@ function ApplicationAgentShell(props: {
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
   const [showOpenCode, setShowOpenCode] = createSignal(false)
-  const [goKey, setGoKey] = createSignal("")
   const [goConfigured, setGoConfigured] = createSignal(false)
   const [agentMessages, setAgentMessages] = createSignal<ApplicationAgentChatItem[]>([])
   const [agentInput, setAgentInput] = createSignal("")
@@ -940,13 +939,43 @@ function ApplicationAgentShell(props: {
     await refreshAuthStatus()
   }
 
-  const stopAutomation = async () => {
+  const stopBrowserAutomation = async () => {
     setError(null)
     try {
       await window.api.stopApplicationAutomation(task()?.workspacePath)
-      setRestoreNotice("已停止浏览器自动化，并把窗口焦点释放回申请 Agent。")
+      setRestoreNotice("已停止 ego-lite 浏览器自动化并释放页面控制；材料整理和 Agent 任务仍可继续。")
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const toggleTaskPause = async () => {
+    const current = task()
+    if (!current) return
+    setBusy(true)
+    setError(null)
+    try {
+      if (current.status === "已暂停") {
+        const resumed = await window.api.resumeApplicationTask(current.workspacePath)
+        setTask(resumed)
+        setRestoreNotice("任务已继续。Agent 会从已保存的状态恢复；不会重复扫描已完成的材料。")
+        if (opencodeSession()) {
+          await window.api.sendApplicationAgentPrompt(opencodeSession()!, "顾问已点击继续任务。先读取 task_state.json、application_progress.json 和 agent_execution_audit.json，确认下一步后继续执行。")
+        }
+      } else {
+        const paused = await window.api.pauseApplicationTask(current.workspacePath)
+        await window.api.stopApplicationAutomation(current.workspacePath)
+        setTask(paused)
+        setRestoreNotice("任务已暂停，并已停止浏览器自动化。正在扫描的一份大型文件会完成后暂停，之后不会开始下一项操作。")
+        if (opencodeSession()) {
+          await window.api.sendApplicationAgentPrompt(opencodeSession()!, "顾问已暂停任务。不要再启动任何新操作；当前单项处理完成后停止，并等待顾问点击继续任务。")
+        }
+      }
+      await loadApplicationTasks()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -1086,24 +1115,6 @@ function ApplicationAgentShell(props: {
       </div>
     </Show>
   )
-
-  const saveGoKey = async () => {
-    setBusy(true)
-    setError(null)
-    try {
-      await window.api.setOpenCodeGoApiKey(goKey())
-      setGoConfigured(Boolean(goKey().trim()))
-      setGoKey("")
-      window.api.showNotification(
-        "OpenCode Go 已配置",
-        "API key 已保存到本机安全存储。重启应用后 OpenCode sidecar 会自动读取。",
-      )
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
 
   const refreshAgentMessages = async (session = opencodeSession()) => {
     if (!session) return
@@ -1287,7 +1298,7 @@ function ApplicationAgentShell(props: {
               </div>
               <div class="application-agent-status-card">
                 <span>OpenCode Go / DeepSeek V4 Flash</span>
-                <strong>{goConfigured() ? "GO 订阅 API 已内置" : "需要配置 GO API"}</strong>
+                <strong>{goConfigured() ? "GO 订阅 API 已内置" : "模型服务暂不可用"}</strong>
                 <small>{props.providerReady ? "本地 OpenCode 服务已就绪。" : "首页可用，OpenCode 服务正在后台启动。"}</small>
                 <div class="quota-card-line">
                   <span>AI 额度</span>
@@ -1301,21 +1312,7 @@ function ApplicationAgentShell(props: {
                     </div>
                   )}
                 </Show>
-                <Show
-                  when={!goConfigured()}
-                  fallback={<small>模型凭据已随本机程序配置，顾问可直接创建申请任务。</small>}
-                >
-                  <div class="go-key-row">
-                    <input
-                      type="password"
-                      value={goKey()}
-                      onInput={(event) => setGoKey(event.currentTarget.value)}
-                      placeholder="粘贴 OpenCode Go API key"
-                    />
-                    <button type="button" disabled={busy() || !goKey().trim()} onClick={saveGoKey}>保存</button>
-                  </div>
-                  <small>备用配置会保存到本机安全存储；保存后请重启应用让 sidecar 读取。</small>
-                </Show>
+                <small>{goConfigured() ? "模型凭据已随本机程序配置；不会写入钥匙串。" : "请联系 Terra-Edu 管理员检查本机模型服务配置。"}</small>
               </div>
             </section>
 
@@ -1561,7 +1558,9 @@ function ApplicationAgentShell(props: {
                 <h2>快捷操作</h2>
                 <div class="quick-actions">
                   <For each={quickCommands}>{(command) => <button type="button" disabled={busy()} onClick={() => runCommand(command)}>{command}</button>}</For>
-                  <button type="button" class="danger-outline" onClick={stopAutomation}>停止自动化 / 释放控制</button>
+                  <button type="button" class="danger-outline" disabled={busy()} onClick={toggleTaskPause}>{currentTask().status === "已暂停" ? "继续任务" : "暂停任务"}</button>
+                  <button type="button" class="danger-outline" onClick={stopBrowserAutomation}>停止浏览器自动化</button>
+                  <small>停止浏览器自动化只释放 ego-lite 页面控制；暂停任务才会停止后续申请步骤。</small>
                   <button type="button" class="danger-outline" onClick={blockSubmit}>测试高风险拦截</button>
                 </div>
               </section>
@@ -1593,7 +1592,8 @@ function ApplicationAgentShell(props: {
                     </div>
                   </div>
                   <div class="workspace-actions">
-                    <button type="button" class="danger-outline" onClick={stopAutomation}>停止自动化</button>
+                    <button type="button" class="danger-outline" disabled={busy()} onClick={toggleTaskPause}>{currentTask().status === "已暂停" ? "继续任务" : "暂停任务"}</button>
+                    <button type="button" class="danger-outline" onClick={stopBrowserAutomation}>停止浏览器自动化</button>
                     <button type="button" disabled={busy() || !opencodeSession()} onClick={resendStartPrompt}>重新发送启动指令</button>
                     <button type="button" disabled={busy()} onClick={rebuildOpenCodeSession}>重建 OpenCode 会话</button>
                     <button type="button" onClick={() => setShowOpenCode(true)}>进入 OpenCode 对话</button>

@@ -132,6 +132,7 @@ type ApplicationProgress = {
 
 export type ApplicationTaskStatus =
   | "已创建"
+  | "已暂停"
   | "正在复制原始材料"
   | "正在创建申请工作区"
   | "正在读取文件"
@@ -181,6 +182,7 @@ const GENERATED: Array<[string, string, GeneratedFile["kind"]]> = [
   ["申请进度记录", "03_state/application_progress.json", "json"],
   ["申请要求记录", "03_state/application_requirements.json", "json"],
   ["申请要求摘要", "02_generated/application_requirements.md", "markdown"],
+  ["任务暂停状态", "03_state/task_control.json", "json"],
   ["浏览器自动化控制状态", "03_state/cua_control.json", "json"],
   ["工具执行审计", "03_state/agent_execution_audit.json", "json"],
   ["Agent 日志", "04_logs/agent_log.md", "log"],
@@ -189,6 +191,7 @@ const GENERATED: Array<[string, string, GeneratedFile["kind"]]> = [
 
 const STATUS_MESSAGES: Record<ApplicationTaskStatus, string> = {
   已创建: "我已收到申请任务，接下来会把完整任务 Prompt 交给 OpenCode Agent 接管。",
+  已暂停: "任务已由顾问暂停。当前文件处理完成后不会启动下一项操作；点击“继续任务”后才会恢复。",
   正在复制原始材料: "我正在复制学生原始材料，后续操作都会在副本中完成。",
   正在创建申请工作区: "我正在建立隔离申请工作区和标准目录。",
   正在读取文件: "我正在读取学生文件夹，并识别里面的申请材料。",
@@ -339,6 +342,19 @@ async function resetCuaControl(workspacePath: string) {
   })
 }
 
+async function setTaskPaused(workspacePath: string, paused: boolean) {
+  await writeJson(join(workspacePath, "03_state/task_control.json"), {
+    paused,
+    updatedAt: new Date().toISOString(),
+    reason: paused ? "顾问在任务工作台点击了暂停任务。" : "顾问在任务工作台点击了继续任务。",
+  })
+}
+
+async function requireActiveTask(workspacePath: string) {
+  const control = await readJson<{ paused?: boolean }>(join(workspacePath, "03_state/task_control.json"), {})
+  if (control.paused) throw new Error("任务已暂停。请先在申请 Agent 工作台点击“继续任务”。")
+}
+
 export async function listApplicationTasks(limit = 8): Promise<ApplicationTask[]> {
   const root = await getApplicationWorkspaceRoot()
   const entries = await readdir(root, { withFileTypes: true }).catch(() => [])
@@ -367,6 +383,9 @@ export async function prepareApplicationAgentConfig(directory: string) {
   if (!existsSync(join(directory, "03_state/cua_control.json"))) {
     await resetCuaControl(directory)
   }
+  if (!existsSync(join(directory, "03_state/task_control.json"))) {
+    await setTaskPaused(directory, false)
+  }
   if (!existsSync(join(directory, "03_state/application_requirements.json"))) {
     await writeJson(join(directory, "03_state/application_requirements.json"), {
       sources: [],
@@ -394,6 +413,7 @@ export async function getApplicationTask(workspacePath: string): Promise<Applica
 
 export async function continueApplicationTask(workspacePath: string): Promise<ApplicationTask> {
   const task = await getApplicationTask(workspacePath)
+  await setTaskPaused(workspacePath, false)
   await appendProgress(task, "可继续申请")
   const newMaterialsPath = join(workspacePath, "06_new_materials")
   const newFiles = existsSync(newMaterialsPath) ? await scanFiles(newMaterialsPath) : []
@@ -428,6 +448,22 @@ export async function continueApplicationTask(workspacePath: string): Promise<Ap
   return task
 }
 
+export async function pauseApplicationTask(workspacePath: string): Promise<ApplicationTask> {
+  const task = await getApplicationTask(workspacePath)
+  await setTaskPaused(workspacePath, true)
+  await appendProgress(task, "已暂停")
+  await appendLog(workspacePath, "agent", "顾问已暂停任务。正在执行的单个文件处理会完成后停止，后续操作需顾问点击继续任务。")
+  return task
+}
+
+export async function resumeApplicationTask(workspacePath: string): Promise<ApplicationTask> {
+  const task = await getApplicationTask(workspacePath)
+  await setTaskPaused(workspacePath, false)
+  await appendProgress(task, "可继续申请")
+  await appendLog(workspacePath, "agent", "顾问已继续任务。Agent 将从已保存的任务状态和审计记录恢复下一步。")
+  return task
+}
+
 export async function refreshApplicationTaskDocuments(workspacePath: string): Promise<ApplicationTask> {
   const task = await getApplicationTask(workspacePath)
   const materials = await readJson<MaterialRecord[]>(join(workspacePath, "03_state/materials_index.json"), [])
@@ -454,6 +490,7 @@ export async function refreshApplicationTaskDocuments(workspacePath: string): Pr
 }
 
 export async function runApplicationCommand(workspacePath: string, command: string): Promise<ApplicationTask> {
+  await requireActiveTask(workspacePath)
   const task = await getApplicationTask(workspacePath)
   const normalized = command.trim()
   if (
@@ -475,6 +512,7 @@ export async function runApplicationCommand(workspacePath: string, command: stri
 }
 
 export async function openApplicationPlatform(workspacePath: string): Promise<ApplicationTask> {
+  await requireActiveTask(workspacePath)
   const task = await getApplicationTask(workspacePath)
   await resetCuaControl(workspacePath)
   const url = task.input.applicationUrl || ""
@@ -629,6 +667,7 @@ async function createWorkspace(workspacePath: string) {
     consecutiveFailures: 0,
     updatedAt: new Date().toISOString(),
   })
+  await setTaskPaused(workspacePath, false)
   await writeJson(join(workspacePath, "03_state/application_requirements.json"), {
     sources: [],
     fieldRequirements: [],

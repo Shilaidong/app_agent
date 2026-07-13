@@ -1,4 +1,3 @@
-import { safeStorage } from "electron"
 import { randomUUID } from "node:crypto"
 import { existsSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -63,6 +62,8 @@ type UsageRecord = {
   lastTokens: TokenUsage
 }
 
+let activeSession: StoredSession | null = null
+
 const emptyTokens = (): TokenUsage => ({
   input: 0,
   output: 0,
@@ -115,6 +116,7 @@ export async function loginTerraAdvisor(email: string, password: string): Promis
 }
 
 export function logoutTerraAdvisor() {
+  activeSession = null
   getStore(AUTH_STORE).delete(SESSION_KEY)
 }
 
@@ -309,25 +311,13 @@ async function rpc<T>(session: StoredSession, fn: string, payload: unknown): Pro
 }
 
 function saveSession(session: StoredSession) {
-  const raw = JSON.stringify(session)
-  const value = safeStorage.isEncryptionAvailable()
-    ? safeStorage.encryptString(raw).toString("base64")
-    : Buffer.from(raw, "utf8").toString("base64")
-  getStore(AUTH_STORE).set(SESSION_KEY, value)
+  activeSession = session
+  getStore(AUTH_STORE).delete(SESSION_KEY)
 }
 
 function readSession(): StoredSession | null {
-  const value = getStore(AUTH_STORE).get(SESSION_KEY)
-  if (typeof value !== "string" || !value) return null
-  const buffer = Buffer.from(value, "base64")
-  try {
-    const raw = safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(buffer) : buffer.toString("utf8")
-    const parsed = JSON.parse(raw) as StoredSession
-    if (!parsed.accessToken || !parsed.refreshToken || !parsed.user?.email) return null
-    return parsed
-  } catch {
-    return null
-  }
+  getStore(AUTH_STORE).delete(SESSION_KEY)
+  return activeSession
 }
 
 function readUsageRecord(key: string): UsageRecord {
