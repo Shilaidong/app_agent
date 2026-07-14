@@ -587,6 +587,8 @@ function ApplicationAgentShell(props: {
   const [selectionListPreview, setSelectionListPreview] = createSignal<ApplicationSelectionListPreview | null>(null)
   const [selectedSelectionRows, setSelectedSelectionRows] = createSignal<number[]>([])
   const [savedPlatformAccount, setSavedPlatformAccount] = createSignal<{ username: string; updatedAt: string } | null>(null)
+  const [supplementalFolder, setSupplementalFolder] = createSignal("")
+  const [materialNote, setMaterialNote] = createSignal("")
   let agentChatListRef: HTMLDivElement | undefined
   let lastAgentMessageSignature = ""
   let lastAutomationNotificationKey = ""
@@ -604,6 +606,7 @@ function ApplicationAgentShell(props: {
     if (!quota) return authStatus()?.localDevelopment ? "本地开发模式" : "等待登录"
     return `${quota.creditsRemaining} / ${quota.creditsTotal} credits`
   })
+  const supplementalFolderName = createMemo(() => supplementalFolder().split("/").filter(Boolean).at(-1) || "")
 
   const persistActiveSession = (session: ApplicationAgentSession) => {
     localStorage.setItem(activeApplicationSessionKey, JSON.stringify({ ...session, savedAt: Date.now() }))
@@ -685,6 +688,59 @@ function ApplicationAgentShell(props: {
   const pickFolder = async () => {
     const folder = await window.api.openDirectoryPicker({ title: "选择学生资料文件夹" })
     if (typeof folder === "string") update("sourceFolder", folder)
+  }
+
+  const pickSupplementalFolder = async () => {
+    const folder = await window.api.openDirectoryPicker({ title: "选择要补充给当前申请的材料文件夹" })
+    if (typeof folder === "string") setSupplementalFolder(folder)
+  }
+
+  const submitMaterialReview = async (mode: "supplement_folder" | "skip" | "note") => {
+    const current = task()
+    const session = opencodeSession()
+    const note = materialNote().trim()
+    if (!current || !session) return
+    if (mode === "supplement_folder" && !supplementalFolder()) {
+      setError("请先选择包含补充材料的文件夹。")
+      return
+    }
+    if (mode === "note" && !note) {
+      setError("请先填写需要补充给 Agent 的文字信息。")
+      return
+    }
+
+    setBusy(true)
+    setError(null)
+    try {
+      const reviewed = await window.api.submitApplicationMaterialReview(current.workspacePath, {
+        mode,
+        sourceFolder: mode === "supplement_folder" ? supplementalFolder() : undefined,
+        note: note || undefined,
+      })
+      setTask(reviewed)
+      await window.api.sendApplicationAgentPrompt(
+        session,
+        [
+          "顾问已在桌面应用的材料确认关口完成选择，material_review.json 已批准。",
+          "先读取 03_state/material_review.json 和 06_new_materials，再继续。",
+          mode === "supplement_folder"
+            ? "请先对新增文件运行 OCR、材料分类、学生档案和缺失项复查，并重新生成顾问文档。"
+            : mode === "note"
+              ? "请先将顾问填写的文字补充同步到学生档案、缺失项和顾问文档。"
+              : "顾问确认暂不补充材料或信息，请保留现有缺失项记录。",
+          "材料确认已完成，不要再次等待材料确认。完成必要复查后，再调用 application-agent_cua prepare_ego_task 并启动 ego-browser 填表。",
+        ].join("\n"),
+      )
+      setSupplementalFolder("")
+      setMaterialNote("")
+      setRestoreNotice("材料确认已交给 Agent。它会先同步补充内容，再启动 ego-lite 填表。")
+      await refreshAgentMessages(session)
+      await loadApplicationTasks()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const pickSelectionList = async () => {
@@ -1032,6 +1088,8 @@ function ApplicationAgentShell(props: {
       if (!session) throw new Error("未找到或无法创建该申请的 OpenCode 会话")
       setTask(latestTask)
       setInput(latestTask.input)
+      setSupplementalFolder("")
+      setMaterialNote("")
       setOpenCodeSession(session)
       setShowOpenCode(false)
       setAgentMessages([])
@@ -1555,19 +1613,73 @@ function ApplicationAgentShell(props: {
             </aside>
 
               <section class="application-agent-main">
-              <Show when={restoreNotice()}>
-                {(notice) => <div class="restore-notice">{notice()}</div>}
-              </Show>
-              <div class="progress-strip">
-                <For each={taskProgress(currentTask()).slice(-12)}>
-                  {(entry) => (
-                    <article>
-                      <span>{new Date(entry.at).toLocaleTimeString()}</span>
-                      <strong>{entry.status}</strong>
-                      <p>{entry.message}</p>
-                    </article>
-                  )}
-                </For>
+              <div class="application-agent-context">
+                <Show when={restoreNotice()}>
+                  {(notice) => <div class="restore-notice">{notice()}</div>}
+                </Show>
+                <Show when={currentTask().status === "等待顾问确认材料"}>
+                  <section class="material-review-gate" aria-live="polite">
+                    <div class="material-review-heading">
+                      <p>材料确认</p>
+                      <h2>确认后再启动申请平台</h2>
+                      <span>资料档案、缺失清单和阶段总结已生成。ego-lite 还没有启动。</span>
+                    </div>
+                    <div class="material-review-summary">
+                      <span>{taskCounts(currentTask()).totalFiles} 份已整理材料</span>
+                      <span>{taskCounts(currentTask()).missingMaterials + taskCounts(currentTask()).missingInformation + taskCounts(currentTask()).uncertainItems} 项待处理</span>
+                    </div>
+                    <div class="material-review-actions">
+                      <div class="material-review-folder">
+                        <div>
+                          <strong>补充材料文件夹</strong>
+                          <span>{supplementalFolderName() ? `已选择：${supplementalFolderName()}` : "直接选择文件夹，无需复制地址"}</span>
+                        </div>
+                        <button type="button" disabled={busy()} onClick={pickSupplementalFolder}>
+                          {supplementalFolderName() ? "更换文件夹" : "选择文件夹"}
+                        </button>
+                      </div>
+                      <label>
+                        补充文字信息（可选）
+                        <textarea
+                          value={materialNote()}
+                          onInput={(event) => setMaterialNote(event.currentTarget.value)}
+                          placeholder="例如：学生确认当前无工作经历；父母职业信息待填……"
+                        />
+                      </label>
+                      <div class="material-review-buttons">
+                        <button
+                          type="button"
+                          class="primary-action"
+                          disabled={busy() || !supplementalFolder()}
+                          onClick={() => void submitMaterialReview("supplement_folder")}
+                        >
+                          读取补充材料后开始填表
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy() || !materialNote().trim()}
+                          onClick={() => void submitMaterialReview("note")}
+                        >
+                          把文字交给 AI 后开始填表
+                        </button>
+                        <button type="button" disabled={busy()} onClick={() => void submitMaterialReview("skip")}>
+                          暂不补充，开始填表
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+                </Show>
+                <div class="progress-strip">
+                  <For each={taskProgress(currentTask()).slice(-12)}>
+                    {(entry) => (
+                      <article>
+                        <span>{new Date(entry.at).toLocaleTimeString()}</span>
+                        <strong>{entry.status}</strong>
+                        <p>{entry.message}</p>
+                      </article>
+                    )}
+                  </For>
+                </div>
               </div>
 
               <div class="opencode-frame">

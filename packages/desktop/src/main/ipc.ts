@@ -7,6 +7,7 @@ import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 import type {
   ApplicationAgentChatItem,
   ApplicationAgentSession,
+  ApplicationMaterialReviewInput,
   ApplicationSelectionListInput,
   ApplicationTask,
   ApplicationTaskInput,
@@ -28,6 +29,7 @@ import {
   pauseApplicationTask,
   resumeApplicationTask,
   runApplicationCommand,
+  submitApplicationMaterialReview,
 } from "./application-agent"
 import { previewSelectionList } from "./application-selection-list"
 import {
@@ -297,6 +299,11 @@ export function registerIpcHandlers(deps: Deps) {
   )
   ipcMain.handle("application-agent:resume-task", (_event: IpcMainInvokeEvent, workspacePath: string) =>
     resumeApplicationTask(workspacePath),
+  )
+  ipcMain.handle(
+    "application-agent:submit-material-review",
+    (_event: IpcMainInvokeEvent, workspacePath: string, input: ApplicationMaterialReviewInput) =>
+      submitApplicationMaterialReview(workspacePath, input),
   )
   ipcMain.handle(
     "application-agent:run-command",

@@ -104,6 +104,7 @@ export type ApplicationTaskStatus =
   | "正在保存申请进度"
   | "正在上传材料"
   | "等待补充材料"
+  | "等待顾问确认材料"
   | "可继续申请"
   | "阶段性完成"
   | "异常中断"
@@ -134,6 +135,12 @@ export type ApplicationTask = {
     message: string
   }>
   reusedExisting?: boolean
+}
+
+export type ApplicationMaterialReviewInput = {
+  mode: "supplement_folder" | "skip" | "note"
+  sourceFolder?: string
+  note?: string
 }
 
 export type ApplicationAgentSession = {
@@ -251,6 +258,7 @@ export type ElectronAPI = {
   continueApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   pauseApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   resumeApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
+  submitApplicationMaterialReview: (workspacePath: string, input: ApplicationMaterialReviewInput) => Promise<ApplicationTask>
   runApplicationCommand: (workspacePath: string, command: string) => Promise<ApplicationTask>
   openApplicationPlatform: (workspacePath: string) => Promise<ApplicationTask>
   blockHighRiskAction: (workspacePath: string, action: string) => Promise<ApplicationTask>

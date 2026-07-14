@@ -68,6 +68,12 @@ die() {
   exit 127
 }
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+WORKSPACE=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+if [ -f "$WORKSPACE/03_state/material_review.json" ] && /usr/bin/grep -Eq '"status"[[:space:]]*:[[:space:]]*"pending"' "$WORKSPACE/03_state/material_review.json"; then
+  die "Terra-Edu material review is pending. Ask the advisor to confirm materials in the desktop app before starting ego-browser."
+fi
+
 [ -d "$APP_PATH" ] || die "Terra-Edu bundled ego lite is missing: $APP_PATH"
 [ -f "$INFO_PLIST" ] || die "Terra-Edu bundled ego lite Info.plist is missing: $INFO_PLIST"
 
@@ -258,8 +264,8 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 6. 生成结构化 student_profile.md。
 7. 检查缺失信息和缺失材料，已有信息不要重复要求，并写入 03_state/missing_items.json。
 8. 调用 application-agent_documents，根据 missing_items.json 生成信息表、材料表、Word 清单和总结。
-9. 调用 application-agent_cua 的 prepare_ego_task 记录 ego-browser 填表上下文；随后按官方 ego-browser skill 使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs\` heredoc 打开申请平台、读取 snapshot、填写字段和保存页面。需要 MFA/验证码时用 handOffTaskSpace 交给顾问，顾问回复继续后 takeOverTaskSpace 恢复。
-10. 能填写的先填写，能保存的先保存；缺失内容跳过并记录，不确定内容用 question 询问顾问。顾问补充材料后，重新读取 06_new_materials，更新档案并继续申请。
+9. 材料、缺失项和顾问文档生成后，必须先汇报材料总结并停止。此时桌面应用会显示“材料确认”面板；在 03_state/material_review.json 的 status 变为 approved 且收到顾问后续指令前，严禁调用 application-agent_cua 的 prepare_ego_task、严禁启动 ego-browser 或打开申请平台。
+10. 收到材料确认后的后续指令时，先读取 material_review.json 和 06_new_materials。若有补充文件，先提取文字、分类、更新 student_profile.md、missing_items.json 和顾问文档；若有文字补充，先同步到申请档案和缺失项。然后才可调用 application-agent_cua 的 prepare_ego_task，并按官方 ego-browser skill 使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs\` heredoc 打开申请平台、读取 snapshot、填写字段和保存页面。需要 MFA/验证码时用 handOffTaskSpace 交给顾问，顾问回复继续后 takeOverTaskSpace 恢复。
 
 可用 Custom Tools：
 - application-agent_workspace：工作区初始化、复制原始材料、刷新材料计数。
@@ -483,7 +489,7 @@ const COMMAND_DEFINITIONS = [
   ["check-missing", "检查缺失内容", "请先调用 application-target-analysis skill，用 webfetch/websearch 获取官方申请要求并调用 application-agent_requirements 落盘，再调用 missing-content-recording skill 更新 missing_items.json。"],
   ["generate-info-form", "生成信息收集表", "请根据 missing_items.json 生成面向顾问和学生的信息补充清单。"],
   ["generate-material-form", "生成材料收集表", "请根据 missing_items.json 生成面向学生和家长的材料收集表。"],
-  ["start-application", "开始申请填表", "请调用 cua-application-filling skill，打开申请平台，等待顾问登录，并填写可确认字段。"],
+  ["start-application", "开始申请填表", "先确认 03_state/material_review.json 已由顾问批准，再调用 cua-application-filling skill，打开申请平台，等待顾问登录，并填写可确认字段。"],
   ["continue-application", "继续申请填表", "请从 application_progress.json 恢复申请进度，继续填写和保存可确认页面。"],
   ["continue-after-supplement", "材料已经补好了，继续申请", "请调用 continue-after-supplement skill，读取补充材料，更新档案和缺失项，并继续申请填表。"],
   ["generate-word-checklist", "生成 Word 缺失清单", "请调用 word-checklist-generation skill，根据 missing_items.json 重新生成 missing_materials.docx。"],
@@ -568,6 +574,7 @@ const statusValues = [
   "正在保存申请进度",
   "正在上传材料",
   "等待补充材料",
+  "等待顾问确认材料",
   "可继续申请",
   "阶段性完成",
   "异常中断",
@@ -1064,7 +1071,13 @@ function renderRequirementsMarkdown(task: any, requirements: any) {
 }
 
 async function summarizeCounts(workspace: string) {
-  const totalFiles = (await listFiles(join(workspace, "00_original_backup"))).length
+  const totalFiles = (
+    await Promise.all(
+      [join(workspace, "00_original_backup"), join(workspace, "06_new_materials")]
+        .filter(existsSync)
+        .map((directory) => listFiles(directory)),
+    )
+  ).flat().length
   const missingRaw = await readJson(join(workspace, "03_state/missing_items.json"), [])
   const progress = await readJson(join(workspace, "03_state/application_progress.json"), {})
   const missing = activeMissingItems(syncMissingItemsWithProgress(normalizeMissingItems(missingRaw), progress))
@@ -1200,13 +1213,16 @@ export const materials = {
     await ensureTaskIsActive(workspace)
     const task = await loadTask(workspace)
     const action = String(args.input?.action || "")
+    const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
+    const supplementalRoot = join(workspace, "06_new_materials")
+    const hasSupplementalMaterials = materialReview.status === "approved" && materialReview.mode === "supplement_folder" && existsSync(supplementalRoot)
     await appendAudit(workspace, "materials", action, "started")
     if (action === "extract_text") {
       const ocr = join(workspace, ".opencode", "bin", "terra-ocr")
       if (!existsSync(ocr)) throw new Error("Terra-Edu bundled OCR wrapper is missing: " + ocr)
       const shared = sharedOcrState(task)
       const localOutputDir = join(workspace, "03_state", "extracted_text")
-      if (shared && existsSync(shared.indexPath)) {
+      if (shared && existsSync(shared.indexPath) && !hasSupplementalMaterials) {
         await cp(shared.outputDir, localOutputDir, { recursive: true, force: false, errorOnExist: false })
         const results = await readJson(shared.indexPath, [])
         await writeJson(join(workspace, "03_state", "ocr_index.json"), results)
@@ -1217,14 +1233,19 @@ export const materials = {
       }
       const outputDir = shared?.outputDir || localOutputDir
       await mkdir(outputDir, { recursive: true })
-      const candidates = (await listFiles(join(workspace, "00_original_backup"))).filter((file) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(file))
-      const results = []
+      const candidates = (await listFiles(hasSupplementalMaterials ? supplementalRoot : join(workspace, "00_original_backup"))).filter((file) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(file))
+      const previous = hasSupplementalMaterials
+        ? (await readJson<Array<{ file: string; output: string; textLength: number; error: string }>>(join(workspace, "03_state", "ocr_index.json"), [])).filter(
+            (item) => !item.file.startsWith("06_new_materials/"),
+          )
+        : []
+      const results = [...previous]
       await appendLog(workspace, "agent", "已启动随包 PaddleOCR，正在逐份扫描 " + candidates.length + " 份 PDF/图片材料。大型扫描件通常需要 3–8 分钟，请保持应用打开。")
       await saveTask(workspace, task, "正在读取文件", "PaddleOCR 正在逐份扫描 " + candidates.length + " 份材料；大型扫描件通常需要 3–8 分钟，请保持应用打开。")
       for (const [index, file] of candidates.entries()) {
         await ensureTaskIsActive(workspace)
         await saveTask(workspace, task, "正在读取文件", "PaddleOCR 正在扫描第 " + (index + 1) + "/" + candidates.length + " 份材料；大型扫描件通常需要 3–8 分钟。")
-        const output = join(outputDir, basename(file) + ".txt")
+        const output = join(outputDir, relative(workspace, file).replace(/[\\/]/g, "__") + ".txt")
         const result = await execFileAsync(ocr, [file], { maxBuffer: 16 * 1024 * 1024 }).then(
           ({ stdout, stderr }) => ({ text: stdout.trim(), error: stderr.trim() }),
           (error) => ({ text: "", error: error instanceof Error ? error.message : String(error) }),
@@ -1242,7 +1263,11 @@ export const materials = {
       return JSON.stringify({ status: "completed", completed: completed.length, failed: failed.length, files: results }, null, 2)
     }
 
-    const files = await listFiles(join(workspace, "00_original_backup"))
+    const files = (
+      await Promise.all(
+        [join(workspace, "00_original_backup"), supplementalRoot].filter(existsSync).map((directory) => listFiles(directory)),
+      )
+    ).flat()
     const records = []
     for (const file of files) {
       const fileName = basename(file)
@@ -1332,10 +1357,28 @@ export const documents = {
       lines.push("", "## 人工处理事项", "", "- 最终提交申请、付款、不可逆推荐信邀请和账号密码输入必须由顾问人工确认。")
       await writeFile(join(workspace, "02_generated/task_summary.md"), lines.join("\n") + "\n", "utf8")
     }
+    const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
+    const needsMaterialReview = !progress.egoBrowser?.preparedAt && materialReview.status !== "approved"
+    if (needsMaterialReview) {
+      await writeJson(join(workspace, "03_state/material_review.json"), {
+        status: "pending",
+        requestedAt: new Date().toISOString(),
+        summary: "材料、缺失项和顾问文档已生成。等待顾问决定补充文件夹、文字补充或暂不补充。",
+      })
+    }
     await appendLog(workspace, "agent", "已根据 missing_items.json 生成申请文档。")
-    await saveTask(workspace, task, missing.some((item: any) => item.blocksProgress) ? "等待补充材料" : "阶段性完成", "已生成信息表、材料表、Word 缺失清单和阶段总结。")
+    await saveTask(
+      workspace,
+      task,
+      needsMaterialReview ? "等待顾问确认材料" : !progress.egoBrowser?.preparedAt ? "可继续申请" : missing.some((item: any) => item.blocksProgress) ? "等待补充材料" : "阶段性完成",
+      needsMaterialReview
+        ? "材料整理、缺失项和阶段总结已完成。请在申请 Agent 的材料确认面板决定是否补充，再进入浏览器。"
+        : "已生成信息表、材料表、Word 缺失清单和阶段总结。",
+    )
     await appendAudit(workspace, "documents", action, "completed", "generated documents from missing_items.json")
-    return "文档已生成到 02_generated。Word 清单基于 03_state/missing_items.json。"
+    return needsMaterialReview
+      ? "文档已生成到 02_generated，任务已停在材料确认关口。请等待顾问在桌面应用选择补充文件夹、填写文字补充或确认暂不补充；不要启动 ego-browser。"
+      : "文档已生成到 02_generated。Word 清单基于 03_state/missing_items.json。"
   },
 }
 
@@ -1604,6 +1647,11 @@ export const cua = {
       return "ego-browser 填表上下文已恢复。请在下一轮 Bash heredoc 中使用 takeOverTaskSpace(taskSpaceId) 或 useOrCreateTaskSpace(taskSpaceName) 继续。"
     }
     if (input.action === "prepare_ego_task") {
+      const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
+      if (materialReview.status === "pending") {
+        await appendAudit(workspace, "cua", auditAction, "failed", "material review has not been approved", ctx)
+        throw new Error("材料整理已完成，但顾问尚未在材料确认面板完成选择。请停止，不要启动 ego-browser；等待 material_review.json 的 status 变为 approved。")
+      }
       ensureCuaProgress(progress)
       const url = String(input.applicationUrl || task.input?.applicationUrl || "").trim()
       if (!url) throw new Error("applicationUrl is required for prepare_ego_task")

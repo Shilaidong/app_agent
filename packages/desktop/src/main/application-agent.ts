@@ -50,6 +50,12 @@ export type ApplicationTask = {
   reusedExisting?: boolean
 }
 
+export type ApplicationMaterialReviewInput = {
+  mode: "supplement_folder" | "skip" | "note"
+  sourceFolder?: string
+  note?: string
+}
+
 export type ApplicationAgentSession = {
   sessionID: string
   directory: string
@@ -144,6 +150,7 @@ export type ApplicationTaskStatus =
   | "正在保存申请进度"
   | "正在上传材料"
   | "等待补充材料"
+  | "等待顾问确认材料"
   | "可继续申请"
   | "阶段性完成"
   | "异常中断"
@@ -182,6 +189,7 @@ const GENERATED: Array<[string, string, GeneratedFile["kind"]]> = [
   ["申请进度记录", "03_state/application_progress.json", "json"],
   ["申请要求记录", "03_state/application_requirements.json", "json"],
   ["申请要求摘要", "02_generated/application_requirements.md", "markdown"],
+  ["材料确认记录", "03_state/material_review.json", "json"],
   ["任务暂停状态", "03_state/task_control.json", "json"],
   ["浏览器自动化控制状态", "03_state/cua_control.json", "json"],
   ["工具执行审计", "03_state/agent_execution_audit.json", "json"],
@@ -203,6 +211,7 @@ const STATUS_MESSAGES: Record<ApplicationTaskStatus, string> = {
   正在保存申请进度: "我正在保存当前可以保存的申请页面。",
   正在上传材料: "我正在尝试上传可确认匹配的材料。",
   等待补充材料: "当前可处理内容已完成，剩余内容需要补充材料后继续。",
+  等待顾问确认材料: "材料整理和总结已完成。请顾问确认是否补充材料或信息，再启动申请平台。",
   可继续申请: "我发现补充材料已准备好，可以继续申请。",
   阶段性完成: "本次申请任务已完成阶段性处理。",
   异常中断: "任务遇到无法自动处理的问题，需要顾问介入。",
@@ -406,8 +415,7 @@ export async function getApplicationTask(workspacePath: string): Promise<Applica
   const savedInput = await readJson<ApplicationTaskInput | null>(join(workspacePath, "03_state/task_input.json"), null)
   const missing = await readJson<unknown>(join(workspacePath, "03_state/missing_items.json"), null)
   const progress = await readJson<unknown>(join(workspacePath, "03_state/application_progress.json"), null)
-  const backup = join(workspacePath, "00_original_backup")
-  const totalFiles = existsSync(backup) ? (await scanFiles(backup)).length : 0
+  const totalFiles = (await scanTaskMaterials(workspacePath)).length
   return normalizeTask(task, workspacePath, savedInput ?? undefined, summarizeMissingRaw(missing, totalFiles, progress))
 }
 
@@ -415,17 +423,7 @@ export async function continueApplicationTask(workspacePath: string): Promise<Ap
   const task = await getApplicationTask(workspacePath)
   await setTaskPaused(workspacePath, false)
   await appendProgress(task, "可继续申请")
-  const newMaterialsPath = join(workspacePath, "06_new_materials")
-  const newFiles = existsSync(newMaterialsPath) ? await scanFiles(newMaterialsPath) : []
-  if (newFiles.length > 0) {
-    const backupTarget = join(workspacePath, "00_original_backup", "supplemental")
-    await mkdir(backupTarget, { recursive: true })
-    for (const file of newFiles) {
-      await cp(file, join(backupTarget, basename(file)), { force: false, errorOnExist: false })
-    }
-  }
-
-  const allFiles = await scanFiles(join(workspacePath, "00_original_backup"))
+  const allFiles = await scanTaskMaterials(workspacePath)
   const materials = await classifyMaterials(workspacePath, allFiles)
   const missingItems = inferMissingItems(task.input, materials)
   const progress = await readJson<ApplicationProgress>(join(workspacePath, "03_state/application_progress.json"), initialApplicationProgress())
@@ -445,6 +443,51 @@ export async function continueApplicationTask(workspacePath: string): Promise<Ap
   })
   await persistTask(task)
   await appendLog(workspacePath, "agent", "补充材料复查完成，学生档案、缺失项和 Word 清单已更新。")
+  return task
+}
+
+export async function submitApplicationMaterialReview(workspacePath: string, input: ApplicationMaterialReviewInput): Promise<ApplicationTask> {
+  const task = await getApplicationTask(workspacePath)
+  if (task.status !== "等待顾问确认材料") {
+    throw new Error("当前不在材料确认阶段，不能提交补充内容。")
+  }
+
+  const note = input.note?.trim() || ""
+  if (input.mode === "note" && !note) {
+    throw new Error("请填写要补充给 Agent 的文字信息，或选择暂不补充。")
+  }
+
+  const sourceFolder = input.sourceFolder?.trim() || ""
+  let supplementalFolder = ""
+  if (input.mode === "supplement_folder") {
+    if (!sourceFolder || !existsSync(sourceFolder)) throw new Error("补充材料文件夹不存在，请重新选择。")
+    if (!(await stat(sourceFolder)).isDirectory()) throw new Error("请选择包含补充材料的文件夹。")
+    supplementalFolder = join(workspacePath, "06_new_materials", `supplement-${Date.now()}`)
+    await cp(sourceFolder, supplementalFolder, { recursive: true, force: false, errorOnExist: false })
+  }
+
+  await writeJson(join(workspacePath, "03_state/material_review.json"), {
+    status: "approved",
+    mode: input.mode,
+    note,
+    supplementalFolder: supplementalFolder || undefined,
+    submittedAt: new Date().toISOString(),
+  })
+  task.status = "可继续申请"
+  task.updatedAt = new Date().toISOString()
+  task.generatedFiles = generatedFiles(workspacePath)
+  task.progress.push({
+    at: task.updatedAt,
+    status: task.status,
+    message:
+      input.mode === "supplement_folder"
+        ? "顾问已选择补充材料文件夹。Agent 将先读取新增材料和顾问说明，再进入申请平台。"
+        : input.mode === "note"
+          ? "顾问已提交文字补充。Agent 将先写入申请档案和缺失项，再进入申请平台。"
+          : "顾问确认暂不补充材料或信息，Agent 可以进入申请平台填写阶段。",
+  })
+  await persistTask(task)
+  await appendLog(workspacePath, "agent", task.progress.at(-1)?.message || "顾问已完成材料确认。")
   return task
 }
 
@@ -473,8 +516,7 @@ export async function refreshApplicationTaskDocuments(workspacePath: string): Pr
   await writeGeneratedDocuments(workspacePath, task.input, materials, syncedMissingItems, progress)
 
   const activeMissingItems = filterActiveMissingItems(syncedMissingItems)
-  const backup = join(workspacePath, "00_original_backup")
-  const totalFiles = existsSync(backup) ? (await scanFiles(backup)).length : task.counts.totalFiles
+  const totalFiles = (await scanTaskMaterials(workspacePath)).length
   task.counts = summarizeCounts(totalFiles, syncedMissingItems)
   task.status = activeMissingItems.some((item) => item.blocksProgress) ? "等待补充材料" : "阶段性完成"
   task.updatedAt = new Date().toISOString()
@@ -514,6 +556,10 @@ export async function runApplicationCommand(workspacePath: string, command: stri
 export async function openApplicationPlatform(workspacePath: string): Promise<ApplicationTask> {
   await requireActiveTask(workspacePath)
   const task = await getApplicationTask(workspacePath)
+  const materialReview = await readJson<{ status?: string }>(join(workspacePath, "03_state/material_review.json"), {})
+  if (materialReview.status === "pending") {
+    throw new Error("材料整理已完成，但顾问尚未确认补充内容。请先在申请 Agent 的材料确认面板完成选择。")
+  }
   await resetCuaControl(workspacePath)
   const url = task.input.applicationUrl || ""
   if (!task.input.applicationUrl) {
@@ -792,6 +838,11 @@ function normalizeStatus(status: unknown, currentStep: unknown): ApplicationTask
   if (status === "completed") return "阶段性完成"
   if (status === "error") return "异常中断"
   return "已创建"
+}
+
+async function scanTaskMaterials(workspacePath: string) {
+  const roots = [join(workspacePath, "00_original_backup"), join(workspacePath, "06_new_materials")].filter(existsSync)
+  return (await Promise.all(roots.map((root) => scanFiles(root)))).flat()
 }
 
 async function appendProgress(task: ApplicationTask, status: ApplicationTaskStatus) {
