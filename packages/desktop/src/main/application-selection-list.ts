@@ -1,5 +1,5 @@
 import { basename } from "node:path"
-import * as XLSX from "xlsx"
+import XLSX from "xlsx"
 
 const REQUIRED_HEADERS = ["学校名称", "专业名称", "专业链接", "截止日期", "申请平台链接", "申请平台账号", "备注"] as const
 
