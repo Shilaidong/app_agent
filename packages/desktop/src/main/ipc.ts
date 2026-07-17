@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
-import { copyFile, mkdir, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { copyFile } from "node:fs/promises"
+import { join } from "node:path"
 import { BrowserWindow, Notification, app, clipboard, dialog, ipcMain, shell } from "electron"
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 
@@ -25,10 +25,8 @@ import {
   createApplicationTasksFromSelectionList,
   getApplicationTask,
   listApplicationTasks,
-  openApplicationPlatform,
   pauseApplicationTask,
   resumeApplicationTask,
-  runApplicationCommand,
   submitApplicationMaterialReview,
 } from "./application-agent"
 import { previewSelectionList } from "./application-selection-list"
@@ -306,65 +304,9 @@ export function registerIpcHandlers(deps: Deps) {
       submitApplicationMaterialReview(workspacePath, input),
   )
   ipcMain.handle(
-    "application-agent:run-command",
-    (_event: IpcMainInvokeEvent, workspacePath: string, command: string) => runApplicationCommand(workspacePath, command),
-  )
-  ipcMain.handle("application-agent:open-platform", (_event: IpcMainInvokeEvent, workspacePath: string) =>
-    openApplicationPlatform(workspacePath),
-  )
-  ipcMain.handle(
     "application-agent:block-high-risk-action",
     (_event: IpcMainInvokeEvent, workspacePath: string, action: string) => blockHighRiskAction(workspacePath, action),
   )
-  ipcMain.handle("application-agent:stop-automation", async (_event: IpcMainInvokeEvent, workspacePath?: string) => {
-    const stopped: string[] = []
-    for (const pattern of ["cua-driver", "CuaDriver.app/Contents/MacOS/cua-driver"]) {
-      await new Promise<void>((resolve) => {
-        execFile("pkill", ["-f", pattern], () => resolve())
-      })
-      stopped.push(pattern)
-    }
-    if (workspacePath) {
-      const now = new Date().toISOString()
-      await mkdir(join(workspacePath, "03_state"), { recursive: true })
-      await writeFile(
-        join(workspacePath, "03_state/cua_control.json"),
-        JSON.stringify(
-          {
-            stopped: true,
-            stoppedAt: now,
-            reason: "顾问手动停止浏览器自动化，释放页面控制。",
-            recentActions: [],
-            consecutiveFailures: 0,
-            updatedAt: now,
-          },
-          null,
-          2,
-        ) + "\n",
-        "utf8",
-      )
-      await mkdir(join(workspacePath, "04_logs"), { recursive: true })
-      await writeFile(
-        join(workspacePath, "04_logs/cua_log.md"),
-        "- " + now + " 顾问手动停止浏览器自动化，已尝试释放页面控制。\n",
-        { encoding: "utf8", flag: "a" },
-      )
-      await writeFile(
-        join(dirname(workspacePath), ".cua_global_stop.json"),
-        JSON.stringify({ stopped: true, stoppedAt: now, workspacePath }, null, 2) + "\n",
-        "utf8",
-      )
-    }
-    showNotification("申请 Agent 自动化已停止", "已尝试释放浏览器控制。需要继续时，请回到申请 Agent 点击继续填表。")
-    const win = BrowserWindow.getAllWindows().find((item) => !item.isDestroyed())
-    if (win) {
-      if (win.isMinimized()) win.restore()
-      win.show()
-      win.focus()
-    }
-    app.focus({ steal: true })
-    return { stopped }
-  })
   ipcMain.handle("application-agent:get-platform-account", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
     getApplicationPlatformAccount(applicationUrl),
   )

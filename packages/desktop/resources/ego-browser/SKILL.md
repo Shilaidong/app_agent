@@ -9,7 +9,7 @@ ego-browser gives AI agents a CLI-accessible Node.js runtime, with built-in help
 
 ## Terra-Edu pinned-build policy
 
-This copy is a Terra-Edu bundled snapshot. The matching ego lite browser is packaged inside the Terra-Edu Application Agent app and pinned to the private build version. Do not update this skill from ego lite, do not replace it with a newer upstream skill, and do not install or upgrade ego lite automatically. Always invoke the Terra-Edu wrapper with `PATH="$PWD/.opencode/bin:$PATH" ego-browser ...`; do not use a system `ego-browser` from `/Applications`, Homebrew, or the user's shell profile. If the wrapper reports that the bundled browser is missing, has the wrong version, or contains updater components, stop and ask the owner for a new Terra-Edu build.
+This copy is a Terra-Edu bundled snapshot. The matching signed ego lite source is packaged inside the Terra-Edu Application Agent app and pinned to the private build version. The Terra wrapper verifies that source and runs an isolated managed copy outside the signed Terra app, so an old vendor updater can never alter the Terra bundle. Do not update this skill from ego lite, do not replace it with a newer upstream skill, and do not install or upgrade ego lite automatically. Always invoke the Terra-Edu wrapper with `PATH="$PWD/.opencode/bin:$PATH" ego-browser ...`; do not use a system `ego-browser` from `/Applications`, Homebrew, or the user's shell profile. If the wrapper reports that the source signature, version, managed runtime, or external Ego service is invalid, stop and ask the owner for a new Terra-Edu build.
 
 For setup, install, or connection problems, read `references/install.md`.
 
@@ -24,9 +24,14 @@ PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF'
 const task = await useOrCreateTaskSpace('inspect example page')
 cliLog('task space id: ' + task.id)
 
-await openOrReuseTab('https://example.com', { wait: true, timeout: 20 })
-
-cliLog(await snapshotText())
+const initialInfo = await pageInfo()
+if (initialInfo && typeof initialInfo === 'object' && 'dialog' in initialInfo) {
+  cliLog(JSON.stringify({ taskSpaceId: task.id, info: initialInfo }, null, 2))
+} else {
+  await openOrReuseTab('https://example.com', { wait: true, timeout: 20 })
+  const info = await pageInfo()
+  cliLog(JSON.stringify({ taskSpaceId: task.id, info, snapshot: info && typeof info === 'object' && 'dialog' in info ? undefined : await snapshotText() }, null, 2))
+}
 EOF
 ```
 
@@ -34,7 +39,7 @@ The heredoc body runs as a Node.js script that controls the selected ego-browser
 
 ## Common helpers
 
-- Task spaces: `listTaskSpaces`, `useOrCreateTaskSpace`, `claimTaskSpace`, `handOffTaskSpace`, `takeOverTaskSpace`, `waitForAgentControl`, `completeTaskSpace`
+- Task spaces: `listTaskSpaces`, `useOrCreateTaskSpace`, `handOffTaskSpace`, `takeOverTaskSpace`, `waitForAgentControl`, `completeTaskSpace`
 - Navigation / state: `listTabs`, `openOrReuseTab`, `closeTab`, `gotoAndWait`, `currentTab`, `switchTab`, `gotoUrl`, `pageInfo`, `ensureRealTab`
 - Observation: `snapshotText`, `captureScreenshot`, `drainEvents`
 - Scroll / mouse: `scrollBy`, `scrollToBottomUntil`, `scroll`, `click`, `doubleClick`, `hover`, `dragMouse`
@@ -61,26 +66,15 @@ Notes:
 
 A task space is an **isolated browsing context** that ego-browser provides for AI Agents. Each task space has its own set of tabs but **inherits the current user's login state** by default, so Agents can operate on authenticated sites without competing with or disturbing the user's normal browser windows.
 
-A task often takes multiple heredoc rounds to complete. Because the Node.js runtime exits after each heredoc and retains no state, normal working heredocs should start with an explicit call to `useOrCreateTaskSpace(nameOrId)` to reuse the same space — this lets you operate continuously and reuse tabs across rounds. The exception is resuming after a handoff: once the user confirms "continue" (through an Ask or in chat), start the next heredoc with `takeOverTaskSpace(nameOrId)` instead.
+A task often takes multiple heredoc rounds to complete. Because the Node.js runtime exits after each heredoc and retains no state, record the numeric `task.id` on the first round. On a normal later round, first use `listTaskSpaces()` to verify that exact ID still has `ownership: 'agent'`, then call `useOrCreateTaskSpace(task.id)` to reuse it. Do not reuse an application task space by name. The exception is resuming after a handoff: once the user confirms "continue" (through an Ask or in chat), start the next heredoc with `takeOverTaskSpace(task.id)` instead.
 
 `nameOrId` can be a task space name, numeric id, or digit-only numeric id string. String values match `name`/`taskId` first, then digit-only strings fall back to numeric id. Number values match existing numeric ids only; if no matching id exists, `useOrCreateTaskSpace` fails instead of creating a new space.
 
 Use a short name for the active user goal when creating a new task space. Keep reusing that task space for follow-up questions, corrections, refinements, re-checks, and result validation, even if you previously thought the task was complete. Choose a new task space only when the user clearly starts a separate, unrelated goal. Prefer using the numeric `id` returned by `useOrCreateTaskSpace` (for example, `task.id`) to resume a known task in later rounds and avoid name collisions.
 
-To continue work from an existing user-owned task space, use `await listTaskSpaces()` to find the space, call `await claimTaskSpace(id)` to take ownership and select it, then use `await listTabs()` and `await switchTab(targetId)` to select the exact tab before acting. This is different from resuming a handoff from your own prior task space, which starts with `await takeOverTaskSpace(nameOrId)`.
+Terra-Edu never claims a handed-off space. After any handoff, user takeover, `inactive` state, or non-agent ownership reported by `listTaskSpaces`, stop browser commands, record the handoff for the consultant, and wait for an explicit consultant confirmation before `await takeOverTaskSpace(taskSpaceId)`. The recovery heredoc begins with `pageInfo()` only; do not assume the page or prior action is unchanged.
 
-**Ownership policy** — every task space has `ownership: 'agent' | 'agentDelegatedToUser' | 'user'`; the helpers treat user-owned spaces differently:
-
-| Helper | When the target space is user-owned |
-|---|---|
-| `switchTaskSpace` | throws — agent-owned spaces only |
-| `claimTaskSpace` | claims it (ownership transfers to the agent), then selects it |
-| `handOffTaskSpace` | skipped — resolves `{ done: false, skipped: 'user-owned' }` |
-| `completeTaskSpace(…, { keep: true })` | skipped — resolves `{ done: false, skipped: 'user-owned' }` |
-| `completeTaskSpace(…, { keep: false })` | claims it, then closes it |
-| `takeOverTaskSpace` / `waitForAgentControl` | no ownership check |
-
-`handOffTaskSpace` and `completeTaskSpace` resolve `{ done: true }` when the operation actually happened. Check `done` before telling the user the handoff/cleanup is finished — a `skipped` result usually means you targeted a space that was never yours.
+`handOffTaskSpace` and `completeTaskSpace` resolve `{ done: true }` only when the operation actually happened. Check `done` before recording a handoff or cleanup as finished.
 
 **`completeTaskSpace(nameOrId, { keep })` must occupy its own dedicated final heredoc, and run only after a prior heredoc's output has confirmed the task is genuinely done.** `keep` is required: pass `false` to close the space, or `true` to complete the space and leave the page visible to the user.
 
@@ -97,11 +91,32 @@ A "user is controlling" error is a hard stop on the whole task — not an obstac
 
 **Handing off**: When the task requires user intervention (e.g. login, captcha, manual confirmation), call `await handOffTaskSpace([nameOrId])` to give control to the user, and tell them exactly what to do. Omitting `nameOrId` uses the currently selected task space; pass `task.id` across heredoc rounds to avoid ambiguity.
 
-**Regaining control**: Take control back *only* after the user explicitly confirms — through an Ask (your harness's button/option prompt, e.g. "Continue" vs "Finish task") or a "continue" message in chat. Then start a new heredoc with `await takeOverTaskSpace([nameOrId])` and resume; if the user chooses to finish, close out with `await completeTaskSpace(nameOrId, { keep })`. Never call `takeOverTaskSpace` on your own to grab control back — it has no ownership check and will seize the browser away from the user.
+**Regaining control**: Take control back *only* after the user explicitly confirms — through an Ask (your harness's button/option prompt, e.g. "Continue" vs "Finish task") or a "continue" message in chat. Then start a new heredoc with the saved numeric `task.id`, using `await takeOverTaskSpace(taskSpaceId)`; do not resume by task-space name. If the user chooses to finish, close out with `await completeTaskSpace(nameOrId, { keep })`. Never call `takeOverTaskSpace` on your own to grab control back — it has no ownership check and will seize the browser away from the user.
 
 **Unexpected takeover**: The user can take over at any time via the browser GUI — the same effect as the agent calling `handOffTaskSpace`. Do not retry the failed operation and do not auto-takeover; surface the Ask above (Continue / Finish) and resume only when the user picks Continue.
 
 `await waitForAgentControl(nameOrId)` is a read-only blocking poll (it never takes control); use it only to wait inside the current heredoc for a handoff you initiated.
+
+### Observation protocol
+
+Keep every heredoc to one bounded round: observe the live page, perform one logical action group that depends on that observation, verify the outcome, then end the round. Do not batch independent form actions or infer success from an action call alone.
+
+Start a round with `await pageInfo()` after selecting the task space. On a brand-new task space, only create the initial tab after this first observation contains no dialog, then call `pageInfo()` again. If it returns `{ dialog: ... }`, page JavaScript is blocked: do not call `snapshotText`, `captureScreenshot`, `js`, input helpers, navigation helpers, or CDP commands other than `Page.handleJavaScriptDialog`.
+
+- For a dialog whose type is `alert`, record its complete payload and the most recent page evidence, use `await cdp('Page.handleJavaScriptDialog', { accept: true })`, then end the heredoc. Start a new round to observe the unblocked page.
+- For `beforeunload`, use `accept: false` and end the heredoc so the current page is preserved. On the next round, observe again and confirm that the URL did not change.
+- For an unclear `confirm` or `prompt`, or any dialog whose consequence is uncertain, hand off the task space and wait for explicit user confirmation. Do not choose for the user.
+
+An iframe alert can block `Runtime.evaluate` before `pageInfo()` reports `{ dialog }`. Terra-Edu therefore establishes a clear pre-action baseline and then watches each eligible Ego round with a narrowly scoped macOS Accessibility guard tied to the exact managed Ego PID, executable path, current URL origin, and visible task-space control label. It reads Chromium `AXApplicationDialog` / `AXCustomContent` without OCR. It may act only when the complete AX tree is untruncated, contains exactly one button, that button is explicitly enabled and pressable, and no editable field exists. It verifies that the same dialog actually disappears; if Chromium accepts but ignores `AXPress`, it may send one hit-tested click to the same verified AX button in that Ego PID and re-check. A dialog present before the action baseline is read only and is never auto-clicked.
+
+- If the wrapper returns `TERRA_EGO_NATIVE_DIALOG_acknowledged`, call `application-agent_native_dialog` with `read_latest`, preserve the complete `dialogText`, record a resolved blocker through `application-agent_cua`, and end the round. The next round begins with a new `pageInfo()` observation.
+- If it returns `observed`, first read the complete `dialogText`, `buttonLabels`, input and truncation evidence. Hand off any two-button, editable, truncated, or semantically unclear dialog. For a genuine single-button acknowledgement alert, call `inspect` for the same task-space ID and URL, read the text, then call `acknowledge_single_button` within 30 seconds; record the resolved blocker and end the round.
+- If `click`, `js`, `pageInfo`, or `Runtime.evaluate` times out without a captured wrapper event, call `application-agent_native_dialog` with `inspect` before any other browser action. Only the same recently inspected single-button alert may then be acknowledged. Do not refresh, reopen, navigate, or retry the heredoc.
+- `permission_required` means the native fallback is unavailable until macOS Accessibility permission is granted. It is not evidence of a frozen page, server failure, or expired login.
+
+After every meaningful action, observe again with `pageInfo()` and then, only when there is no dialog, with `snapshotText()` or a screenshot. Use the semantic workflow by default; use the visual workflow when the current evidence shows that semantics are insufficient; reserve `js` / `cdp` for narrow, observable operations. Do not use direct DOM/CDP to fake a value or bypass normal submission behavior.
+
+On validation, timeout, server error, or ambiguous result, preserve the page and report the evidence. Do not auto-reload, re-open a URL, repeat the same action, or ask the user to log in again unless a fresh observation explicitly shows an authentication failure or login page.
 
 
 ### Scroll / mouse
@@ -170,9 +185,9 @@ Use the semantic workflow first for ordinary websites with real DOM controls. Fo
 Before writing substantial content into a rich editor, perform a tiny write probe, then verify it with `await captureScreenshot()`, an export/readback path, or another reliable visual/state check. If the probe appears in the title bar, toolbar search, hidden input, or any wrong field, stop using DOM/input helpers for that surface and switch to screenshot-guided mouse actions plus real keyboard operations.
 
 1. **Semantic workflow: `snapshotText()` + refs / locators** — default for most pages with normal text, links, buttons, forms, tables, and lists.
-   - Reuse or create a task space: `const task = await useOrCreateTaskSpace(name)`.
-   - Open or switch pages with `await openOrReuseTab(url, { wait: true })`; use `await gotoAndWait(url, { timeout, settle })` only when navigating inside the current tab.
-   - Observe with `await snapshotText()` to get a full-page semantic tree annotated with `[ref=N, loc=..., url=...]`.
+   - Reuse the saved numeric task space only after `listTaskSpaces()` confirms agent ownership; use `takeOverTaskSpace(task.id)` only after an explicit user/consultant continuation.
+   - Observe with `await pageInfo()` before navigation. Open or switch pages with `await openOrReuseTab(url, { wait: true })` only after that observation contains no dialog; use `await gotoAndWait(url, { timeout, settle })` only when navigating inside the current tab.
+   - Observe with `await snapshotText()` only after a no-dialog `pageInfo()` to get a full-page semantic tree annotated with `[ref=N, loc=..., url=...]`.
    - Act with `await click('@N')`, `await fillInput('@N', ...)`, or stable `loc=...` values. Use direct DOM logic only when it is simpler than helper calls.
    - After meaningful clicks, input, or navigation, observe again with `await snapshotText()`, `await pageInfo()`, or `await captureScreenshot()` before assuming success.
 
@@ -195,7 +210,7 @@ These workflows can be combined. A task may take multiple heredoc rounds when th
 - `js()` returns the evaluated result, not a JSON string — don't wrap it with `JSON.parse(...)`.
 - Inside a `js(...)` template string, regex backslashes must be doubled (e.g. `\\d`, `\\s`), or use `String.raw`.
 - If the source passed to `js()` contains a top-level `return`, it will be auto-wrapped in an IIFE; `return` inside nested callbacks can also trigger this accidentally. For complex expressions, prefer the explicit `(() => { ... })()` form.
-- If `await pageInfo()` reports `w: 0` or `h: 0`, do not continue coordinate actions or screenshots until the viewport is fixed. Try switching to the real tab, reloading, or using CDP viewport metrics, then verify with `await pageInfo()` and `await captureScreenshot()`.
+- If `await pageInfo()` reports `w: 0` or `h: 0`, do not continue coordinate actions or screenshots. Preserve the evidence, select a real tab if one is available, and re-observe; do not auto-reload an active application page to recover the viewport.
 - Code in the heredoc body runs in Node.js; code inside `js(...)` runs in the browser page. Navigation, waits, and `cliLog(...)` belong in the heredoc body; `document`, `window`, and page selectors belong inside `js(...)`.
 - Always call `completeTaskSpace(name, { keep })` when the task is done — do not leave the space hanging. Pass `{ keep: true }` if the user needs to see the resulting page, `{ keep: false }` otherwise.
 - When the user explicitly asks to use ego-browser, assume the Terra-Edu wrapper is ready and run it with `PATH="$PWD/.opencode/bin:$PATH" ego-browser ...`. Do not pre-check system `which ego-browser`, `node -v`, package metadata, or help output. Only investigate environment issues if the wrapper itself reports an error.

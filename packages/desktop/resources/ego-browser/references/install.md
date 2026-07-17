@@ -4,12 +4,12 @@ Read this file only when the Terra-Edu wrapper reports a browser-runtime problem
 
 ## Terra-Edu pinned-build policy
 
-This Terra-Edu Application Agent build uses a pinned ego-browser skill snapshot and a pinned ego lite browser bundled inside the app. Do not replace this skill with a newer ego lite skill and do not update ego lite automatically.
+This Terra-Edu Application Agent build uses a pinned ego-browser skill snapshot and a pinned, officially signed ego lite source bundled inside the app. The wrapper verifies that source and launches only a Terra-managed runtime copy in Application Support; it never launches the source inside the signed Terra bundle. Do not replace this skill with a newer ego lite skill and do not update ego lite automatically.
 
 The bundled install script is locked by default:
 
 - Normal advisor builds do not need a public ego lite install.
-- Browser operations must go through `.opencode/bin/ego-browser`, which points to the Terra-Edu bundled app.
+- Browser operations must go through `.opencode/bin/ego-browser`, which points to Terra's managed copy rather than a system browser or the signed source bundle.
 - The fallback install script will not download, replace, or upgrade ego lite unless the owner explicitly runs it with `TERRA_EGO_BROWSER_ALLOW_INSTALL=1`.
 
 This protects the private build from unexpected upstream behavior or pricing changes.
@@ -36,7 +36,7 @@ EOF
 
 Printing `Terra-Edu bundled ego-browser ready` means the environment is ready.
 
-If the wrapper reports a missing browser, version mismatch, update feed, or updater helper, stop and ask the owner for a new Terra-Edu Application Agent build. Do not install or upgrade ego lite from the public website.
+If the wrapper reports a source-signature error, version mismatch, enabled updater executable, managed-runtime error, or external Ego service, stop and ask the owner for a new Terra-Edu Application Agent build. Do not install or upgrade ego lite from the public website.
 
 ## Owner-only fallback install
 
@@ -63,6 +63,6 @@ Once the environment is ready, return to the user's original task and continue w
 ## Troubleshooting
 
 - **Not macOS**: the Terra-Edu bundled ego lite runtime currently supports macOS only.
-- **Wrapper reports a version/update error**: use a new Terra-Edu Application Agent build. Do not repair it by installing a public ego lite update.
+- **Wrapper reports a source signature, version, updater, managed-runtime, or service error**: use a new Terra-Edu Application Agent build. Do not repair it by installing a public ego lite update.
 - **Gatekeeper still blocks it**: ask the owner for a newly signed Terra-Edu build.
 - **Wrapper unavailable**: reopen the task from Terra-Edu Application Agent so it regenerates `.opencode/bin/ego-browser`; if it is still missing, ask the owner for a new build.

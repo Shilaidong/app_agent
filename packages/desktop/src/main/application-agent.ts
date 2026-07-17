@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { cp, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, extname, join, relative } from "node:path"
-import { app, shell } from "electron"
+import { app } from "electron"
 import { writeOpenCodeConfig } from "./application-agent-opencode"
 import { previewSelectionList, type SelectionListRow } from "./application-selection-list"
 
@@ -146,6 +146,7 @@ export type ApplicationTaskStatus =
   | "正在生成学生资料"
   | "正在检查缺失内容"
   | "等待顾问登录"
+  | "等待顾问接管浏览器"
   | "正在填写申请平台"
   | "正在保存申请进度"
   | "正在上传材料"
@@ -191,7 +192,7 @@ const GENERATED: Array<[string, string, GeneratedFile["kind"]]> = [
   ["申请要求摘要", "02_generated/application_requirements.md", "markdown"],
   ["材料确认记录", "03_state/material_review.json", "json"],
   ["任务暂停状态", "03_state/task_control.json", "json"],
-  ["浏览器自动化控制状态", "03_state/cua_control.json", "json"],
+  ["浏览器审计状态", "03_state/cua_control.json", "json"],
   ["工具执行审计", "03_state/agent_execution_audit.json", "json"],
   ["Agent 日志", "04_logs/agent_log.md", "log"],
   ["浏览器自动化日志", "04_logs/cua_log.md", "log"],
@@ -207,6 +208,7 @@ const STATUS_MESSAGES: Record<ApplicationTaskStatus, string> = {
   正在生成学生资料: "我正在生成结构化学生申请档案。",
   正在检查缺失内容: "我正在检查缺失信息、缺失材料和需要确认的内容。",
   等待顾问登录: "我已打开申请平台。如果需要登录，请顾问先完成登录。",
+  等待顾问接管浏览器: "浏览器正在等待顾问处理登录、验证码、原生弹窗或页面控制权；处理完成后点击“继续任务”。",
   正在填写申请平台: "我正在通过 ego-browser 操作申请平台的普通字段。",
   正在保存申请进度: "我正在保存当前可以保存的申请页面。",
   正在上传材料: "我正在尝试上传可确认匹配的材料。",
@@ -337,7 +339,7 @@ export async function getApplicationWorkspaceRoot() {
   return root
 }
 
-async function resetCuaControl(workspacePath: string) {
+async function initializeCuaAuditState(workspacePath: string) {
   await writeJson(join(workspacePath, "03_state/cua_control.json"), {
     stopped: false,
     stoppedAt: "",
@@ -351,17 +353,14 @@ async function resetCuaControl(workspacePath: string) {
   })
 }
 
-async function setTaskPaused(workspacePath: string, paused: boolean) {
+async function setTaskPaused(workspacePath: string, paused: boolean, resumeStatus?: ApplicationTaskStatus) {
+  const current = await readJson<{ resumeStatus?: ApplicationTaskStatus }>(join(workspacePath, "03_state/task_control.json"), {})
   await writeJson(join(workspacePath, "03_state/task_control.json"), {
     paused,
     updatedAt: new Date().toISOString(),
     reason: paused ? "顾问在任务工作台点击了暂停任务。" : "顾问在任务工作台点击了继续任务。",
+    resumeStatus: paused ? resumeStatus || current.resumeStatus || "" : current.resumeStatus || "",
   })
-}
-
-async function requireActiveTask(workspacePath: string) {
-  const control = await readJson<{ paused?: boolean }>(join(workspacePath, "03_state/task_control.json"), {})
-  if (control.paused) throw new Error("任务已暂停。请先在申请 Agent 工作台点击“继续任务”。")
 }
 
 export async function listApplicationTasks(limit = 8): Promise<ApplicationTask[]> {
@@ -390,7 +389,7 @@ export async function prepareApplicationAgentConfig(directory: string) {
     await writeJson(join(directory, "03_state/agent_execution_audit.json"), [])
   }
   if (!existsSync(join(directory, "03_state/cua_control.json"))) {
-    await resetCuaControl(directory)
+    await initializeCuaAuditState(directory)
   }
   if (!existsSync(join(directory, "03_state/task_control.json"))) {
     await setTaskPaused(directory, false)
@@ -411,12 +410,25 @@ export async function prepareApplicationAgentConfig(directory: string) {
 }
 
 export async function getApplicationTask(workspacePath: string): Promise<ApplicationTask> {
-  const task = await readJson<Record<string, unknown>>(join(workspacePath, "03_state/task_state.json"), {})
-  const savedInput = await readJson<ApplicationTaskInput | null>(join(workspacePath, "03_state/task_input.json"), null)
-  const missing = await readJson<unknown>(join(workspacePath, "03_state/missing_items.json"), null)
-  const progress = await readJson<unknown>(join(workspacePath, "03_state/application_progress.json"), null)
+  const [task, savedInput, missing, progress, control] = await Promise.all([
+    readJson<Record<string, unknown>>(join(workspacePath, "03_state/task_state.json"), {}),
+    readJson<ApplicationTaskInput | null>(join(workspacePath, "03_state/task_input.json"), null),
+    readJson<unknown>(join(workspacePath, "03_state/missing_items.json"), null),
+    readJson<unknown>(join(workspacePath, "03_state/application_progress.json"), null),
+    readJson<{ paused?: boolean; updatedAt?: string }>(join(workspacePath, "03_state/task_control.json"), {}),
+  ])
   const totalFiles = (await scanTaskMaterials(workspacePath)).length
-  return normalizeTask(task, workspacePath, savedInput ?? undefined, summarizeMissingRaw(missing, totalFiles, progress))
+  const normalized = normalizeTask(task, workspacePath, savedInput ?? undefined, summarizeMissingRaw(missing, totalFiles, progress))
+  if (!control.paused || normalized.status === "已暂停") return normalized
+  const updatedAt = stringValue(control.updatedAt) ?? normalized.updatedAt
+  return {
+    ...normalized,
+    updatedAt,
+    status: "已暂停",
+    progress: normalized.progress.at(-1)?.status === "已暂停"
+      ? normalized.progress
+      : [...normalized.progress, { at: updatedAt, status: "已暂停", message: STATUS_MESSAGES.已暂停 }],
+  }
 }
 
 export async function continueApplicationTask(workspacePath: string): Promise<ApplicationTask> {
@@ -493,18 +505,33 @@ export async function submitApplicationMaterialReview(workspacePath: string, inp
 
 export async function pauseApplicationTask(workspacePath: string): Promise<ApplicationTask> {
   const task = await getApplicationTask(workspacePath)
-  await setTaskPaused(workspacePath, true)
-  await appendProgress(task, "已暂停")
-  await appendLog(workspacePath, "agent", "顾问已暂停任务。正在执行的单个文件处理会完成后停止，后续操作需顾问点击继续任务。")
-  return task
+  await setTaskPaused(workspacePath, true, task.status)
+  await appendLog(workspacePath, "agent", "顾问已暂停任务。当前正在执行的浏览器回合或单项处理会完成，但不会启动新的浏览器回合或后续步骤；继续前需顾问点击继续任务。")
+  return getApplicationTask(workspacePath)
 }
 
 export async function resumeApplicationTask(workspacePath: string): Promise<ApplicationTask> {
-  const task = await getApplicationTask(workspacePath)
   await setTaskPaused(workspacePath, false)
-  await appendProgress(task, "可继续申请")
-  await appendLog(workspacePath, "agent", "顾问已继续任务。Agent 将从已保存的任务状态和审计记录恢复下一步。")
-  return task
+  const task = await getApplicationTask(workspacePath)
+  if (task.status === "已暂停") {
+    const control = await readJson<{ resumeStatus?: ApplicationTaskStatus }>(join(workspacePath, "03_state/task_control.json"), {})
+    const materialReview = await readJson<{ status?: string }>(join(workspacePath, "03_state/material_review.json"), {})
+    const progress = await readJson<{ egoBrowser?: { handoffAt?: string; handoffPending?: boolean; handoffType?: string } }>(join(workspacePath, "03_state/application_progress.json"), {})
+    await appendProgress(
+      task,
+      control.resumeStatus && control.resumeStatus !== "已暂停"
+        ? control.resumeStatus
+        : materialReview.status === "pending"
+          ? "等待顾问确认材料"
+          : progress.egoBrowser?.handoffPending === true || (progress.egoBrowser?.handoffAt && progress.egoBrowser?.handoffPending === undefined)
+            ? progress.egoBrowser.handoffType === "login"
+              ? "等待顾问登录"
+              : "等待顾问接管浏览器"
+          : "可继续申请",
+    )
+  }
+  await appendLog(workspacePath, "agent", "顾问已继续任务。Agent 将从已保存的任务状态和审计记录重新观察后开始下一步；如浏览器仍由顾问控制，不会自动夺回控制权。")
+  return getApplicationTask(workspacePath)
 }
 
 export async function refreshApplicationTaskDocuments(workspacePath: string): Promise<ApplicationTask> {
@@ -528,71 +555,6 @@ export async function refreshApplicationTaskDocuments(workspacePath: string): Pr
   })
   await persistTask(task)
   await appendLog(workspacePath, "agent", "已刷新缺失项结构和顾问文档，已解决的申请平台表单错误不会再出现在补充清单。")
-  return task
-}
-
-export async function runApplicationCommand(workspacePath: string, command: string): Promise<ApplicationTask> {
-  await requireActiveTask(workspacePath)
-  const task = await getApplicationTask(workspacePath)
-  const normalized = command.trim()
-  if (
-    normalized === "开始申请填表" ||
-    normalized === "继续申请填表" ||
-    /^(开始|继续|恢复).*(填表|CUA|自动化)/i.test(normalized)
-  ) {
-    await resetCuaControl(workspacePath)
-    await openApplicationPlatform(workspacePath)
-    return getApplicationTask(workspacePath)
-  }
-  if (normalized === "材料已经补好了，继续申请") {
-    return continueApplicationTask(workspacePath)
-  }
-  await appendProgress(task, "阶段性完成")
-  await appendLog(workspacePath, "agent", `快捷操作已记录：${normalized}`)
-  await persistTask(task)
-  return task
-}
-
-export async function openApplicationPlatform(workspacePath: string): Promise<ApplicationTask> {
-  await requireActiveTask(workspacePath)
-  const task = await getApplicationTask(workspacePath)
-  const materialReview = await readJson<{ status?: string }>(join(workspacePath, "03_state/material_review.json"), {})
-  if (materialReview.status === "pending") {
-    throw new Error("材料整理已完成，但顾问尚未确认补充内容。请先在申请 Agent 的材料确认面板完成选择。")
-  }
-  await resetCuaControl(workspacePath)
-  const url = task.input.applicationUrl || ""
-  if (!task.input.applicationUrl) {
-    await appendLog(workspacePath, "cua", "申请平台链接尚未确认。请先让 Agent 核验项目官网并补充正式申请链接，再打开平台。")
-    return task
-  }
-  await appendProgress(task, "等待顾问登录")
-  const progress = await readJson<ApplicationProgress>(join(workspacePath, "03_state/application_progress.json"), initialApplicationProgress())
-  const now = new Date()
-  const recentlyOpened =
-    normalizeApplicationUrl(progress.platformLastOpenedUrl) === normalizeApplicationUrl(url) &&
-    Date.parse(progress.platformLastOpenedAt || "") > 0 &&
-    now.getTime() - Date.parse(progress.platformLastOpenedAt || "") < 10 * 60 * 1000
-  if (!recentlyOpened) {
-    await shell.openExternal(url)
-    progress.platformLastOpenedAt = now.toISOString()
-    progress.platformLastOpenedUrl = url
-  } else {
-    await appendLog(workspacePath, "cua", "已跳过重复打开申请平台：" + url)
-  }
-  progress.currentPage = "申请平台登录/当前页面"
-  progress.failedActions.push({
-    at: now.toISOString(),
-    action: "cua_open_application_platform",
-    reason: recentlyOpened ? "申请平台近期已打开，本次复用现有页面继续。" : "申请平台填表将由 OpenCode Agent 通过 ego-browser / ego lite 在独立 Space 中继续执行。",
-  })
-  await writeJson(join(workspacePath, "03_state/application_progress.json"), progress)
-  await appendLog(
-    workspacePath,
-    "cua",
-    "已打开申请平台。若页面需要登录，请顾问手动登录；Agent 不保存账号密码，登录完成后可继续填表。",
-  )
-  await persistTask(task)
   return task
 }
 
@@ -831,6 +793,7 @@ function normalizeStatus(status: unknown, currentStep: unknown): ApplicationTask
     if (currentStep.includes("profile")) return "正在生成学生资料"
     if (currentStep.includes("missing")) return "正在检查缺失内容"
     if (currentStep.includes("cua_login")) return "等待顾问登录"
+    if (currentStep.includes("cua_handoff") || currentStep.includes("handoff")) return "等待顾问接管浏览器"
     if (currentStep.includes("cua") || currentStep.includes("form")) return "正在填写申请平台"
     if (currentStep.includes("summary")) return "阶段性完成"
   }

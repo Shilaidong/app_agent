@@ -86,12 +86,8 @@ const api: ElectronAPI = {
   resumeApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:resume-task", workspacePath),
   submitApplicationMaterialReview: (workspacePath, input) =>
     ipcRenderer.invoke("application-agent:submit-material-review", workspacePath, input),
-  runApplicationCommand: (workspacePath, command) =>
-    ipcRenderer.invoke("application-agent:run-command", workspacePath, command),
-  openApplicationPlatform: (workspacePath) => ipcRenderer.invoke("application-agent:open-platform", workspacePath),
   blockHighRiskAction: (workspacePath, action) =>
     ipcRenderer.invoke("application-agent:block-high-risk-action", workspacePath, action),
-  stopApplicationAutomation: (workspacePath) => ipcRenderer.invoke("application-agent:stop-automation", workspacePath),
   getApplicationPlatformAccount: (applicationUrl) => ipcRenderer.invoke("application-agent:get-platform-account", applicationUrl),
   saveApplicationPlatformAccount: (input) => ipcRenderer.invoke("application-agent:save-platform-account", input),
   clearApplicationPlatformAccount: (applicationUrl) => ipcRenderer.invoke("application-agent:clear-platform-account", applicationUrl),

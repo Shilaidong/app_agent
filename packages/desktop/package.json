@@ -2,7 +2,7 @@
   "name": "@terra-edu/application-agent-desktop",
   "private": true,
   "description": "Terra-Edu independent application automation Agent desktop app.",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "type": "module",
   "license": "MIT",
   "homepage": "https://terra-edu.local/application-agent",
@@ -11,9 +11,11 @@
     "email": "hello@terra-edu.local"
   },
   "scripts": {
+    "test": "bun test",
     "typecheck": "tsgo -b",
     "verify:application-agent": "bun ./scripts/verify-application-agent.ts",
     "verify:application-agent:e2e": "bun ./scripts/verify-application-agent-e2e.ts",
+    "verify:application-agent:package": "bun ./scripts/verify-application-agent-package.ts",
     "release:mac": "bun ./scripts/release-mac.ts",
     "release:mac:free": "bun ./scripts/release-mac.ts",
     "predev": "bun ./scripts/predev.ts",

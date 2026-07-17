@@ -5,13 +5,13 @@
 ## 当前交付形态
 
 - App 名称：Terra-Edu Application Agent
-- 最新版本：`1.0.4`
+- 最新版本：`1.0.12`
 - 发布页：https://github.com/Shilaidong/app_agent/releases
 - 安装包：macOS arm64 DMG / ZIP
 - 签名：ad-hoc signing
 - 公证：暂不做 Apple notarization
 - 更新：暂不做自动更新，新版通过 DMG 覆盖安装
-- 浏览器：随包 ego-lite `0.4.2.15`
+- 浏览器：随包官方签名 ego-lite `0.4.4.15`；Terra 不保存申请平台密码，浏览器更新载荷不可执行
 
 ## 开发
 
@@ -32,7 +32,9 @@ bun run verify:e2e
 bun run typecheck:desktop
 ```
 
-`release:mac` 会自动运行申请 Agent 契约验证、E2E 验证、类型检查、生产构建和 macOS 打包。
+`release:mac` 会自动运行单元测试、申请 Agent 契约验证、确定性临时工作区 E2E 验证、类型检查、生产构建、macOS 打包，以及最终 ZIP/App 资源与 Ego 原生弹窗 smoke 验证。Ego smoke 只会启动由签名母版复制出的临时运行副本，并在测试后再次验证 Terra 包内母版未被改写。GUI 弹窗验证无法运行时，发包会明确失败，产物不可视为可分发版本。
+
+默认 E2E 不读取顾问真实工作区；如需诊断某个已有任务，可显式传入路径：`APPLICATION_AGENT_WORKSPACE="/绝对路径/申请工作区" bun verify:application-agent:e2e`。
 
 ## 本地打 macOS 包
 

@@ -672,15 +672,20 @@ function ApplicationAgentShell(props: {
   }
 
   const requiresBrowserHandoff = (latestTask: ApplicationTask, message: string) =>
-    latestTask.status === "等待顾问登录" || /浏览器接管|顾问接管|handOffTaskSpace|验证码|MFA|人工确认/i.test(message)
+    latestTask.status === "等待顾问登录" ||
+    latestTask.status === "等待顾问接管浏览器" ||
+    /浏览器接管|顾问接管|handOffTaskSpace|验证码|MFA|captcha|人工确认|TERRA_EGO_BROWSER_(?:VERSION_CONFLICT|EXTERNAL_SERVICE_ACTIVE|SERVICE_UNAVAILABLE)|user\s*(?:is\s*)?controlling|user[-\s]?owned|inactive|not[-\s]?assigned|用户.*(?:控制|接管)|控制权.*(?:已被|不可用)/i.test(message)
 
-  const notifyBrowserHandoff = (latestTask: ApplicationTask) => {
+  const notifyBrowserHandoff = (latestTask: ApplicationTask, messages: ApplicationAgentChatItem[] = []) => {
     const latestProgress = latestTask.progress.at(-1)
-    const message = latestProgress?.message || "请在 ego-lite 中完成登录、验证码或人工确认，然后回复继续任务。"
+    const handoffMessage = messages
+      .filter((item) => item.role !== "user")
+      .findLast((item) => requiresBrowserHandoff(latestTask, `${item.title}\n${item.body}`))
+    const message = handoffMessage ? `${handoffMessage.title}\n${handoffMessage.body}` : latestProgress?.message || "请在 ego-lite 中完成登录、验证码或人工确认，然后回复继续任务。"
     if (!requiresBrowserHandoff(latestTask, message)) return
-    const key = `${latestTask.workspacePath}:${latestTask.status}:${latestProgress?.at ?? latestTask.updatedAt}:${message}`
+    const key = `${latestTask.workspacePath}:${latestTask.status}:${handoffMessage?.id ?? latestProgress?.at ?? latestTask.updatedAt}:${message}`
     if (key === lastBrowserHandoffNotificationKey) return
-    if (!isRecentNotification(latestProgress?.at ?? latestTask.updatedAt)) return
+    if (!isRecentNotification(handoffMessage?.time ?? latestProgress?.at ?? latestTask.updatedAt)) return
     lastBrowserHandoffNotificationKey = key
     window.api.showUrgentNotification("⚠️ 顾问需要接管浏览器", message)
   }
@@ -988,15 +993,8 @@ function ApplicationAgentShell(props: {
     await refreshAuthStatus()
   }
 
-  const stopBrowserAutomation = async () => {
-    setError(null)
-    try {
-      await window.api.stopApplicationAutomation(task()?.workspacePath)
-      setRestoreNotice("已停止 ego-lite 浏览器自动化并释放页面控制；材料整理和 Agent 任务仍可继续。")
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }
+  const taskNeedsExplicitContinue = (status: ApplicationTask["status"]) =>
+    ["已暂停", "等待顾问登录", "等待顾问接管浏览器"].includes(status)
 
   const toggleTaskPause = async () => {
     const current = task()
@@ -1004,18 +1002,25 @@ function ApplicationAgentShell(props: {
     setBusy(true)
     setError(null)
     try {
-      if (current.status === "已暂停") {
+      if (taskNeedsExplicitContinue(current.status)) {
         const resumed = await window.api.resumeApplicationTask(current.workspacePath)
         setTask(resumed)
-        setRestoreNotice("任务已继续。Agent 会从已保存的状态恢复；不会重复扫描已完成的材料。")
+        setRestoreNotice("顾问已明确继续任务。Agent 会先读取已保存的浏览器审计状态；只有此前明确交接的空间才会恢复，绝不会抢占顾问自行控制或 inactive 的浏览器。")
         if (opencodeSession()) {
-          await window.api.sendApplicationAgentPrompt(opencodeSession()!, "顾问已点击继续任务。先读取 task_state.json、application_progress.json 和 agent_execution_audit.json，确认下一步后继续执行。")
+          await window.api.sendApplicationAgentPrompt(
+            opencodeSession()!,
+            [
+              "顾问已明确点击继续任务。先读取 task_control.json、task_state.json、application_progress.json 和 agent_execution_audit.json；不要依据旧聊天内容猜测浏览器控制权。",
+              "仅当 application_progress.json 中 egoBrowser.handoffPending 为 true，或旧记录存在 handoffAt 且 handoffPending 未明确为 false、并且保存的是可信数值 taskSpaceId 时，才调用 application-agent_cua：action=resume_ego、taskSpaceId=保存的 ID、consultantConfirmed=true。不得在调用成功前运行 ego-browser。",
+              "resume_ego 成功后，严格按其返回指令执行：新的 heredoc 只能 takeOverTaskSpace(保存的数值 ID) 后 pageInfo() 观察；这一观察回合不得填写、导航、保存、关闭或处理未知弹窗。",
+              "若没有上述已审计的待恢复交接，绝不调用 resume_ego 或 takeOverTaskSpace。改为调用 prepare_ego_task：它会对缺失或非数值的旧 taskSpaceId 先列出 listTaskSpaces 并用 OpenCode question 请求顾问确认；正常 agent ownership 空间也必须先重新观察。遇到 user controlling、inactive 或不明确弹窗时继续交接，不得自动抢占。",
+            ].join("\n"),
+          )
         }
       } else {
         const paused = await window.api.pauseApplicationTask(current.workspacePath)
-        await window.api.stopApplicationAutomation(current.workspacePath)
         setTask(paused)
-        setRestoreNotice("任务已暂停，并已停止浏览器自动化。正在扫描的一份大型文件会完成后暂停，之后不会开始下一项操作。")
+        setRestoreNotice("任务将在当前浏览器回合或单项处理结束后暂停；之后不会启动新的浏览器回合、材料处理或申请步骤。")
         if (opencodeSession()) {
           await window.api.sendApplicationAgentPrompt(opencodeSession()!, "顾问已暂停任务。不要再启动任何新操作；当前单项处理完成后停止，并等待顾问点击继续任务。")
         }
@@ -1178,7 +1183,7 @@ function ApplicationAgentShell(props: {
       scrollAgentToLatest()
     }
     if (latestTask) {
-      notifyBrowserHandoff(latestTask)
+      notifyBrowserHandoff(latestTask, messages)
       notifyTaskProgress(latestTask)
       const stopKey = `${latestTask.workspacePath}:${latestTask.status}:${latestTask.updatedAt}`
       const latestProgressMessage = latestTask.progress.at(-1)?.message || ""
@@ -1604,9 +1609,8 @@ function ApplicationAgentShell(props: {
                 <h2>快捷操作</h2>
                 <div class="quick-actions">
                   <For each={quickCommands}>{(command) => <button type="button" disabled={busy()} onClick={() => runCommand(command)}>{command}</button>}</For>
-                  <button type="button" class="danger-outline" disabled={busy()} onClick={toggleTaskPause}>{currentTask().status === "已暂停" ? "继续任务" : "暂停任务"}</button>
-                  <button type="button" class="danger-outline" onClick={stopBrowserAutomation}>停止浏览器自动化</button>
-                  <small>停止浏览器自动化只释放 ego-lite 页面控制；暂停任务才会停止后续申请步骤。</small>
+                  <button type="button" class="danger-outline" disabled={busy()} onClick={toggleTaskPause}>{taskNeedsExplicitContinue(currentTask().status) ? "继续任务" : "暂停任务"}</button>
+                  <small>暂停会等待当前浏览器回合或单项处理结束；之后不会启动新的申请步骤。</small>
                   <button type="button" class="danger-outline" onClick={blockSubmit}>测试高风险拦截</button>
                 </div>
               </section>
@@ -1692,8 +1696,7 @@ function ApplicationAgentShell(props: {
                     </div>
                   </div>
                   <div class="workspace-actions">
-                    <button type="button" class="danger-outline" disabled={busy()} onClick={toggleTaskPause}>{currentTask().status === "已暂停" ? "继续任务" : "暂停任务"}</button>
-                    <button type="button" class="danger-outline" onClick={stopBrowserAutomation}>停止浏览器自动化</button>
+                    <button type="button" class="danger-outline" disabled={busy()} onClick={toggleTaskPause}>{taskNeedsExplicitContinue(currentTask().status) ? "继续任务" : "暂停任务"}</button>
                     <button type="button" disabled={busy() || !opencodeSession()} onClick={resendStartPrompt}>重新发送启动指令</button>
                     <button type="button" disabled={busy()} onClick={rebuildOpenCodeSession}>重建 OpenCode 会话</button>
                     <button type="button" onClick={() => setShowOpenCode(true)}>进入 OpenCode 对话</button>

@@ -100,6 +100,7 @@ export type ApplicationTaskStatus =
   | "正在生成学生资料"
   | "正在检查缺失内容"
   | "等待顾问登录"
+  | "等待顾问接管浏览器"
   | "正在填写申请平台"
   | "正在保存申请进度"
   | "正在上传材料"
@@ -259,10 +260,7 @@ export type ElectronAPI = {
   pauseApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   resumeApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   submitApplicationMaterialReview: (workspacePath: string, input: ApplicationMaterialReviewInput) => Promise<ApplicationTask>
-  runApplicationCommand: (workspacePath: string, command: string) => Promise<ApplicationTask>
-  openApplicationPlatform: (workspacePath: string) => Promise<ApplicationTask>
   blockHighRiskAction: (workspacePath: string, action: string) => Promise<ApplicationTask>
-  stopApplicationAutomation: (workspacePath?: string) => Promise<{ stopped: string[] }>
   getApplicationPlatformAccount: (applicationUrl: string) => Promise<ApplicationPlatformAccount | null>
   saveApplicationPlatformAccount: (input: {
     applicationUrl: string

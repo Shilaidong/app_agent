@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { existsSync, lstatSync, readdirSync, statSync } from "node:fs"
+import { existsSync, readdirSync, statSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
@@ -31,15 +31,6 @@ function walkFiles(base: string): string[] {
   })
 }
 
-function walkDirectories(base: string): string[] {
-  if (!existsSync(base)) return []
-  return readdirSync(base, { withFileTypes: true }).flatMap((entry) => {
-    const full = path.join(base, entry.name)
-    if (!entry.isDirectory()) return []
-    return [full, ...walkDirectories(full)]
-  })
-}
-
 function isExecutableCode(file: string) {
   const stat = statSync(file)
   const basename = path.basename(file)
@@ -56,34 +47,11 @@ async function adHocSign(target: string, options: string[] = []) {
   await execFileAsync("codesign", ["--sign", "-", "--force", "--timestamp=none", ...options, target])
 }
 
-async function signBundledEgoLite(app: string) {
-  if (process.platform !== "darwin") return
-
-  const egoLite = path.join(app, "Contents/Resources/vendor/ego-lite/ego lite.app")
-  if (!existsSync(egoLite)) return
-
-  const files = walkFiles(egoLite)
-    .filter(isExecutableCode)
-    .sort((a, b) => b.length - a.length)
-  const bundles = walkDirectories(egoLite)
-    .filter((directory) => directory.endsWith(".app") || directory.endsWith(".framework"))
-    .filter((directory) => !lstatSync(directory).isSymbolicLink())
-    .sort((a, b) => b.length - a.length)
-
-  for (const file of files) {
-    await adHocSign(file)
-  }
-  for (const bundle of bundles) {
-    await adHocSign(bundle)
-  }
-  await adHocSign(egoLite)
-}
-
 async function signBundledTerraTools(app: string) {
   if (process.platform !== "darwin") return
 
   const resources = path.join(app, "Contents/Resources/vendor")
-  for (const target of [path.join(resources, "ripgrep/rg")]) {
+  for (const target of [path.join(resources, "ripgrep/rg"), path.join(resources, "terra-dialog-guard/terra-dialog-guard")]) {
     if (!existsSync(target)) throw new Error(`Missing bundled Terra-Edu tool: ${target}`)
     await adHocSign(target)
   }
@@ -95,13 +63,27 @@ async function signBundledTerraTools(app: string) {
   for (const file of files) await adHocSign(file)
 }
 
+async function signTerraRuntimeCode(app: string) {
+  const frameworks = path.join(app, "Contents/Frameworks")
+  if (!existsSync(frameworks)) throw new Error(`Missing Electron runtime frameworks: ${frameworks}`)
+
+  const targets = readdirSync(frameworks, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && (entry.name.endsWith(".app") || entry.name.endsWith(".framework") || entry.name.endsWith(".xpc")))
+    .map((entry) => path.join(frameworks, entry.name))
+    .sort()
+
+  for (const target of targets) await adHocSign(target)
+}
+
 async function signMacApplication(configuration: { app: string }) {
   if (process.platform !== "darwin") return
 
-  await signBundledEgoLite(configuration.app)
   await signBundledTerraTools(configuration.app)
+  await signTerraRuntimeCode(configuration.app)
+  // The bundled Ego Lite runtime keeps Citro's notarized signature so macOS
+  // recognises its existing encrypted browser storage. Deep-signing would
+  // replace that identity and trigger a Keychain access prompt.
   await adHocSign(configuration.app, [
-    "--deep",
     "--options",
     "runtime",
     "--entitlements",
@@ -134,6 +116,11 @@ const getBase = (): Configuration => ({
       from: "resources/vendor/ripgrep/",
       to: "vendor/ripgrep/",
       filter: ["rg"],
+    },
+    {
+      from: "resources/vendor/terra-dialog-guard/",
+      to: "vendor/terra-dialog-guard/",
+      filter: ["terra-dialog-guard"],
     },
     {
       from: "resources/vendor/terra-paddleocr/",

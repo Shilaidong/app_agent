@@ -16,11 +16,13 @@ mkdirSync(electronBuilderCache, { recursive: true })
 
 const macTarget = await detectMacPackageTarget()
 
+await $`bun test`
 await $`bun verify:application-agent`
 await $`bun verify:application-agent:e2e`
 await $`bun typecheck`
 await $`OPENCODE_CHANNEL=prod bun run build`
 await $`ELECTRON_BUILDER_CACHE=${electronBuilderCache} OPENCODE_CHANNEL=prod TERRA_EDU_MAC_TARGET=${macTarget} bun run package:mac`
+await $`bun verify:application-agent:package`
 
 mkdirSync(releaseDir, { recursive: true })
 
@@ -42,11 +44,11 @@ writeFileSync(
     "",
     "## Verification",
     "",
-    "- Static Application Agent contract verification passed.",
-    "- E2E workspace verification passed.",
+    "- Unit tests, static Application Agent contract verification, and deterministic E2E workspace verification passed.",
     "- TypeScript typecheck passed.",
     "- Electron production build passed.",
     dmgAvailable ? "- macOS DMG and ZIP package build passed." : "- macOS ZIP package build passed; DMG build was skipped after hdiutil capability probing failed.",
+    "- Final archive resources, signatures, bundled ego lite/PaddleOCR/native dialog guard, and required GUI dialog smoke passed.",
     "- Supabase public config was bundled from the Terra-Edu web environment when available.",
     "",
     "## Distribution Notes",
