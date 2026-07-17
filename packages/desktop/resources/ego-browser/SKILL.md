@@ -25,13 +25,9 @@ const task = await useOrCreateTaskSpace('inspect example page')
 cliLog('task space id: ' + task.id)
 
 const initialInfo = await pageInfo()
-if (initialInfo && typeof initialInfo === 'object' && 'dialog' in initialInfo) {
-  cliLog(JSON.stringify({ taskSpaceId: task.id, info: initialInfo }, null, 2))
-} else {
-  await openOrReuseTab('https://example.com', { wait: true, timeout: 20 })
-  const info = await pageInfo()
-  cliLog(JSON.stringify({ taskSpaceId: task.id, info, snapshot: info && typeof info === 'object' && 'dialog' in info ? undefined : await snapshotText() }, null, 2))
-}
+// The first round only records the numeric ID and current state. Navigation is
+// a separate round using observePageAction from the protocol below.
+cliLog(JSON.stringify({ taskSpaceId: task.id, info: initialInfo }, null, 2))
 EOF
 ```
 
@@ -105,16 +101,72 @@ Start a round with `await pageInfo()` after selecting the task space. On a brand
 
 - For a dialog whose type is `alert`, record its complete payload and the most recent page evidence, use `await cdp('Page.handleJavaScriptDialog', { accept: true })`, then end the heredoc. Start a new round to observe the unblocked page.
 - For `beforeunload`, use `accept: false` and end the heredoc so the current page is preserved. On the next round, observe again and confirm that the URL did not change.
-- For an unclear `confirm` or `prompt`, or any dialog whose consequence is uncertain, hand off the task space and wait for explicit user confirmation. Do not choose for the user.
+- For every `confirm` or `prompt`, hand off the task space and wait for explicit user action and confirmation. Do not choose an option or provide prompt text, even when the apparent consequence looks obvious.
+- Keep the last unobstructed top-level `pageInfo().url` as `currentUrl`. A dialog opened inside an iframe has its own `dialog.url` and `frameId`; record those separately as `dialogUrl` and `dialogFrameId`, never as the task's top-level current URL.
 
-An iframe alert can block `Runtime.evaluate` before `pageInfo()` reports `{ dialog }`. Terra-Edu therefore establishes a clear pre-action baseline and then watches each eligible Ego round with a narrowly scoped macOS Accessibility guard tied to the exact managed Ego PID, executable path, current URL origin, and visible task-space control label. It reads Chromium `AXApplicationDialog` / `AXCustomContent` without OCR. It may act only when the complete AX tree is untruncated, contains exactly one button, that button is explicitly enabled and pressable, and no editable field exists. It verifies that the same dialog actually disappears; if Chromium accepts but ignores `AXPress`, it may send one hit-tested click to the same verified AX button in that Ego PID and re-check. A dialog present before the action baseline is read only and is never auto-clicked.
+### Actions that may open a dialog
 
-- If the wrapper returns `TERRA_EGO_NATIVE_DIALOG_acknowledged`, call `application-agent_native_dialog` with `read_latest`, preserve the complete `dialogText`, record a resolved blocker through `application-agent_cua`, and end the round. The next round begins with a new `pageInfo()` observation.
-- If it returns `observed`, first read the complete `dialogText`, `buttonLabels`, input and truncation evidence. Hand off any two-button, editable, truncated, or semantically unclear dialog. For a genuine single-button acknowledgement alert, call `inspect` for the same task-space ID and URL, read the text, then call `acknowledge_single_button` within 30 seconds; record the resolved blocker and end the round.
-- If `click`, `js`, `pageInfo`, or `Runtime.evaluate` times out without a captured wrapper event, call `application-agent_native_dialog` with `inspect` before any other browser action. Only the same recently inspected single-button alert may then be acknowledged. Do not refresh, reopen, navigate, or retry the heredoc.
-- `permission_required` means the native fallback is unavailable until macOS Accessibility permission is granted. It is not evidence of a frozen page, server failure, or expired login.
+A JavaScript dialog can block the promise returned by `click`, especially when an iframe opens the dialog. Therefore **never** use `await click(...)` and only then look for a dialog. Start the action without awaiting it and poll `pageInfo()` while that action is pending. Use this exact pattern for save, continue, submit-without-final-submission, navigation, selection, upload, and any other action that may change the page:
 
-After every meaningful action, observe again with `pageInfo()` and then, only when there is no dialog, with `snapshotText()` or a screenshot. Use the semantic workflow by default; use the visual workflow when the current evidence shows that semantics are insufficient; reserve `js` / `cdp` for narrow, observable operations. Do not use direct DOM/CDP to fake a value or bypass normal submission behavior.
+```js
+async function observePageAction(action, { actionTimeoutMs = 8000, settleMs = 2000, pollMs = 100, pageInfoTimeoutMs = 1500 } = {}) {
+  let settled
+  const actionPromise = Promise.resolve()
+    .then(action)
+    .then((value) => (settled = { status: 'resolved', value }))
+    .catch((error) => (settled = { status: 'rejected', error: String(error) }))
+  const actionDeadline = Date.now() + actionTimeoutMs
+  let quietDeadline
+  let lastInfo
+  let lastError
+  let observedAfterSettled = false
+  while (true) {
+    if (settled && !quietDeadline) quietDeadline = Date.now() + settleMs
+    const deadline = quietDeadline || actionDeadline
+    if (Date.now() >= deadline) {
+      if (settled && observedAfterSettled) return { kind: 'action', info: lastInfo, action: settled }
+      return { kind: 'unknown', info: lastInfo, error: lastError || 'pageInfo produced no bounded post-action observation', action: settled, actionPromise }
+    }
+    let timeoutId
+    const remaining = Math.max(1, Math.min(pageInfoTimeoutMs, deadline - Date.now()))
+    const observation = await Promise.race([
+      Promise.resolve().then(() => pageInfo()).then(
+        (info) => ({ kind: 'info', info }),
+        (error) => ({ kind: 'error', error: String(error) }),
+      ),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve({ kind: 'timeout' }), remaining)
+      }),
+    ])
+    clearTimeout(timeoutId)
+    if (observation.kind === 'info') {
+      lastInfo = observation.info
+      if (lastInfo && typeof lastInfo === 'object' && 'dialog' in lastInfo) return { kind: 'dialog', info: lastInfo, actionPromise }
+      if (quietDeadline) observedAfterSettled = true
+    }
+    if (observation.kind === 'error') lastError = observation.error
+    if (observation.kind === 'timeout') lastError = 'pageInfo timed out after ' + remaining + 'ms'
+    if (settled && !quietDeadline) {
+      quietDeadline = Date.now() + settleMs
+      observedAfterSettled = false
+    }
+    const sleepMs = Math.min(pollMs, Math.max(0, (quietDeadline || actionDeadline) - Date.now()))
+    if (sleepMs > 0) await new Promise((resolve) => setTimeout(resolve, sleepMs))
+  }
+}
+
+const result = await observePageAction(() => click('@save', { label: 'save current page' }))
+cliLog(JSON.stringify(result.kind === 'dialog' ? result.info : result, null, 2))
+```
+
+For an initial or known-slow navigation, keep the same helper and pass `{ actionTimeoutMs: 30000 }`; do not remove the per-`pageInfo` timeout or the post-action quiet window.
+
+- If the result is `dialog`, preserve its complete `type`, `message`, `url`, and `frameId` as evidence. For `alert`, call `Page.handleJavaScriptDialog` with `accept:true`, allow the pending action promise to settle briefly, record a resolved blocker through `application-agent_cua`, and end the round without any page-JavaScript call. For `beforeunload`, use `accept:false` and end. For every `confirm` or `prompt`, call `handOffTaskSpace(taskSpaceId)`, require `{ done:true }`, record the handoff, and end without answering it. The next agent round begins only after the consultant explicitly continues.
+- If the result is `action` with `status:'resolved'`, its returned `info` is a successful no-dialog observation collected throughout a two-second quiet window after the action settled; only then may you take a fresh snapshot and verify the result. If its action status is `rejected`, record the exact error and end the round without a snapshot or retry.
+- If the result is `unknown`, record the exact action and last observation as a failure and end the round. Do not refresh, reopen a URL, enter an iframe URL directly, submit through page JavaScript, repeat the action, or ask for login. A later round may resume only from a fresh observation.
+- A rejected click is not proof that the action failed: a dialog may have caused the rejection. The final `pageInfo()` check in the pattern is mandatory before interpreting it.
+
+After every meaningful action, observe again with `pageInfo()` and then, only when there is no dialog, with `snapshotText()` or a screenshot. Use the semantic workflow by default; use the visual workflow when the current evidence shows that semantics are insufficient; reserve `js` / `cdp` for narrow, observable operations. Do not use direct DOM/CDP to fake a value, invoke a form's submit method, open an iframe URL as a top-level page, or bypass normal submission behavior.
 
 On validation, timeout, server error, or ambiguous result, preserve the page and report the evidence. Do not auto-reload, re-open a URL, repeat the same action, or ask the user to log in again unless a fresh observation explicitly shows an authentication failure or login page.
 
@@ -144,19 +196,20 @@ Element-target helpers such as `click`, `doubleClick`, `hover`, `dragMouse`, `fi
 - `options.label` (optional) — a 3-6 word action description; triggers a visual highlight animation.
 
 ```js
-await click('@21', { label: 'check login status' })
-await click('button.primary', { label: 'click submit button' })
-await click([420, 260])
-await click({ x: 420, y: 260 })
-await click({ selector: 'canvas#stage', x: 12, y: 8 })
+const result = await observePageAction(() => click('@21', { label: 'open selected control' }))
+cliLog(JSON.stringify(result.kind === 'dialog' ? result.info : result, null, 2))
+// Equivalent targets for a later, separately observed round include:
+// click('button.primary'), click([420, 260]), click({ x: 420, y: 260 }),
+// or click({ selector: 'canvas#stage', x: 12, y: 8 }).
 await hover('@5', { label: 'hover to reveal menu' })
-await dragMouse([from, to], { label: 'drag card' })
+const dragResult = await observePageAction(() => dragMouse([from, to], { label: 'drag card' }))
 ```
 
 ### uploadFile
 
 ```js
-await uploadFile('input[type="file"]', "/absolute/path/to/file.pdf")
+const uploadResult = await observePageAction(() => uploadFile('input[type="file"]', "/absolute/path/to/file.pdf"))
+cliLog(JSON.stringify(uploadResult.kind === 'dialog' ? uploadResult.info : uploadResult, null, 2))
 ```
 
 ### js
@@ -186,13 +239,13 @@ Before writing substantial content into a rich editor, perform a tiny write prob
 
 1. **Semantic workflow: `snapshotText()` + refs / locators** — default for most pages with normal text, links, buttons, forms, tables, and lists.
    - Reuse the saved numeric task space only after `listTaskSpaces()` confirms agent ownership; use `takeOverTaskSpace(task.id)` only after an explicit user/consultant continuation.
-   - Observe with `await pageInfo()` before navigation. Open or switch pages with `await openOrReuseTab(url, { wait: true })` only after that observation contains no dialog; use `await gotoAndWait(url, { timeout, settle })` only when navigating inside the current tab.
+   - Observe with `await pageInfo()` before navigation. After a no-dialog observation, run `openOrReuseTab(url, { wait: true })` or `gotoAndWait(url, { timeout, settle })` only as the action passed to `observePageAction`; never await either navigation helper directly.
    - Observe with `await snapshotText()` only after a no-dialog `pageInfo()` to get a full-page semantic tree annotated with `[ref=N, loc=..., url=...]`.
-   - Act with `await click('@N')`, `await fillInput('@N', ...)`, or stable `loc=...` values. Use direct DOM logic only when it is simpler than helper calls.
+   - Short batches of ordinary text may use `await fillInput('@N', ...)`. Run clicks, selections, uploads, saves, and other state-changing controls through `observePageAction`, using current `@N` refs or stable `loc=...` values. Use direct DOM logic only for narrow observation, never to submit.
    - After meaningful clicks, input, or navigation, observe again with `await snapshotText()`, `await pageInfo()`, or `await captureScreenshot()` before assuming success.
 
 2. **Visual workflow: `await captureScreenshot()` + coordinate/keyboard actions** — use when the page is primarily visual, canvas-like, heavily virtualized, or when accessibility / semantic structure is incomplete.
-   - Inspect the screenshot, act with viewport coordinates such as `await click([x, y])`, `await doubleClick([x, y])`, `await pressKey(...)`, and `await typeText(...)`, then verify with another screenshot or a reliable export/readback path.
+   - Inspect the screenshot, run state-changing coordinate clicks or double-clicks through `observePageAction`, use `await pressKey(...)` and `await typeText(...)` for bounded text entry, then verify with another screenshot or a reliable export/readback path.
    - Prefer this path for rich editors, spreadsheets, visual menus, map/canvas UIs, drag interactions, and targets that are obvious visually but poor in the DOM/AX tree.
 
 3. **Direct DOM / CDP workflow: `await js(...)` / `await cdp(...)`** — use when you need browser state, compact data extraction, custom DOM traversal, or raw browser capabilities.

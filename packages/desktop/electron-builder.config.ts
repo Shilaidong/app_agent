@@ -51,10 +51,9 @@ async function signBundledTerraTools(app: string) {
   if (process.platform !== "darwin") return
 
   const resources = path.join(app, "Contents/Resources/vendor")
-  for (const target of [path.join(resources, "ripgrep/rg"), path.join(resources, "terra-dialog-guard/terra-dialog-guard")]) {
-    if (!existsSync(target)) throw new Error(`Missing bundled Terra-Edu tool: ${target}`)
-    await adHocSign(target)
-  }
+  const ripgrep = path.join(resources, "ripgrep/rg")
+  if (!existsSync(ripgrep)) throw new Error(`Missing bundled Terra-Edu tool: ${ripgrep}`)
+  await adHocSign(ripgrep)
   const paddleOcr = path.join(resources, "terra-paddleocr")
   const files = walkFiles(paddleOcr)
     .filter(isExecutableCode)
@@ -116,11 +115,6 @@ const getBase = (): Configuration => ({
       from: "resources/vendor/ripgrep/",
       to: "vendor/ripgrep/",
       filter: ["rg"],
-    },
-    {
-      from: "resources/vendor/terra-dialog-guard/",
-      to: "vendor/terra-dialog-guard/",
-      filter: ["terra-dialog-guard"],
     },
     {
       from: "resources/vendor/terra-paddleocr/",

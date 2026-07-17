@@ -12,15 +12,61 @@ const EGO_BROWSER_PROTOCOL = `## ego-browser 通用观察协议
 
 - 每个 heredoc 只完成一个短回合：先观察、执行一个逻辑动作组、再验证并结束本回合。普通连续文本可作为短批次；选择、添加/删除、自动完成、上传、保存和导航必须各自单独复查，不要把它们和下一项页面动作串在同一批次。
 - 首次使用 task space 时记录返回的数值 task.id，并把它作为唯一可恢复的 taskSpaceId（调用 application-agent_cua 时传该 ID 的字符串形式）。已有保存 ID 的正常连续回合先用 listTaskSpaces 确认该空间仍为 agent ownership，再以该数值 ID 调用 useOrCreateTaskSpace(taskSpaceId)；不得再按名称匹配。已经交给顾问、listTaskSpaces 显示 user/inactive、或收到“user is controlling / inactive”后，立即停止浏览器命令，并以真实 taskSpaceId、URL、标题和证据调用 handoff_to_consultant。只有顾问明确回复继续后，才可用保存的 taskSpaceId 调用 takeOverTaskSpace(taskSpaceId) 恢复，绝不自动抢回控制。
-- 选定 task space 后，每个回合先调用 pageInfo()。首次新建且没有可用页面时，只有 pageInfo 已明确没有 dialog 后才可用 openOrReuseTab 建立申请页，并立刻再次 pageInfo；其他回合不得在首次 pageInfo 前导航。只有 pageInfo() 没有 dialog 时，才可调用 snapshotText、captureScreenshot、js、click、fillInput、导航或其他页面操作。普通表单优先用 snapshotText 的语义 workflow；语义信息不足时由你根据现场截图改用 visual workflow；DOM/CDP 仅用于有明确观察证据的窄范围操作，不得用它伪造填写结果或直接绕过正常提交。
-- 如果 pageInfo() 返回 dialog，先记录完整 dialog 信息和最近一次页面证据；此时不得调用 snapshotText、captureScreenshot、js、点击/输入/上传/导航等任何页面操作，或任何 CDP 命令，唯一例外是 Page.handleJavaScriptDialog。type 为 alert 时使用 accept:true 关闭、调用 application-agent_cua record_blocker（blockerDisposition: resolved）后立刻结束本 heredoc；type 为 beforeunload 时一律 accept:false、记录 resolved 后结束本 heredoc，下一回合先确认 URL 未变化；无法确定影响的 confirm 或 prompt 必须 handOffTaskSpace，确认返回 done:true 后以真实 taskSpaceId、URL、标题和证据记录 blockerDisposition: handoff 并等待顾问。
-- iframe 原生 alert 可能让 Ego 的 Runtime.evaluate/pageInfo 超时，但这不代表网页冻结。Terra 包装器先建立“当前没有弹窗”的只读基线，再监视本轮动作；它只绑定 Terra 管理的 Ego PID、可执行路径、URL origin 和正在控制的 task-space 标签。若本轮新出现 AXApplicationDialog，保存 AXCustomContent 全文，并只处理“AXCustomContent 存在且完整解码、总按钮数恰好为 1、唯一按钮明确可按、没有任何输入框、AX 树未截断”的 alert。点击前必须再次核对包含 PID、可执行路径、完整 URL、task-space 标签和弹窗内容的同一指纹。先尝试 AXPress；若 Ego 吞掉成功返回且同一弹窗和按钮仍在，才对同一 AX 按钮中心向该 Ego PID 发送一次点击，并再次确认弹窗消失。回合开始前已存在的弹窗只读取、绝不自动点击。
-- 包装器返回 TERRA_EGO_NATIVE_DIALOG_acknowledged 时，立即调用 application-agent_native_dialog read_latest 读取全文，再调用 application-agent_cua record_blocker（blockerDisposition: resolved），结束当前回合。若返回 observed，先读完整 dialogText 与 buttonLabels；两按钮、输入框、树截断或语义不清必须 handoff。若它确实只是单按钮提示，可调用 application-agent_native_dialog inspect 重新读取同一 task space 和 URL，再在 30 秒内调用 acknowledge_single_button；已关闭后记录 resolved 并结束回合。任何情况都不得刷新、重开标签或把它误判成登录失效。
-- 若 click、js、pageInfo 或 Runtime.evaluate 超时且包装器没有返回已捕获事件，下一步只能调用 application-agent_native_dialog inspect；必须先读出完整文字，只有同一任务、同一 URL、30 秒内未变化的单按钮 alert 才可调用 acknowledge_single_button。该工具不接管网页操作。permission_required 时停止浏览器重试并明确报告需一次性开启 macOS 辅助功能权限。
+- 选定 task space 后，每个回合先调用 pageInfo()。首次新建且没有可用页面时，只有 pageInfo 已明确没有 dialog 后才可建立申请页；openOrReuseTab/gotoAndWait 也必须作为 observePageAction 的 action，不能直接 await。只有 pageInfo() 没有 dialog 时，才可调用 snapshotText、captureScreenshot、js、click、fillInput、导航或其他页面操作。普通表单优先用 snapshotText 的语义 workflow；语义信息不足时由你根据现场截图改用 visual workflow；DOM/CDP 仅用于有明确观察证据的窄范围操作，不得用它伪造填写结果或直接绕过正常提交。
+- 如果 pageInfo() 返回 dialog，先记录完整 dialog 信息和最近一次顶层页面证据；此时不得调用 snapshotText、captureScreenshot、js、点击/输入/上传/导航等任何页面操作，或任何 CDP 命令，唯一例外是 Page.handleJavaScriptDialog。type 为 alert 时使用 accept:true 关闭、调用 application-agent_cua record_blocker（blockerDisposition: resolved）后立刻结束本 heredoc；type 为 beforeunload 时一律 accept:false、记录 resolved 后结束本 heredoc，下一回合先确认 URL 未变化；所有 confirm 或 prompt 都必须 handOffTaskSpace，确认返回 done:true 后以真实 taskSpaceId、顶层 URL、标题和证据记录 blockerDisposition: handoff 并等待顾问，不得由 Agent 猜测选项或 prompt 文本。
+- iframe 原生 alert 会阻塞触发它的 click/save Promise，但 Ego 仍能通过 pageInfo() 返回完整 dialog。任何保存、继续、选择、导航、上传等可能改变页面的动作，都必须按 ego-browser skill 的 observePageAction 模式执行：先启动动作但不 await，同时轮询 pageInfo；不得写成“await click 后再检查”。
+- observePageAction 返回 dialog 时，保存完整 type、message、url、frameId。调用 record_blocker 时 currentUrl 始终传最近一次 pageInfo 的顶层 URL，dialog.url 和 frameId 分别传 dialogUrl、dialogFrameId，绝不能用 iframe URL 覆盖全局 currentUrl。alert 用 Page.handleJavaScriptDialog accept:true 关闭并立刻结束 heredoc；beforeunload 使用 accept:false；所有 confirm/prompt 都交接顾问。
+- observePageAction 返回 unknown、click 拒绝或 Runtime.evaluate 超时时，不能据此判断网页冻结、服务器错误或登录失效。记录精确动作、最后 pageInfo 和错误后结束回合；不得刷新、重开链接、进入 iframe URL、用 JS 直接 submit 或重复动作。只有新的页面观察明确显示登录页或认证失败时才请求登录。
 - 任何选择、添加/删除、自动完成、切换或导航都可能改变可见内容。动作后用新的 pageInfo 加 snapshotText 或截图复查页面差异；DOM required 扫描只是辅助证据。每次改变页面后都必须重新进行带 taskSpaceId、URL、标题和证据的动态表单验证，才能保存。
 - 遇到校验、超时、服务端错误或结果不明确时，保留当前页面和观察证据，记录失败或交接；不得自动刷新、重开链接、重复同一动作或要求重新登录。只有新观察明确显示认证失败或登录页时，才可请求顾问重新登录。
-- 若 Terra 包装器返回 TERRA_EGO_BROWSER_VERSION_CONFLICT、TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE、TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE 或 TERRA_EGO_NATIVE_DIALOG_PERMISSION_REQUIRED，立即停止，不得重试、调用系统 ego-browser、关闭其他 Ego Lite 或猜测 task space。用 application-agent_cua record_failure 原样记录标识；浏览器服务问题按提示处理，辅助功能权限问题需先完成系统授权，之后从新回合观察恢复。
+- 若 Terra 包装器返回 TERRA_EGO_BROWSER_VERSION_CONFLICT、TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE 或 TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE，立即停止，不得重试、调用系统 ego-browser、关闭其他 Ego Lite 或猜测 task space。用 application-agent_cua record_failure 原样记录标识，按提示处理后从新回合观察恢复。
 - 保存前后都必须有新观察证据。保存动作后先调用 record_observation 写入晚于动态表单复查的页面证据；只有页面明确显示已保存、已回显或状态已改变，才能调用 record_save_verified。`
+
+const EGO_OBSERVE_PAGE_ACTION_SOURCE = `async function observePageAction(action, { actionTimeoutMs = 8000, settleMs = 2000, pollMs = 100, pageInfoTimeoutMs = 1500 } = {}) {
+  let settled
+  const actionPromise = Promise.resolve()
+    .then(action)
+    .then((value) => (settled = { status: 'resolved', value }))
+    .catch((error) => (settled = { status: 'rejected', error: String(error) }))
+  const actionDeadline = Date.now() + actionTimeoutMs
+  let quietDeadline
+  let lastInfo
+  let lastError
+  let observedAfterSettled = false
+  while (true) {
+    if (settled && !quietDeadline) quietDeadline = Date.now() + settleMs
+    const deadline = quietDeadline || actionDeadline
+    if (Date.now() >= deadline) {
+      if (settled && observedAfterSettled) return { kind: 'action', info: lastInfo, action: settled }
+      return { kind: 'unknown', info: lastInfo, error: lastError || 'pageInfo produced no bounded post-action observation', action: settled, actionPromise }
+    }
+    let timeoutId
+    const remaining = Math.max(1, Math.min(pageInfoTimeoutMs, deadline - Date.now()))
+    const observation = await Promise.race([
+      Promise.resolve().then(() => pageInfo()).then(
+        (info) => ({ kind: 'info', info }),
+        (error) => ({ kind: 'error', error: String(error) }),
+      ),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve({ kind: 'timeout' }), remaining)
+      }),
+    ])
+    clearTimeout(timeoutId)
+    if (observation.kind === 'info') {
+      lastInfo = observation.info
+      if (lastInfo && typeof lastInfo === 'object' && 'dialog' in lastInfo) return { kind: 'dialog', info: lastInfo, actionPromise }
+      if (quietDeadline) observedAfterSettled = true
+    }
+    if (observation.kind === 'error') lastError = observation.error
+    if (observation.kind === 'timeout') lastError = 'pageInfo timed out after ' + remaining + 'ms'
+    if (settled && !quietDeadline) {
+      quietDeadline = Date.now() + settleMs
+      observedAfterSettled = false
+    }
+    const sleepMs = Math.min(pollMs, Math.max(0, (quietDeadline || actionDeadline) - Date.now()))
+    if (sleepMs > 0) await new Promise((resolve) => setTimeout(resolve, sleepMs))
+  }
+}`
 
 async function writeJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true })
@@ -79,36 +125,22 @@ function bundledTerraPaddleOcrPath() {
   return candidates[0]
 }
 
-function bundledTerraDialogGuardPath() {
-  const candidates = [
-    join(root, "../../resources/vendor/terra-dialog-guard/terra-dialog-guard"),
-    join(process.resourcesPath ?? "", "vendor/terra-dialog-guard/terra-dialog-guard"),
-  ]
-  for (const candidate of candidates) {
-    if (candidate && existsSync(candidate)) return candidate
-  }
-  return candidates[0]
-}
-
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
 export type OpenCodeResourceOverrides = {
   egoLiteAppPath?: string
-  dialogGuardPath?: string
   egoRuntimeRoot?: string
 }
 
 function renderEgoBrowserWrapper(overrides?: OpenCodeResourceOverrides) {
   const appPath = overrides?.egoLiteAppPath || bundledEgoLiteAppPath()
-  const dialogGuardPath = overrides?.dialogGuardPath || bundledTerraDialogGuardPath()
   const runtimeRoot = overrides?.egoRuntimeRoot ? shellQuote(overrides.egoRuntimeRoot) : '"$HOME/Library/Application Support/edu.terra.application-agent/ego-lite-runtime"'
   return `#!/bin/sh
 set -eu
 
 APP_PATH=${shellQuote(appPath)}
-DIALOG_GUARD=${shellQuote(dialogGuardPath)}
 EXPECTED_VERSION=${shellQuote(EGO_LITE_VENDOR_VERSION)}
 EXPECTED_BUNDLE_ID='com.citrolabs.ego.lite'
 EXPECTED_TEAM_ID='JGQLC6YQYJ'
@@ -267,210 +299,10 @@ if [ "$ready" -ne 1 ]; then
   exit 76
 fi
 
-DIALOG_WATCH_PID=""
-DIALOG_EVENT_FILE=""
-DIALOG_PERMISSION_FILE=""
-DIALOG_READY_FILE=""
-DIALOG_WATCH_STATUS=""
-DIALOG_WATCH_NATURAL_EXIT=0
-
-stop_dialog_watch() {
-  terminated_by_wrapper=0
-  if [ -n "$DIALOG_WATCH_PID" ] && /bin/kill -0 "$DIALOG_WATCH_PID" >/dev/null 2>&1; then
-    if /bin/kill -TERM "$DIALOG_WATCH_PID" >/dev/null 2>&1; then
-      terminated_by_wrapper=1
-    fi
-  fi
-  if [ -n "$DIALOG_WATCH_PID" ]; then
-    set +e
-    wait "$DIALOG_WATCH_PID" >/dev/null 2>&1
-    dialog_wait_status=$?
-    set -e
-    if [ "$terminated_by_wrapper" -eq 0 ]; then
-      DIALOG_WATCH_STATUS="$dialog_wait_status"
-      DIALOG_WATCH_NATURAL_EXIT=1
-    fi
-  fi
-  DIALOG_WATCH_PID=""
-  if [ -n "$DIALOG_READY_FILE" ]; then
-    /bin/rm -f "$DIALOG_READY_FILE"
-  fi
-  DIALOG_READY_FILE=""
-}
-
-persist_dialog_event() {
-  source_file="$1"
-  [ -s "$source_file" ] || return 0
-  events_dir="$WORKSPACE/03_state/native_dialog_events"
-  /bin/mkdir -p "$events_dir"
-  event_id=$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')
-  recorded_at=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')
-  enriched_file="$events_dir/.native-dialog-event-$$.json"
-  /bin/cp "$source_file" "$enriched_file"
-  /usr/bin/plutil -insert schemaVersion -integer 1 "$enriched_file" >/dev/null 2>&1 || /usr/bin/plutil -replace schemaVersion -integer 1 "$enriched_file"
-  /usr/bin/plutil -insert eventId -string "$event_id" "$enriched_file" >/dev/null 2>&1 || /usr/bin/plutil -replace eventId -string "$event_id" "$enriched_file"
-  /usr/bin/plutil -insert source -string wrapper "$enriched_file" >/dev/null 2>&1 || /usr/bin/plutil -replace source -string wrapper "$enriched_file"
-  /usr/bin/plutil -insert taskSpaceId -string "$TASK_SPACE_ID" "$enriched_file" >/dev/null 2>&1 || /usr/bin/plutil -replace taskSpaceId -string "$TASK_SPACE_ID" "$enriched_file"
-  /usr/bin/plutil -insert taskSpaceName -string "$EXPECTED_WINDOW" "$enriched_file" >/dev/null 2>&1 || /usr/bin/plutil -replace taskSpaceName -string "$EXPECTED_WINDOW" "$enriched_file"
-  /usr/bin/plutil -insert currentUrl -string "$EXPECTED_URL" "$enriched_file" >/dev/null 2>&1 || /usr/bin/plutil -replace currentUrl -string "$EXPECTED_URL" "$enriched_file"
-  /usr/bin/plutil -insert recordedAt -string "$recorded_at" "$enriched_file" >/dev/null 2>&1 || /usr/bin/plutil -replace recordedAt -string "$recorded_at" "$enriched_file"
-  /bin/cp "$enriched_file" "$events_dir/$event_id.json"
-  /bin/cp "$enriched_file" "$WORKSPACE/03_state/.native_dialog_last.json.$$"
-  /bin/mv "$WORKSPACE/03_state/.native_dialog_last.json.$$" "$WORKSPACE/03_state/native_dialog_last.json"
-  /bin/rm -f "$enriched_file"
-}
-
-dialog_status() {
-  /usr/bin/plutil -extract status raw "$1" 2>/dev/null || true
-}
-
-settle_dialog_watch() {
-  [ -n "$DIALOG_WATCH_PID" ] || return 0
-  attempt=1
-  while [ "$attempt" -le 3 ] && /bin/kill -0 "$DIALOG_WATCH_PID" >/dev/null 2>&1 && { [ -z "$DIALOG_EVENT_FILE" ] || [ ! -s "$DIALOG_EVENT_FILE" ]; }; do
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  if [ -n "$DIALOG_EVENT_FILE" ] && [ -s "$DIALOG_EVENT_FILE" ]; then
-    attempt=1
-    while [ "$attempt" -le 60 ] && /bin/kill -0 "$DIALOG_WATCH_PID" >/dev/null 2>&1; do
-      sleep 0.1
-      attempt=$((attempt + 1))
-    done
-  fi
-}
-
-trap 'stop_dialog_watch' EXIT
-trap 'stop_dialog_watch; exit 129' HUP
-trap 'stop_dialog_watch; exit 130' INT
-trap 'stop_dialog_watch; exit 143' TERM
-
-if [ "$#" -gt 0 ] && [ "$1" = "nodejs" ] && [ -x "$DIALOG_GUARD" ]; then
-  EGO_PID_LIST=$(/usr/bin/pgrep -f "$RUNTIME_APP/Contents/MacOS/ego lite" 2>/dev/null || true)
-  EGO_PID_COUNT=$(printf '%s\n' "$EGO_PID_LIST" | /usr/bin/awk 'NF { count++ } END { print count + 0 }')
-  if [ "$EGO_PID_COUNT" -gt 1 ]; then
-    printf '%s\n' 'TERRA_EGO_NATIVE_DIALOG_TARGET_AMBIGUOUS: 检测到多个 Terra 管理的 Ego Lite 主进程。为避免读取或点击错误窗口，本回合未执行。请关闭多余进程后再继续。' >&2
-    exit 76
-  fi
-  EGO_PID=$(printf '%s\n' "$EGO_PID_LIST" | /usr/bin/head -n 1)
-  PROGRESS_FILE="$WORKSPACE/03_state/application_progress.json"
-  EXPECTED_URL=""
-  EXPECTED_WINDOW=""
-  TASK_SPACE_ID=""
-  if [ -f "$PROGRESS_FILE" ]; then
-    EXPECTED_URL=$(/usr/bin/plutil -extract currentUrl raw "$PROGRESS_FILE" 2>/dev/null || true)
-    EXPECTED_WINDOW=$(/usr/bin/plutil -extract egoBrowser.taskSpaceName raw "$PROGRESS_FILE" 2>/dev/null || true)
-    TASK_SPACE_ID=$(/usr/bin/plutil -extract egoBrowser.taskSpaceId raw "$PROGRESS_FILE" 2>/dev/null || true)
-  fi
-  case "$TASK_SPACE_ID" in
-    ''|*[!0-9]*) TASK_SPACE_ID="" ;;
-  esac
-  if [ -n "$EGO_PID" ] && [ -n "$TASK_SPACE_ID" ] && [ -n "$EXPECTED_URL" ] && [ -n "$EXPECTED_WINDOW" ]; then
-    PREFLIGHT_FILE=$(/usr/bin/mktemp "$WORKSPACE/03_state/.native-dialog-preflight.XXXXXX")
-    set +e
-    "$DIALOG_GUARD" inspect \
-      --bundle-id com.citrolabs.ego.lite \
-      --pid "$EGO_PID" \
-      --executable-path-prefix "$RUNTIME_APP" \
-      --window-title "$EXPECTED_WINDOW" \
-      --expected-url "$EXPECTED_URL" \
-      --prompt-accessibility \
-      --output "$PREFLIGHT_FILE" >/dev/null 2>&1
-    preflight_status=$?
-    set -e
-    preflight_dialog_status=$(dialog_status "$PREFLIGHT_FILE")
-    if [ "$preflight_dialog_status" = "acknowledged" ] || [ "$preflight_dialog_status" = "ambiguous" ] || [ "$preflight_dialog_status" = "observed" ]; then
-      persist_dialog_event "$PREFLIGHT_FILE"
-      printf '%s\\n' "TERRA_EGO_NATIVE_DIALOG_$preflight_dialog_status: 浏览器回合开始前已存在原生弹窗；为避免处理其他 task space，本次预检只读取、没有点击。已保留完整 AX 文本，不得刷新或继续本回合。" >&2
-      /bin/cat "$PREFLIGHT_FILE" >&2
-      /bin/rm -f "$PREFLIGHT_FILE"
-      exit 74
-    fi
-    if [ "$preflight_dialog_status" = "permission_required" ]; then
-      persist_dialog_event "$PREFLIGHT_FILE"
-      printf '%s\\n' 'TERRA_EGO_NATIVE_DIALOG_PERMISSION_REQUIRED: macOS 尚未允许 Terra-Edu 读取和关闭原生弹窗；本轮 Ego 动作没有执行。请完成一次性辅助功能授权后再继续。' >&2
-      /bin/cat "$PREFLIGHT_FILE" >&2
-      /bin/rm -f "$PREFLIGHT_FILE"
-      exit 77
-    fi
-    if [ "$preflight_dialog_status" != "none" ]; then
-      if [ -s "$PREFLIGHT_FILE" ]; then
-        persist_dialog_event "$PREFLIGHT_FILE"
-      fi
-      printf '%s\\n' "TERRA_EGO_NATIVE_DIALOG_GUARD_UNAVAILABLE: 原生弹窗预检未得到完整的无弹窗结果（status=\${preflight_dialog_status:-missing}）；本轮 Ego 动作没有执行。" >&2
-      /bin/cat "$PREFLIGHT_FILE" >&2 || true
-      /bin/rm -f "$PREFLIGHT_FILE"
-      exit 78
-    fi
-    /bin/rm -f "$PREFLIGHT_FILE"
-
-    DIALOG_EVENT_FILE=$(/usr/bin/mktemp "$WORKSPACE/03_state/.native-dialog-watch.XXXXXX")
-    DIALOG_READY_FILE=$(/usr/bin/mktemp "$WORKSPACE/03_state/.native-dialog-ready.XXXXXX")
-    /bin/rm -f "$DIALOG_READY_FILE"
-    "$DIALOG_GUARD" watch-and-acknowledge \
-      --bundle-id com.citrolabs.ego.lite \
-      --pid "$EGO_PID" \
-      --executable-path-prefix "$RUNTIME_APP" \
-      --window-title "$EXPECTED_WINDOW" \
-      --expected-url "$EXPECTED_URL" \
-      --require-task-space-context \
-      --ready-output "$DIALOG_READY_FILE" \
-      --timeout-ms 120000 \
-      --output "$DIALOG_EVENT_FILE" >/dev/null 2>&1 &
-    DIALOG_WATCH_PID=$!
-    attempt=1
-    while [ "$attempt" -le 30 ] && /bin/kill -0 "$DIALOG_WATCH_PID" >/dev/null 2>&1 && [ ! -s "$DIALOG_READY_FILE" ]; do
-      sleep 0.1
-      attempt=$((attempt + 1))
-    done
-    if [ ! -s "$DIALOG_READY_FILE" ]; then
-      baseline_dialog_status=$(dialog_status "$DIALOG_EVENT_FILE")
-      if [ "$baseline_dialog_status" = "acknowledged" ] || [ "$baseline_dialog_status" = "ambiguous" ] || [ "$baseline_dialog_status" = "observed" ]; then
-        persist_dialog_event "$DIALOG_EVENT_FILE"
-        printf '%s\n' "TERRA_EGO_NATIVE_DIALOG_$baseline_dialog_status: 浏览器动作监视器启动时已经存在原生弹窗；没有点击，也没有执行本轮 Ego 动作。已保留完整 AX 文本。" >&2
-        /bin/cat "$DIALOG_EVENT_FILE" >&2
-        stop_dialog_watch
-        /bin/rm -f "$DIALOG_EVENT_FILE"
-        exit 74
-      fi
-      if [ "$baseline_dialog_status" = "permission_required" ]; then
-        persist_dialog_event "$DIALOG_EVENT_FILE"
-        printf '%s\\n' 'TERRA_EGO_NATIVE_DIALOG_PERMISSION_REQUIRED: 原生弹窗动作监视器没有辅助功能权限；本轮 Ego 动作没有执行。' >&2
-        /bin/cat "$DIALOG_EVENT_FILE" >&2
-        stop_dialog_watch
-        /bin/rm -f "$DIALOG_EVENT_FILE"
-        exit 77
-      fi
-      if [ -s "$DIALOG_EVENT_FILE" ]; then
-        persist_dialog_event "$DIALOG_EVENT_FILE"
-      fi
-      printf '%s\\n' "TERRA_EGO_NATIVE_DIALOG_GUARD_UNAVAILABLE: 原生弹窗动作监视器未能建立完整基线（status=\${baseline_dialog_status:-missing}）；本轮 Ego 动作没有执行。" >&2
-      /bin/cat "$DIALOG_EVENT_FILE" >&2 || true
-      stop_dialog_watch
-      /bin/rm -f "$DIALOG_EVENT_FILE"
-      exit 78
-    else
-      /bin/rm -f "$DIALOG_READY_FILE"
-      DIALOG_READY_FILE=""
-    fi
-  fi
-fi
-
 set +e
 "$HELPER" "$@"
 helper_status=$?
 set -e
-settle_dialog_watch
-stop_dialog_watch
-
-if [ "$DIALOG_WATCH_NATURAL_EXIT" -eq 1 ]; then
-  natural_dialog_status=$(dialog_status "$DIALOG_EVENT_FILE")
-  if [ -z "$natural_dialog_status" ] || [ "$natural_dialog_status" = "none" ]; then
-    printf '%s\\n' "TERRA_EGO_NATIVE_DIALOG_GUARD_UNAVAILABLE: 原生弹窗监视器在浏览器回合结束前退出（exit=\${DIALOG_WATCH_STATUS:-unknown}），且没有留下有效事件；页面动作结果不确定，不得继续或重试。" >&2
-    /bin/rm -f "$DIALOG_EVENT_FILE" "$DIALOG_PERMISSION_FILE"
-    exit 78
-  fi
-fi
 
 if [ "$helper_status" -eq 255 ]; then
   printf '%s\\n' 'TERRA_EGO_BROWSER_VERSION_CONFLICT: Ego Lite 服务在浏览器回合期间发生协议冲突，页面动作是否已经执行无法确认。Terra-Edu 未使用或关闭其他浏览器；不得重试或刷新，请顾问检查当前页面并关闭另一版本 Ego Lite 后点击“继续任务”。' >&2
@@ -480,32 +312,6 @@ if [ "$helper_status" -eq 252 ]; then
   printf '%s\\n' 'TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: 随包 Ego Lite 服务在浏览器回合期间不可用，页面动作是否已经执行无法确认。不得重试或刷新，请由顾问检查当前页面后再继续。' >&2
   exit 76
 fi
-
-if [ -n "$DIALOG_EVENT_FILE" ] && [ -s "$DIALOG_EVENT_FILE" ]; then
-  watched_dialog_status=$(dialog_status "$DIALOG_EVENT_FILE")
-  if [ "$watched_dialog_status" != "none" ]; then
-    persist_dialog_event "$DIALOG_EVENT_FILE"
-    if [ "$watched_dialog_status" = "permission_required" ]; then
-      printf '%s\\n' 'TERRA_EGO_NATIVE_DIALOG_PERMISSION_REQUIRED: 浏览器回合中辅助功能权限失效；已保留证据，不得继续或重试。' >&2
-      /bin/cat "$DIALOG_EVENT_FILE" >&2
-      /bin/rm -f "$DIALOG_EVENT_FILE" "$DIALOG_PERMISSION_FILE"
-      exit 77
-    fi
-    printf '%s\\n' "TERRA_EGO_NATIVE_DIALOG_$watched_dialog_status: Ego 回合中检测到原生弹窗；已保留完整 AX 文本。不得刷新、重试或继续本回合，下一回合必须先重新观察。" >&2
-    /bin/cat "$DIALOG_EVENT_FILE" >&2
-    /bin/rm -f "$DIALOG_EVENT_FILE" "$DIALOG_PERMISSION_FILE"
-    exit 74
-  fi
-fi
-
-if [ "$helper_status" -ne 0 ] && [ -n "$DIALOG_PERMISSION_FILE" ] && [ -s "$DIALOG_PERMISSION_FILE" ]; then
-  persist_dialog_event "$DIALOG_PERMISSION_FILE"
-  printf '%s\\n' 'TERRA_EGO_NATIVE_DIALOG_PERMISSION_REQUIRED: Ego 回合失败且 macOS 尚未允许 Terra-Edu 读取和关闭原生弹窗。不得刷新或重试；请先在系统设置中授予辅助功能权限。' >&2
-  /bin/cat "$DIALOG_PERMISSION_FILE" >&2
-  /bin/rm -f "$DIALOG_EVENT_FILE" "$DIALOG_PERMISSION_FILE"
-  exit 77
-fi
-/bin/rm -f "$DIALOG_EVENT_FILE" "$DIALOG_PERMISSION_FILE"
 exit "$helper_status"
 `
 }
@@ -554,21 +360,6 @@ exec "$OCR" "$@"
   )
 }
 
-async function writeTerraDialogGuardWrapper(base: string, overrides?: OpenCodeResourceOverrides) {
-  const wrapper = join(base, "bin", "terra-dialog-guard")
-  await writeGeneratedFile(
-    wrapper,
-    `#!/bin/sh
-set -eu
-
-GUARD=${shellQuote(overrides?.dialogGuardPath || bundledTerraDialogGuardPath())}
-[ -x "$GUARD" ] || { printf '%s\\n' "Terra-Edu native dialog guard is missing: $GUARD" >&2; exit 127; }
-exec "$GUARD" "$@"
-`,
-    0o755,
-  )
-}
-
 export function buildApplicationAgentStartPrompt(task: ApplicationTask) {
   const inputJson = JSON.stringify(task.input, null, 2)
   return `你现在是 Terra-Edu 申请 Agent，请立刻接管这个申请任务。不要等待顾问再输入第一条指令。
@@ -604,7 +395,6 @@ ${task.input.batchWorkspacePath ? `- 选校批次工作区：${task.input.batchW
 - application-agent_state：按统一 task_state.json schema 更新状态、统计和进度。
 - ego-browser skill：macOS 申请平台填表的唯一浏览器自动化后端。通过 ego lite 的独立 task space 打开/复用申请平台，使用 snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace 完成真人式观察、填写、复查和保存。
 - application-agent_cua：不再直接控制 Chrome，也不再调用 cua-driver；它只记录 ego-browser 填表阶段的 task space、观察结果、已验证字段、保存页面、上传材料、阻塞弹窗、失败原因和审计链。
-- application-agent_native_dialog：只在 Ego 原生 AXApplicationDialog 阻塞 CDP 时，读取完整 AXCustomContent、检查按钮并关闭单按钮 alert；其他网页操作仍全部交给 ego-browser。
 - application-agent_risk：识别并阻断最终提交、付款、不可逆推荐信邀请、保存账号密码等高风险动作。
 - application-agent_requirements：保存 webfetch/websearch 得到的学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
 
@@ -680,7 +470,6 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - application-agent_state：更新 task_state.json。
 - ego-browser skill：macOS 申请平台填表后端。必须使用官方 helper：useOrCreateTaskSpace、openOrReuseTab、snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace。
 - application-agent_cua：记录 ego-browser 填表状态、task space、观察结果、已验证字段、已保存页面、上传材料、阻塞弹窗和失败原因；不直接控制浏览器。
-- application-agent_native_dialog：读取 Terra 管理的 Ego 原生弹窗全文，并仅关闭没有输入框的单按钮 alert；iframe 弹窗导致 Runtime.evaluate 超时时先用它，禁止刷新页面兜底。
 - application-agent_risk：高风险动作识别和硬拦截。
 - application-agent_requirements：保存学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
 
@@ -935,14 +724,14 @@ ${command[2]}
 }
 
 function renderApplicationAgentTools() {
-  return String.raw`import { randomUUID } from "node:crypto"
-import { existsSync } from "node:fs"
+  return String.raw`import { existsSync } from "node:fs"
 import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises"
 import { basename, dirname, extname, join, relative, resolve } from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
+const EGO_OBSERVE_PAGE_ACTION_SOURCE = ${JSON.stringify(EGO_OBSERVE_PAGE_ACTION_SOURCE)}
 
 type ToolContext = { directory?: string; sessionID?: string; messageID?: string; threadID?: string; agent?: string; root?: string; worktree?: string }
 type JsonSchema = Record<string, unknown>
@@ -1145,24 +934,6 @@ function appendLimited(progress: any, key: string, item: any, limit = 120) {
   if (!Array.isArray(progress[key])) progress[key] = []
   progress[key].push(item)
   if (progress[key].length > limit) progress[key] = progress[key].slice(progress[key].length - limit)
-}
-
-function parseJsonObjectFromText(text: string) {
-  const raw = String(text || "").trim()
-  if (!raw) return undefined
-  try {
-    return JSON.parse(raw)
-  } catch {}
-  const first = raw.indexOf("{")
-  if (first < 0) return undefined
-  for (let end = raw.length; end > first; end -= 1) {
-    const chunk = raw.slice(first, end).trim()
-    if (!chunk.endsWith("}")) continue
-    try {
-      return JSON.parse(chunk)
-    } catch {}
-  }
-  return undefined
 }
 
 async function listFiles(dir: string): Promise<string[]> {
@@ -2043,205 +1814,6 @@ export const risk = {
   },
 }
 
-export const native_dialog = {
-  description: "Inspect or acknowledge a Chromium native application dialog in the exact Terra-managed Ego Lite process. It reads complete AXCustomContent text without OCR and may acknowledge only the same recently inspected single-button alert; it never navigates, fills a page, refreshes, or controls another app.",
-  args: inputArg({
-    action: { type: "string", enum: ["inspect", "acknowledge_single_button", "read_latest"], description: "Read the live dialog, safely acknowledge a verified single-button alert, or read the last wrapper-captured dialog event." },
-    taskSpaceId: { type: "string", description: "Numeric ego-browser task-space ID already saved for this application." },
-    taskSpaceName: { type: "string", description: "Saved Ego task-space/window name." },
-    currentUrl: { type: "string", description: "Last observed application URL; its origin anchors the native dialog." },
-    pageTitle: { type: "string", description: "Last observed page title for the audit record." },
-    dialogFingerprint: { type: "string", description: "Exact fingerprint returned by the immediately preceding inspect action; required for acknowledgement." },
-  }, ["action", "taskSpaceId"]),
-  async execute(args, ctx) {
-    const input = args.input || {}
-    const workspace = root(ctx)
-    const action = String(input.action || "")
-    const progress = ensureCuaProgress(await readJson(join(workspace, "03_state/application_progress.json"), {}))
-    const taskSpaceId = String(input.taskSpaceId || "").trim()
-    const currentUrl = String(progress.currentUrl || "").trim()
-    const pageTitle = String(progress.currentPage || "").trim()
-    const taskSpaceName = String(progress.egoBrowser?.taskSpaceName || "").trim()
-    const contextOverrideError =
-      (input.currentUrl && String(input.currentUrl).trim() !== currentUrl) ||
-      (input.pageTitle && String(input.pageTitle).trim() !== pageTitle) ||
-      (input.taskSpaceName && String(input.taskSpaceName).trim() !== taskSpaceName)
-        ? "BROWSER_AUDIT_MISMATCH: native dialog actions must use the saved task-space name, URL, and page title without caller overrides."
-        : ""
-    const auditError = requireNumericTaskSpaceId(taskSpaceId) || browserTaskSpaceMismatch(progress, taskSpaceId) || contextOverrideError
-    if (auditError) {
-      await appendAudit(workspace, "native_dialog", action, "failed", auditError, ctx)
-      return auditError
-    }
-    await appendAudit(workspace, "native_dialog", action, "started", currentUrl + " | " + pageTitle, ctx)
-
-    if (action === "read_latest") {
-      const latest = await readJson(join(workspace, "03_state/native_dialog_last.json"), undefined)
-      if (!latest) {
-        await appendAudit(workspace, "native_dialog", action, "completed", "no captured dialog", ctx)
-        return JSON.stringify({ status: "none", detail: "No wrapper-captured native dialog event exists for this workspace." }, null, 2)
-      }
-      const recordedAt = Date.parse(latest.recordedAt || "")
-      const evidenceAge = Date.now() - recordedAt
-      const evidenceMatches = latest.schemaVersion === 1 &&
-        typeof latest.eventId === "string" &&
-        latest.eventId.length > 0 &&
-        latest.taskSpaceId === taskSpaceId &&
-        latest.taskSpaceName === taskSpaceName &&
-        latest.currentUrl === currentUrl &&
-        Number.isFinite(recordedAt) &&
-        evidenceAge >= 0 &&
-        evidenceAge <= 10 * 60_000 &&
-        !latest.consumedAt &&
-        latest.status !== "none"
-      if (!evidenceMatches) {
-        const detail = "BROWSER_DIALOG_EVIDENCE_STALE: the saved native-dialog event is missing provenance, belongs to another task/URL, is already consumed, or is older than ten minutes. Inspect the live dialog again; do not reuse this evidence."
-        await appendAudit(workspace, "native_dialog", action, "failed", detail, ctx)
-        return detail
-      }
-      progress.pendingNativeDialogEvent = {
-        eventId: latest.eventId,
-        taskSpaceId,
-        currentUrl,
-        status: latest.status,
-        readAt: new Date().toISOString(),
-      }
-      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendAudit(workspace, "native_dialog", action, "completed", JSON.stringify(latest), ctx)
-      return JSON.stringify({
-        ...latest,
-        nextAction: latest.status === "acknowledged"
-          ? "Use the complete dialogText/customContent as evidence, call application-agent_cua record_blocker with blockerDisposition=resolved and nativeDialogEventId=" + latest.eventId + ", end this browser round, then begin a new round with pageInfo()."
-          : latest.status === "observed" && latest.candidateCount === 1 && Array.isArray(latest.buttonLabels) && latest.buttonLabels.length === 1 && latest.hasTextField === false && latest.treeTruncated === false && latest.axReadComplete === true && latest.customContentPresent === true && latest.customContentDecoded === true && typeof latest.fingerprint === "string" && latest.fingerprint.length > 0
-            ? "Read the complete dialogText/customContent. If it is a genuine acknowledgement alert, call inspect for this same task-space ID and URL, then acknowledge_single_button within 30 seconds with the exact returned dialogFingerprint. Otherwise hand off. Never refresh or retry the browser round."
-            : "Preserve the complete dialogText, customContent, and button evidence; call record_blocker with nativeDialogEventId=" + latest.eventId + " and hand off the unclear or unsafe dialog. Do not refresh or retry the browser round.",
-      }, null, 2)
-    }
-
-    if (!currentUrl || !taskSpaceName) {
-      const detail = "BROWSER_AUDIT_REQUIRED: native dialog inspection requires currentUrl and taskSpaceName from the saved Ego task space."
-      await appendAudit(workspace, "native_dialog", action, "failed", detail, ctx)
-      return detail
-    }
-    if (action === "acknowledge_single_button") {
-      const inspected = await readJson(join(workspace, "03_state/native_dialog_last.json"), undefined)
-      const inspectedAt = Date.parse(inspected?.recordedAt || "")
-      const inspectionAge = Date.now() - inspectedAt
-      const inspectionMatches = inspected?.status === "observed" &&
-        inspected?.clicked === false &&
-        inspected?.candidateCount === 1 &&
-        Array.isArray(inspected?.buttonLabels) &&
-        inspected.buttonLabels.length === 1 &&
-        inspected?.hasTextField === false &&
-        inspected?.treeTruncated === false &&
-        inspected?.axReadComplete === true &&
-        inspected?.customContentPresent === true &&
-        inspected?.customContentDecoded === true &&
-        typeof inspected?.fingerprint === "string" &&
-        inspected.fingerprint.length > 0 &&
-        String(input.dialogFingerprint || "") === inspected.fingerprint &&
-        inspected?.taskSpaceId === taskSpaceId &&
-        inspected?.taskSpaceName === taskSpaceName &&
-        inspected?.currentUrl === currentUrl &&
-        Number.isFinite(inspectedAt) &&
-        inspectionAge >= 0 &&
-        inspectionAge <= 30_000
-      if (!inspectionMatches) {
-        const detail = "BROWSER_DIALOG_INSPECTION_REQUIRED: first call inspect for this exact task space and URL, read the complete dialog text, then acknowledge within 30 seconds using the exact dialogFingerprint."
-        await appendAudit(workspace, "native_dialog", action, "failed", detail, ctx)
-        return detail
-      }
-    }
-    const runtimeApp = join(process.env.HOME || "", "Library/Application Support/edu.terra.application-agent/ego-lite-runtime/ego lite.app")
-    const guard = join(workspace, ".opencode/bin/terra-dialog-guard")
-    if (!existsSync(guard)) {
-      const detail = "TERRA_EGO_NATIVE_DIALOG_UNAVAILABLE: generated dialog-guard wrapper is missing. Refresh this application workspace before continuing browser automation."
-      await appendAudit(workspace, "native_dialog", action, "failed", detail, ctx)
-      return detail
-    }
-    const processLookup = Bun.spawn(["/usr/bin/pgrep", "-f", runtimeApp + "/Contents/MacOS/ego lite"], { stdout: "pipe", stderr: "pipe" })
-    const [processLookupStatus, processLookupOutput] = await Promise.all([processLookup.exited, new Response(processLookup.stdout).text()])
-    const processIdentifiers = processLookupOutput.split(/\s+/).map((value) => value.trim()).filter((value) => /^\d+$/.test(value))
-    if (processLookupStatus !== 0 || processIdentifiers.length !== 1) {
-      const detail = processIdentifiers.length > 1
-        ? "TERRA_EGO_NATIVE_DIALOG_TARGET_AMBIGUOUS: multiple Terra-managed Ego Lite main processes are running; no dialog was read or clicked."
-        : "TERRA_EGO_NATIVE_DIALOG_TARGET_MISSING: the exact Terra-managed Ego Lite process is not running."
-      await appendAudit(workspace, "native_dialog", action, "failed", detail, ctx)
-      return detail
-    }
-    const guardArguments = [
-      guard,
-      action === "acknowledge_single_button" ? "acknowledge" : "inspect",
-      "--bundle-id", "com.citrolabs.ego.lite",
-      "--pid", processIdentifiers[0],
-      "--executable-path-prefix", runtimeApp,
-      "--window-title", taskSpaceName,
-      "--expected-url", currentUrl,
-    ]
-    if (action === "acknowledge_single_button") {
-      guardArguments.push("--expected-fingerprint", String(input.dialogFingerprint || ""))
-    }
-    const child = Bun.spawn(guardArguments, { stdout: "pipe", stderr: "pipe" })
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ])
-    const result = parseJsonObjectFromText(stdout)
-    if (!result) {
-      const detail = "TERRA_EGO_NATIVE_DIALOG_FAILED: helper exit " + exitCode + ": " + String(stderr || stdout || "no structured output")
-      await appendAudit(workspace, "native_dialog", action, "failed", detail, ctx)
-      return detail
-    }
-    const priorInspection = action === "acknowledge_single_button"
-      ? await readJson(join(workspace, "03_state/native_dialog_last.json"), undefined)
-      : undefined
-    const event = {
-      ...result,
-      schemaVersion: 1,
-      eventId: action === "acknowledge_single_button" && priorInspection?.eventId ? priorInspection.eventId : randomUUID(),
-      source: "tool",
-      taskSpaceId,
-      taskSpaceName,
-      currentUrl,
-      pageTitle,
-      recordedAt: new Date().toISOString(),
-    }
-    await writeJson(join(workspace, "03_state/native_dialog_last.json"), event)
-    if (result.status !== "none") {
-      const events = await readJson(join(workspace, "03_state/native_dialog_events.json"), [])
-      const list = Array.isArray(events) ? events : []
-      list.push(event)
-      await writeJson(join(workspace, "03_state/native_dialog_events.json"), list.slice(-120))
-      progress.pendingNativeDialogEvent = {
-        eventId: event.eventId,
-        taskSpaceId,
-        currentUrl,
-        status: result.status,
-        readAt: new Date().toISOString(),
-      }
-      await appendLog(workspace, "cua", "原生弹窗 " + result.status + "：" + (Array.isArray(result.dialogText) ? result.dialogText.join(" | ") : result.detail || "无文字"))
-    } else {
-      delete progress.pendingNativeDialogEvent
-    }
-    await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-    await appendAudit(workspace, "native_dialog", action, exitCode === 0 ? "completed" : "failed", JSON.stringify(result), ctx)
-    return JSON.stringify({
-      ...event,
-      taskSpaceId,
-      currentUrl,
-      pageTitle,
-      nextAction: result.status === "acknowledged"
-        ? "Call application-agent_cua record_blocker with blockerDisposition=resolved, nativeDialogEventId=" + event.eventId + ", and the full dialogText/customContent as evidence; end this browser round. The next round must begin with pageInfo()."
-        : result.status === "observed"
-          ? "If this is a fully decoded single-button validation alert, call this tool again with acknowledge_single_button and dialogFingerprint=" + String(result.fingerprint || "") + ". Otherwise call record_blocker with nativeDialogEventId=" + event.eventId + " and hand off. Do not refresh, navigate, or run page JavaScript."
-          : result.status === "permission_required"
-            ? "Stop browser retries. Terra-Edu needs macOS Accessibility permission before it can preserve and close native dialog text."
-            : "Do not refresh or retry. Preserve this result and decide from the complete AX text and button list.",
-    }, null, 2)
-  },
-}
-
 export const cua = {
   description: "Coordinate ego-browser / ego lite application-platform filling. This tool does not directly control Chrome or call cua-driver. Use the official ego-browser skill for browser actions, then call this tool to record task space, observations, verified fields, verified saves, uploads, blockers, failures, and audit state.",
   args: inputArg({
@@ -2249,7 +1821,9 @@ export const cua = {
     applicationUrl: { type: "string", description: "Application platform URL, defaults to task input." },
     taskSpaceName: { type: "string", description: "ego-browser task space name for this application task." },
     taskSpaceId: { type: "string", description: "String form of the numeric ego-browser task.id returned by useOrCreateTaskSpace." },
-    currentUrl: { type: "string", description: "Current URL reported by ego-browser pageInfo." },
+    currentUrl: { type: "string", description: "Top-level current URL reported by the most recent unobstructed ego-browser pageInfo. Never pass an iframe dialog URL here." },
+    dialogUrl: { type: "string", description: "For record_blocker only: the native dialog source URL from pageInfo().dialog.url, which may be an iframe URL." },
+    dialogFrameId: { type: "string", description: "For record_blocker only: the native dialog frameId from pageInfo().dialog.frameId." },
     pageTitle: { type: "string", description: "Current page title reported by ego-browser pageInfo or snapshot." },
     fieldLabel: { type: "string", description: "Human-readable field label, such as State, Institution, Current Title." },
     text: { type: "string", description: "Field value, selected option, page summary, or observation text." },
@@ -2261,7 +1835,6 @@ export const cua = {
     confirmed: { type: "boolean", description: "Required true for record_save_verified after ego-browser verified there are no required-field or validation errors." },
     consultantConfirmed: { type: "boolean", description: "Required true after the consultant explicitly chose to resume a handed-off task space, or to resolve an old workspace that has no saved taskSpaceId." },
     blockerDisposition: { type: "string", enum: ["resolved", "handoff"], description: "Required for record_blocker: resolved after a safe dialog response, or handoff after control was given to the consultant." },
-    nativeDialogEventId: { type: "string", description: "Stable eventId returned by application-agent_native_dialog; required while a native-dialog event is pending." },
     handoffType: { type: "string", enum: ["login", "browser_takeover"], description: "For handoff_to_consultant: login only for an observed login/authentication need; browser_takeover for dialogs, user takeover, or other manual intervention." },
     detail: { type: "string", description: "Operation detail, failure reason, saved page, upload material, or high-risk action" },
   }, ["action"]),
@@ -2310,14 +1883,16 @@ export const cua = {
       progress.egoBrowser = {
         ...(progress.egoBrowser || {}),
         taskSpaceId: savedTaskSpaceId,
-        handoffPending: false,
-        resumedAt: new Date().toISOString(),
+        handoffPending: true,
+        takeoverPending: true,
+        resumeAuthorizedAt: new Date().toISOString(),
+        resumedAt: undefined,
       }
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", "已恢复 ego-browser 填表上下文：" + savedTaskSpaceId)
-      await saveTask(workspace, task, "正在填写申请平台", "ego-browser task space 已恢复，Agent 可继续通过官方 skill 填写。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "resumed ego-browser task space")
-      return "ego-browser 填表上下文已恢复。下一轮 Bash heredoc 必须使用 takeOverTaskSpace(" + JSON.stringify(savedTaskSpaceId) + ")，先 pageInfo() 观察；不得改用 useOrCreateTaskSpace 抢回顾问已交接的 Space。"
+      await appendLog(workspace, "cua", "顾问已授权恢复 ego-browser，等待实际接管并观察：" + savedTaskSpaceId)
+      await saveTask(workspace, task, "等待顾问接管浏览器", "顾问已授权 Agent 恢复；只有 takeOverTaskSpace 成功且首个 pageInfo 观察被记录后，才算真正恢复。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "consultant authorized ego-browser takeover")
+      return "顾问已授权恢复，但 task space 尚未标记为已接管。下一轮 Bash heredoc 必须使用 takeOverTaskSpace(" + JSON.stringify(savedTaskSpaceId) + ")，第一步只调用 pageInfo()；成功后以真实顶层 URL、标题和证据调用 record_observation，届时才会清除 handoffPending。不得改用 useOrCreateTaskSpace。"
     }
     if (input.action === "prepare_ego_task") {
       const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
@@ -2397,7 +1972,7 @@ export const cua = {
         const activeTaskSpaceId = savedTaskSpaceId || selectedFreshTaskSpaceId
         return [
           selectedFreshTaskSpaceId
-            ? "已保存刚创建的数值 ego-browser taskSpaceId。现在由带原生弹窗守卫的新回合打开申请网址。"
+            ? "已保存刚创建的数值 ego-browser taskSpaceId。现在按直接 Ego 观察协议在新回合打开申请网址。"
             : "已找到保存的数值 ego-browser taskSpaceId。正常回合只可复用这个 ID，不得按名称新建或匹配空间。",
           "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
           "const taskSpaceId = " + JSON.stringify(activeTaskSpaceId),
@@ -2410,12 +1985,30 @@ export const cua = {
           "  const beforeNavigation = await pageInfo()",
           ...(selectedFreshTaskSpaceId
             ? [
-                "  if (!(beforeNavigation && typeof beforeNavigation === 'object' && 'dialog' in beforeNavigation)) await openOrReuseTab(" + JSON.stringify(url) + ", { wait: true, timeout: 30 })",
-                "  const info = await pageInfo()",
+                ...EGO_OBSERVE_PAGE_ACTION_SOURCE.split("\n").map((line) => "  " + line),
+                "  const navigation = beforeNavigation && typeof beforeNavigation === 'object' && 'dialog' in beforeNavigation",
+                "    ? { kind: 'dialog', info: beforeNavigation }",
+                "    : await observePageAction(() => openOrReuseTab(" + JSON.stringify(url) + ", { wait: true, timeout: 30 }), { actionTimeoutMs: 30000 })",
+                "  if (navigation.kind === 'dialog') {",
+                "    const dialog = navigation.info.dialog",
+                "    if (dialog.type === 'alert') await cdp('Page.handleJavaScriptDialog', { accept: true })",
+                "    if (dialog.type === 'beforeunload') await cdp('Page.handleJavaScriptDialog', { accept: false })",
+                "    if ((dialog.type === 'alert' || dialog.type === 'beforeunload') && navigation.actionPromise) await Promise.race([navigation.actionPromise, new Promise((resolve) => setTimeout(resolve, 2000))])",
+                "    const handoff = dialog.type === 'confirm' || dialog.type === 'prompt' ? await handOffTaskSpace(task.id) : undefined",
+                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: 'dialog', dialog, handoff }, null, 2))",
+                "  } else if (navigation.kind === 'action' && navigation.action.status === 'resolved') {",
+                "    const info = navigation.info",
+                "    const snapshot = info && typeof info === 'object' && 'dialog' in info ? undefined : await snapshotText()",
+                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: 'action', info, snapshot }, null, 2))",
+                "  } else {",
+                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: navigation.kind, info: navigation.info, action: navigation.action, error: navigation.error }, null, 2))",
+                "  }",
               ]
-            : ["  const info = beforeNavigation"]),
-          "  const snapshot = info && typeof info === 'object' && 'dialog' in info ? undefined : await snapshotText()",
-          "  cliLog(JSON.stringify({ taskSpaceId: task.id, info, snapshot }, null, 2))",
+            : [
+                "  const info = beforeNavigation",
+                "  const snapshot = info && typeof info === 'object' && 'dialog' in info ? undefined : await snapshotText()",
+                "  cliLog(JSON.stringify({ taskSpaceId: task.id, info, snapshot }, null, 2))",
+              ]),
           "}",
           "EOF",
           "若空间不是 agent ownership、显示 inactive，或命令报告 user is controlling，立即停止浏览器命令，并以保存的 taskSpaceId、当前 URL、标题和 listTaskSpaces/错误证据调用 handoff_to_consultant（handoffType: browser_takeover）。",
@@ -2436,7 +2029,7 @@ export const cua = {
       return [
         "ego-browser 填表任务已准备。下一步必须使用官方 ego-browser skill，不要调用 cua-driver。",
         "",
-        "首轮只创建隔离 task space 并返回数值 ID；不得在同一回合打开学校网址。拿到 ID 后立刻再次调用 prepare_ego_task 并传 taskSpaceId，下一回合才会在原生弹窗守卫下导航。",
+        "首轮只创建隔离 task space 并返回数值 ID；不得在同一回合打开学校网址。拿到 ID 后立刻再次调用 prepare_ego_task 并传 taskSpaceId，下一回合才会按直接 Ego 观察协议导航。",
         "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
         "const task = await useOrCreateTaskSpace(" + JSON.stringify(taskSpaceName) + ")",
         "const initialInfo = await pageInfo()",
@@ -2467,6 +2060,10 @@ export const cua = {
       progress.currentPage = pageTitle
       progress.currentUrl = currentUrl
       progress.lastObservedAt = new Date().toISOString()
+      const takeoverCompleted =
+        progress.egoBrowser?.takeoverPending === true &&
+        progress.egoBrowser?.handoffPending === true &&
+        Boolean(progress.egoBrowser?.resumeAuthorizedAt)
       progress.lastBrowserObservation = {
         at: progress.lastObservedAt,
         taskSpaceId,
@@ -2480,11 +2077,18 @@ export const cua = {
         taskSpaceName: input.taskSpaceName || progress.egoBrowser?.taskSpaceName || "",
         lastSnapshotSummary: evidence,
         lastObservedAt: progress.lastObservedAt,
+        ...(takeoverCompleted
+          ? {
+              handoffPending: false,
+              takeoverPending: false,
+              resumedAt: progress.lastObservedAt,
+            }
+          : {}),
       }
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", "ego-browser 页面观察已记录：" + (progress.currentPage || "申请平台页面"))
-      await saveTask(workspace, task, "正在填写申请平台", "已通过 ego-browser snapshot/pageInfo 观察当前页面，准备继续小步填写。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "recorded ego-browser observation")
+      await appendLog(workspace, "cua", (takeoverCompleted ? "ego-browser 已实际恢复并记录首个页面观察：" : "ego-browser 页面观察已记录：") + (progress.currentPage || "申请平台页面"))
+      await saveTask(workspace, task, "正在填写申请平台", takeoverCompleted ? "已成功接管 task space 并记录首个 pageInfo 观察。" : "已通过 ego-browser snapshot/pageInfo 观察当前页面，准备继续小步填写。")
+      await appendAudit(workspace, "cua", auditAction, "completed", takeoverCompleted ? "completed authorized ego-browser takeover" : "recorded ego-browser observation")
       return "ego-browser 页面观察已记录。基于这次观察完成一个逻辑动作组后必须再次 pageInfo()；无 dialog 时再 snapshotText 或截图验证并结束本回合。"
     }
     if (input.action === "record_field_verified" || input.action === "record_select_verified") {
@@ -2558,31 +2162,15 @@ export const cua = {
       ensureCuaProgress(progress)
       const taskSpaceId = String(input.taskSpaceId || "").trim()
       const currentUrl = String(input.currentUrl || progress.currentUrl || "").trim()
+      const dialogUrl = String(input.dialogUrl || "").trim()
+      const dialogFrameId = String(input.dialogFrameId || "").trim()
       const pageTitle = String(input.pageTitle || progress.currentPage || "").trim()
       const evidence = String(input.evidence || input.text || "").trim()
       const disposition = input.blockerDisposition === "resolved" || input.blockerDisposition === "handoff" ? input.blockerDisposition : ""
-      const nativeDialogEventId = String(input.nativeDialogEventId || "").trim()
-      const pendingNativeDialog = progress.pendingNativeDialogEvent
-      const nativeDialog = pendingNativeDialog || nativeDialogEventId
-        ? await readJson(join(workspace, "03_state/native_dialog_last.json"), undefined)
-        : undefined
-      const nativeDialogError = pendingNativeDialog || nativeDialogEventId
-        ? !pendingNativeDialog ||
-          !nativeDialogEventId ||
-          nativeDialogEventId !== pendingNativeDialog.eventId ||
-          nativeDialog?.eventId !== nativeDialogEventId ||
-          nativeDialog?.taskSpaceId !== taskSpaceId ||
-          nativeDialog?.currentUrl !== currentUrl ||
-          nativeDialog?.consumedAt ||
-          (disposition === "resolved" && nativeDialog?.status !== "acknowledged")
-          ? "BROWSER_DIALOG_EVENT_REQUIRED: record this blocker with the unconsumed nativeDialogEventId returned by native_dialog; resolved requires an acknowledged event."
-          : ""
-        : ""
       const auditError =
         browserAuditError(auditAction, { taskSpaceId, currentUrl, pageTitle, evidence, blockerDisposition: disposition }) ||
         requireNumericTaskSpaceId(taskSpaceId) ||
-        browserTaskSpaceMismatch(progress, taskSpaceId) ||
-        nativeDialogError
+        browserTaskSpaceMismatch(progress, taskSpaceId)
       if (auditError) {
         appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: auditError, page: progress.currentPage || "" })
         await writeJson(join(workspace, "03_state/application_progress.json"), progress)
@@ -2595,10 +2183,11 @@ export const cua = {
         disposition,
         taskSpaceId,
         currentUrl,
+        dialogUrl,
+        dialogFrameId,
         pageTitle,
         detail: input.detail || input.text || "ego-browser blocker",
         evidence,
-        nativeDialogEventId,
         backend: "ego-browser",
       })
       progress.currentUrl = currentUrl
@@ -2607,9 +2196,13 @@ export const cua = {
         ...(progress.egoBrowser || {}),
         taskSpaceId,
         lastBlockerUrl: currentUrl,
+        lastDialogUrl: dialogUrl,
+        lastDialogFrameId: dialogFrameId,
         lastBlockerTitle: pageTitle,
         lastBlockerEvidence: evidence,
         handoffPending: disposition === "handoff",
+        takeoverPending: false,
+        resumeAuthorizedAt: disposition === "handoff" ? undefined : progress.egoBrowser?.resumeAuthorizedAt,
         ...(disposition === "handoff"
           ? {
               handoffAt: new Date().toISOString(),
@@ -2624,14 +2217,6 @@ export const cua = {
       delete progress.lastBrowserObservation
       progress.lastObservedAt = ""
       progress.dynamicFormChecks = []
-      if (nativeDialogEventId && nativeDialog) {
-        await writeJson(join(workspace, "03_state/native_dialog_last.json"), {
-          ...nativeDialog,
-          consumedAt: new Date().toISOString(),
-          consumedDisposition: disposition,
-        })
-        delete progress.pendingNativeDialogEvent
-      }
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       if (disposition === "resolved") {
         await appendLog(workspace, "cua", "ego-browser 已安全处理阻塞：" + (input.detail || "未命名浏览器阻塞"))
@@ -2669,6 +2254,8 @@ export const cua = {
         taskSpaceId,
         handoffAt: new Date().toISOString(),
         handoffPending: true,
+        takeoverPending: false,
+        resumeAuthorizedAt: undefined,
         handoffReason: input.detail || "需要顾问接管 ego-browser Space。",
         handoffType,
       }
@@ -2943,6 +2530,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
       rm(join(base, name), { recursive: true, force: true }),
     ),
   )
+  await rm(join(base, "bin", ["terra", "dialog", "guard"].join("-")), { force: true })
   await writeGeneratedJson(join(base, "opencode.json"), {
     $schema: "https://opencode.ai/config.json",
     model: APPLICATION_AGENT_MODEL,
@@ -3061,7 +2649,6 @@ ${DEFAULT_APPLICATION_PROMPT}
   await writeEgoBrowserSkill(base)
   await writeEgoBrowserWrapper(base, overrides)
   await writeTerraPaddleOcrWrapper(base)
-  await writeTerraDialogGuardWrapper(base, overrides)
   for (const command of COMMAND_DEFINITIONS) {
     await writeGeneratedFile(join(base, "commands", `${command[0]}.md`), renderCommand(command))
   }

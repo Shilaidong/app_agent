@@ -188,7 +188,9 @@ async function createFixture(workspace: string) {
     { tool: "application-agent_state", context: { directory: workspace } },
   ])
   await mkdir(join(workspace, ".opencode/node_modules"), { recursive: true })
+  await mkdir(join(workspace, ".opencode/bin"), { recursive: true })
   await writeFile(join(workspace, ".opencode/node_modules/stale-dependency.txt"), "must not survive a config refresh\n", "utf8")
+  await writeFile(join(workspace, ".opencode/bin/terra-dialog-guard"), "obsolete native dialog sidecar\n", "utf8")
   await writeFile(join(workspace, ".opencode/legacy-config.txt"), "must survive a config refresh\n", "utf8")
   await writeOpenCodeConfig(workspace)
 }
@@ -203,7 +205,6 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
     ".opencode/prompts/application-agent.md",
     ".opencode/tools/application-agent.ts",
     ".opencode/bin/ego-browser",
-    ".opencode/bin/terra-dialog-guard",
     "03_state/task_state.json",
     "03_state/application_progress.json",
     "03_state/cua_control.json",
@@ -213,6 +214,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
     assertNonEmptyFile(join(workspace, file))
   }
   assert(!existsSync(join(workspace, ".opencode/node_modules")), "Config refresh must replace stale OpenCode dependency artifacts.")
+  assert(!existsSync(join(workspace, ".opencode/bin/terra-dialog-guard")), "Config refresh must remove the retired native dialog sidecar from old workspaces.")
   assert(readText(join(workspace, ".opencode/legacy-config.txt")) === "must survive a config refresh\n", "Config refresh must preserve unrelated advisor workspace files.")
 
   const wrapper = join(workspace, ".opencode/bin/ego-browser")
@@ -238,18 +240,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(wrapperSource.includes("TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE"), "Workspace wrapper must leave an external compatible Ego Lite service untouched.")
   assert(wrapperSource.includes("exit 76"), "Workspace wrapper must report browser-service failures with a non-127 exit code.")
   assert(!wrapperSource.includes("cua_control.json"), "Legacy cua_control.stopped must never gate the ego-browser wrapper.")
-  assert(wrapperSource.includes("watch-and-acknowledge"), "Workspace wrapper must arm the action-scoped native-dialog guard.")
-  assert(wrapperSource.includes('--pid "$EGO_PID"') && wrapperSource.includes('--expected-url "$EXPECTED_URL"'), "Workspace native-dialog guard must bind to the managed Ego PID and application origin.")
-  assert(wrapperSource.includes('"$DIALOG_GUARD" inspect') && wrapperSource.includes("本次预检只读取、没有点击"), "Workspace preflight must read but never acknowledge a pre-existing dialog.")
-  assert(wrapperSource.includes("--ready-output") && wrapperSource.includes("--require-task-space-context"), "Workspace dialog watcher must establish its baseline before the Ego action and verify the visible task-space context.")
-  assert(wrapperSource.includes("if [ ! -s \"$DIALOG_READY_FILE\" ]") && wrapperSource.includes("TERRA_EGO_NATIVE_DIALOG_GUARD_UNAVAILABLE"), "Workspace wrapper must fail closed when the native-dialog baseline cannot be established.")
-  assert(wrapperSource.includes("DIALOG_WATCH_NATURAL_EXIT") && wrapperSource.includes("且没有留下有效事件"), "Workspace wrapper must reject a watcher that exits naturally without durable evidence.")
-  assert(wrapperSource.includes("native_dialog_last.json") && wrapperSource.includes("schemaVersion") && wrapperSource.includes("eventId") && wrapperSource.includes("taskSpaceId") && wrapperSource.includes("currentUrl"), "Workspace wrapper must persist provenance-bound native-dialog evidence before ending a round.")
-
-  const nativeDialogWrapper = join(workspace, ".opencode/bin/terra-dialog-guard")
-  assert((statSync(nativeDialogWrapper).mode & 0o111) !== 0, "Workspace native-dialog wrapper must be executable.")
-  const nativeDialogWrapperSyntax = spawnSync("/bin/sh", ["-n", nativeDialogWrapper], { encoding: "utf8" })
-  assert(nativeDialogWrapperSyntax.status === 0, `Workspace native-dialog wrapper must be valid POSIX shell: ${nativeDialogWrapperSyntax.stderr || "unknown syntax error"}`)
+  assert(!wrapperSource.includes("TERRA_EGO_NATIVE_DIALOG") && !wrapperSource.includes("AXApplicationDialog"), "Workspace wrapper must not contain the retired Accessibility dialog sidecar.")
 
   for (const skill of skills) {
     const body = readText(join(workspace, ".opencode/skills", skill, "SKILL.md"))
@@ -262,10 +253,14 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(egoSkill.includes('PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs'), "ego-browser skill must use the Terra-Edu wrapper.")
   assert(egoSkill.includes("handOffTaskSpace"), "ego-browser skill must document consultant handoff.")
   assert(egoSkill.includes("Never call `takeOverTaskSpace` on your own"), "ego-browser skill must forbid automatic task-space takeover.")
+  assert(egoSkill.includes("pageInfoTimeoutMs = 1500") && egoSkill.includes("settleMs = 2000"), "ego-browser skill must bound each pageInfo call and observe a post-action quiet window.")
+  assert(egoSkill.includes("For every `confirm` or `prompt`") && egoSkill.includes("Do not choose an option or provide prompt text"), "ego-browser skill must hand off every confirm and prompt without guessing.")
+  assert(egoSkill.includes("dialogUrl") && egoSkill.includes("dialogFrameId"), "ego-browser skill must keep iframe dialog identity separate from the top-level current URL.")
+  assert(!egoSkill.includes("await openOrReuseTab('https://example.com'"), "ego-browser quick start must not bypass observePageAction during initial navigation.")
   const cuaSkill = readText(join(workspace, ".opencode/skills/cua-application-filling/SKILL.md"))
   assert(cuaSkill.includes("绝不自动抢回控制"), "CUA skill must forbid automatic task-space takeover.")
   assert(cuaSkill.includes("Page.handleJavaScriptDialog"), "CUA skill must guide native dialog handling.")
-  assert(cuaSkill.includes("application-agent_native_dialog"), "CUA skill must route iframe alert timeouts to the native-dialog tool.")
+  assert(cuaSkill.includes("observePageAction") && cuaSkill.includes("先启动动作但不 await"), "CUA skill must observe iframe dialogs while the triggering action is still pending.")
 
   const prompt = readText(join(workspace, ".opencode/prompts/application-agent.md"))
   assert(prompt.includes("snapshotText"), "Generated prompt must require observation before continuing browser work.")
@@ -278,7 +273,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   }
   assert(tools.includes("UNVERIFIED_SAVE_RECORDED"), "record_saved must not be treated as a verified save.")
   assert(tools.includes("browserBackend = \"ego-browser\""), "Workspace CUA tool must record the ego-browser backend.")
-  assert(tools.includes("export const native_dialog"), "Workspace tools must expose the native-dialog fallback.")
+  assert(!tools.includes("export const native_dialog") && !tools.includes("TERRA_EGO_NATIVE_DIALOG"), "Workspace tools must omit the retired native-dialog fallback.")
 
   const task = readRecord(join(workspace, "03_state/task_state.json"))
   const input = task.input
@@ -348,9 +343,6 @@ type GeneratedCuaTool = {
   cua: {
     execute: (args: { input: Record<string, unknown> }, ctx: { directory: string }) => Promise<unknown>
   }
-  native_dialog: {
-    execute: (args: { input: Record<string, unknown> }, ctx: { directory: string }) => Promise<unknown>
-  }
 }
 
 async function verifyCuaStateTransitions(workspace: string) {
@@ -378,59 +370,29 @@ async function verifyCuaStateTransitions(workspace: string) {
 
   const generatedTools = (await import(pathToFileURL(join(workspace, ".opencode/tools/application-agent.ts")).href)) as GeneratedCuaTool
   const executeCua = (input: Record<string, unknown>) => generatedTools.cua.execute({ input }, { directory: workspace })
-  const executeNativeDialog = (input: Record<string, unknown>) => generatedTools.native_dialog.execute({ input }, { directory: workspace })
   const url = "https://fixture.example/application"
   const title = "Fixture application form"
 
-  await writeJson(join(workspace, "03_state/native_dialog_last.json"), {
-    schemaVersion: 1,
-    eventId: "fixture-native-dialog-event",
-    source: "wrapper",
-    status: "acknowledged",
-    dialogText: ["Fixture validation alert", "- Date must use dd/mm/yyyy"],
-    buttonLabels: ["OK"],
-    candidateCount: 1,
-    hasTextField: false,
-    treeTruncated: false,
-    axReadComplete: true,
-    customContentPresent: true,
-    customContentDecoded: true,
-    customContent: [{ label: "message", value: "Fixture validation alert\n- Date must use dd/mm/yyyy", source: "decoded" }],
-    fingerprint: "fnv1a64:fixture-native-dialog",
-    clicked: true,
-    processIdentifier: 123,
-    taskSpaceId: "101",
-    taskSpaceName: "Fixture task space",
-    currentUrl: url,
-    pageTitle: title,
-    recordedAt: new Date().toISOString(),
-  })
-  const capturedDialog = await executeNativeDialog({ action: "read_latest", taskSpaceId: "101" })
-  assert(String(capturedDialog).includes("Fixture validation alert"), "native_dialog read_latest must preserve captured AX text for the text-only model.")
-  assert(String(capturedDialog).includes("fnv1a64:fixture-native-dialog") && String(capturedDialog).includes('"customContentPresent": true'), "native_dialog read_latest must preserve the bound fingerprint and proven AXCustomContent provenance.")
-  assert(String(capturedDialog).includes("application-agent_cua record_blocker"), "native_dialog read_latest must force blocker recording and a fresh browser round.")
-  const resolvedNativeDialog = await executeCua({
+  const resolvedDialog = await executeCua({
     action: "record_blocker",
     taskSpaceId: "101",
     currentUrl: url,
     pageTitle: title,
-    evidence: "Captured native validation text says the date must use dd/mm/yyyy.",
-    detail: "Single-button native validation alert was acknowledged.",
+    evidence: JSON.stringify({
+      dialog: {
+        url: "https://fixture.example/frame",
+        frameId: "fixture-frame",
+        type: "alert",
+        message: "Fixture validation alert\n- Date must use dd/mm/yyyy",
+      },
+    }),
+    detail: "Direct Ego Page.handleJavaScriptDialog acknowledged the single-button validation alert.",
     blockerDisposition: "resolved",
-    nativeDialogEventId: "fixture-native-dialog-event",
   })
-  assert(String(resolvedNativeDialog).includes("已记录已解决"), "An acknowledged native event must flow through resolved blocker recording.")
-  const consumedNativeDialog = readRecord(join(workspace, "03_state/native_dialog_last.json"))
-  assert(consumedNativeDialog.consumedDisposition === "resolved" && typeof consumedNativeDialog.consumedAt === "string", "Resolved native evidence must be marked consumed.")
-  const reusedNativeDialog = await executeNativeDialog({ action: "read_latest", taskSpaceId: "101" })
-  assert(String(reusedNativeDialog).includes("BROWSER_DIALOG_EVIDENCE_STALE"), "Consumed native-dialog evidence must never be reused in a later blocker record.")
-  const acknowledgementWithoutFreshInspection = await executeNativeDialog({
-    action: "acknowledge_single_button",
-    taskSpaceId: "101",
-    taskSpaceName: "Fixture task space",
-    currentUrl: url,
-  })
-  assert(String(acknowledgementWithoutFreshInspection).includes("BROWSER_DIALOG_INSPECTION_REQUIRED"), "A native alert must not be acknowledged without a fresh matching inspection.")
+  assert(String(resolvedDialog).includes("已记录已解决"), "A directly handled Ego dialog must flow through resolved blocker recording.")
+  const resolvedProgress = readRecord(join(workspace, "03_state/application_progress.json"))
+  assert(Array.isArray(resolvedProgress.blockedDialogs), "Resolved direct-Ego dialogs must be retained in the audit state.")
+  assert(JSON.stringify(resolvedProgress.blockedDialogs).includes("Date must use dd/mm/yyyy"), "Resolved blocker evidence must preserve the complete validation message.")
 
   const resumeWithoutHandoff = await executeCua({ action: "resume_ego", taskSpaceId: "101", consultantConfirmed: true })
   assert(String(resumeWithoutHandoff).includes("BROWSER_HANDOFF_REQUIRED"), "resume_ego must reject a task space that was not handed off to the consultant.")
@@ -519,6 +481,8 @@ async function verifyCuaStateTransitions(workspace: string) {
     action: "record_blocker",
     taskSpaceId: "101",
     currentUrl: url,
+    dialogUrl: "https://fixture.example.test/embedded-validation-frame",
+    dialogFrameId: "fixture-frame-101",
     pageTitle: title,
     evidence: "A confirm dialog has an unclear consequence.",
     detail: "Unknown confirm dialog requires advisor handling.",
@@ -529,6 +493,9 @@ async function verifyCuaStateTransitions(workspace: string) {
   assert(!("lastBrowserObservation" in blockedProgress), "A blocker must invalidate the browser observation captured before the dialog.")
   assert(blockedProgress.lastObservedAt === "", "A blocker must clear the prior browser observation timestamp.")
   assert(Array.isArray(blockedProgress.dynamicFormChecks) && blockedProgress.dynamicFormChecks.length === 0, "A blocker must invalidate dynamic-form checks captured before the dialog.")
+  assert(blockedProgress.currentUrl === url, "An iframe dialog URL must never replace the top-level application URL.")
+  assert(blockedProgress.blockedDialogs?.at(-1)?.dialogUrl === "https://fixture.example.test/embedded-validation-frame", "A blocker must preserve the iframe dialog URL separately.")
+  assert(blockedProgress.blockedDialogs?.at(-1)?.dialogFrameId === "fixture-frame-101", "A blocker must preserve the iframe dialog frameId separately.")
 
   const prepareDuringHandoff = await executeCua({
     action: "prepare_ego_task",
@@ -545,8 +512,22 @@ async function verifyCuaStateTransitions(workspace: string) {
   })
   assert(String(resumedHandoff).includes('takeOverTaskSpace("101")'), "A consultant-confirmed handoff must resume only through the saved numeric task space.")
   assert(!String(resumedHandoff).includes("const task = await useOrCreateTaskSpace"), "A consultant-confirmed handoff must not silently recreate or claim a task space.")
-  assert(String(resumedHandoff).includes("先 pageInfo() 观察"), "The first recovered browser round must be observation-only.")
-  assert(readRecord(join(workspace, "03_state/application_progress.json")).egoBrowser?.handoffPending === false, "A successful consultant-confirmed resume must clear only the recorded handoff gate.")
+  assert(String(resumedHandoff).includes("第一步只调用 pageInfo()"), "The first recovered browser round must be observation-only.")
+  const authorizedProgress = readRecord(join(workspace, "03_state/application_progress.json"))
+  assert(authorizedProgress.egoBrowser?.handoffPending === true && authorizedProgress.egoBrowser?.takeoverPending === true, "Consultant authorization alone must not claim that browser takeover succeeded.")
+  assert(!authorizedProgress.egoBrowser?.resumedAt, "A resume timestamp must not be written before takeOverTaskSpace and its first observation succeed.")
+
+  const resumedObservation = await executeCua({
+    action: "record_observation",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "First pageInfo observation after the explicitly authorized takeOverTaskSpace call.",
+  })
+  assert(String(resumedObservation).includes("页面观察已记录"), "The first post-takeover observation must complete the two-phase resume.")
+  const resumedProgress = readRecord(join(workspace, "03_state/application_progress.json"))
+  assert(resumedProgress.egoBrowser?.handoffPending === false && resumedProgress.egoBrowser?.takeoverPending === false, "Only a successful post-takeover observation may clear the handoff gate.")
+  assert(typeof resumedProgress.egoBrowser?.resumedAt === "string", "Completed takeover must record its real resumedAt timestamp.")
 
   await writeJson(join(workspace, "03_state/application_progress.json"), {
     currentPage: "申请平台准备中",
@@ -563,15 +544,19 @@ async function verifyCuaStateTransitions(workspace: string) {
     taskSpaceName: "Fresh fixture task space",
   })
   assert(String(freshTaskSpaceCreation).includes("首轮只创建隔离 task space"), "A fresh application must create and persist the numeric task space before navigating.")
-  assert(!String(freshTaskSpaceCreation).includes("openOrReuseTab"), "The unguarded first task-space round must never open the school URL.")
-  const freshGuardedNavigation = await executeCua({
+  assert(!String(freshTaskSpaceCreation).includes("openOrReuseTab"), "The initial task-space round must never open the school URL.")
+  const freshDirectNavigation = await executeCua({
     action: "prepare_ego_task",
     applicationUrl: url,
     taskSpaceName: "Fresh fixture task space",
     taskSpaceId: "303",
   })
-  assert(String(freshGuardedNavigation).includes('useOrCreateTaskSpace(taskSpaceId)'), "The second fresh round must reuse the saved numeric task space.")
-  assert(String(freshGuardedNavigation).includes("openOrReuseTab"), "Only the guarded second round may navigate to the school URL.")
+  assert(String(freshDirectNavigation).includes('useOrCreateTaskSpace(taskSpaceId)'), "The second fresh round must reuse the saved numeric task space.")
+  assert(String(freshDirectNavigation).includes("openOrReuseTab"), "Only the direct-Ego second round may navigate to the school URL.")
+  assert(String(freshDirectNavigation).includes("observePageAction(() => openOrReuseTab"), "Initial school navigation must use the bounded direct-Ego dialog observer.")
+  assert(!String(freshDirectNavigation).includes("await openOrReuseTab"), "Initial school navigation must never wait on a potentially dialog-blocked action before observing it.")
+  assert(String(freshDirectNavigation).includes("pageInfoTimeoutMs = 1500") && String(freshDirectNavigation).includes("settleMs = 2000"), "Generated initial navigation must keep pageInfo bounded and observe a post-action quiet window.")
+  assert(String(freshDirectNavigation).includes("actionTimeoutMs: 30000"), "Initial school navigation must remain bounded while allowing a normal slow page load.")
   assert(readRecord(join(workspace, "03_state/application_progress.json")).egoBrowser?.taskSpaceId === "303", "The fresh task-space ID must be saved before navigation.")
 
   await writeJson(join(workspace, "03_state/application_progress.json"), {

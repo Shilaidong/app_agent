@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs"
 import * as http from "node:http"
 import { createServer } from "node:net"
 import { homedir, tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { getCACertificates, setDefaultCACertificates } from "node:tls"
 import type { Event } from "electron"
 import { app, BrowserWindow } from "electron"
@@ -21,6 +21,7 @@ import type {
   WslConfig,
 } from "../preload/types"
 import { APPLICATION_AGENT_MODEL_ID, buildApplicationAgentStartPrompt, prepareApplicationAgentConfig } from "./application-agent"
+import { writeOpenCodeConfig } from "./application-agent-opencode"
 import { checkAppExists, resolveAppPath, wslPath } from "./apps"
 import { CHANNEL, UPDATER_ENABLED } from "./constants"
 import { registerIpcHandlers, sendDeepLinks, sendMenuCommand, sendSqliteMigrationProgress } from "./ipc"
@@ -59,6 +60,7 @@ const APP_IDS: Record<string, string> = {
   prod: "edu.terra.application-agent",
 }
 const TEST_ONBOARDING = process.env.OPENCODE_TEST_ONBOARDING === "1"
+const PACKAGE_SMOKE_CONFIG_FLAG = "--terra-package-smoke-write-opencode"
 
 let logger: ReturnType<typeof initLogging>
 let mainWindow: BrowserWindow | null = null
@@ -68,6 +70,24 @@ const initEmitter = new EventEmitter()
 let initStep: InitStep = { phase: "server_waiting" }
 
 const pendingDeepLinks: string[] = []
+
+async function runPackageSmokeConfigProbe() {
+  if (!app.isPackaged) throw new Error("The package smoke config probe is available only in a packaged app.")
+
+  const workspace = resolve(process.env.TERRA_EDU_PACKAGE_SMOKE_WORKSPACE || "")
+  const runtimeRoot = resolve(process.env.TERRA_EDU_PACKAGE_SMOKE_RUNTIME_ROOT || "")
+  const temporaryRoot = resolve(tmpdir())
+  if (
+    !runtimeRoot.startsWith(join(temporaryRoot, "terra-edu-direct-dialog-runtime-")) ||
+    dirname(workspace) !== runtimeRoot ||
+    basename(workspace) !== "workspace"
+  ) {
+    throw new Error("The package smoke config probe accepts only its isolated temporary workspace.")
+  }
+
+  await writeOpenCodeConfig(workspace, { egoRuntimeRoot: runtimeRoot })
+  process.stdout.write("TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN\n")
+}
 
 function useEnvProxy() {
   try {
@@ -803,4 +823,16 @@ const main = Effect.gen(function* () {
   overlay?.close()
 })
 
-Effect.runFork(main)
+if (process.argv.includes(PACKAGE_SMOKE_CONFIG_FLAG)) {
+  void app.whenReady()
+    .then(runPackageSmokeConfigProbe)
+    .then(
+      () => app.exit(0),
+      (error) => {
+        process.stderr.write(`TERRA_EDU_PACKAGE_SMOKE_CONFIG_FAILED: ${error instanceof Error ? error.message : String(error)}\n`)
+        app.exit(1)
+      },
+    )
+} else {
+  Effect.runFork(main)
+}

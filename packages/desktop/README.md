@@ -32,7 +32,7 @@ bun run verify:e2e
 bun run typecheck:desktop
 ```
 
-`release:mac` 会自动运行单元测试、申请 Agent 契约验证、确定性临时工作区 E2E 验证、类型检查、生产构建、macOS 打包，以及最终 ZIP/App 资源与 Ego 原生弹窗 smoke 验证。Ego smoke 只会启动由签名母版复制出的临时运行副本，并在测试后再次验证 Terra 包内母版未被改写。GUI 弹窗验证无法运行时，发包会明确失败，产物不可视为可分发版本。
+`release:mac` 会自动运行单元测试、申请 Agent 契约验证、确定性临时工作区 E2E 验证、类型检查、生产构建、macOS 打包，以及最终 ZIP/App 资源、签名、Ego 版本、updater 抑制与 Ego 弹窗 smoke 验证。Ego smoke 使用从最终 ZIP 解压的 App 和临时运行副本，并在测试后再次验证 Terra 包内签名母版未被改写；包验证也会拒绝已退役 guard 的文件和协议残留。
 
 默认 E2E 不读取顾问真实工作区；如需诊断某个已有任务，可显式传入路径：`APPLICATION_AGENT_WORKSPACE="/绝对路径/申请工作区" bun verify:application-agent:e2e`。
 

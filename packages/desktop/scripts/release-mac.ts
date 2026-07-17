@@ -48,7 +48,10 @@ writeFileSync(
     "- TypeScript typecheck passed.",
     "- Electron production build passed.",
     dmgAvailable ? "- macOS DMG and ZIP package build passed." : "- macOS ZIP package build passed; DMG build was skipped after hdiutil capability probing failed.",
-    "- Final archive resources, signatures, bundled ego lite/PaddleOCR/native dialog guard, and required GUI dialog smoke passed.",
+    "- Final ZIP resources, signatures, bundled ego lite/PaddleOCR, updater suppression, retired guard exclusion, and packaged Ego dialog smoke passed.",
+    dmgAvailable
+      ? "- Final DMG bundle identity, version, critical resources, deep signatures, and app.asar parity passed after a read-only mount."
+      : "- DMG verification was not required for this ZIP-only fallback release.",
     "- Supabase public config was bundled from the Terra-Edu web environment when available.",
     "",
     "## Distribution Notes",
