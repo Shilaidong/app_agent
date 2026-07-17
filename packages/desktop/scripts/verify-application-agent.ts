@@ -318,7 +318,11 @@ assert(guiDialogVerifySource.includes("--terra-package-smoke-write-opencode") &&
 assert(guiDialogVerifySource.includes("stopSmokeLaunchedApps") && guiDialogVerifySource.includes("existingBundledAppPids") && guiDialogVerifySource.includes("sourceSignature"), "GUI dialog smoke must preserve and verify the packaged Ego Lite source while cleaning up only its isolated runtime")
 assert(guiDialogVerifySource.includes("required for distribution readiness"), "Unavailable GUI smoke must explicitly block distribution readiness")
 assert(builderSource.includes("TERRA_EDU_MAC_TARGET"), "mac builder config must allow ZIP-only fallback when hdiutil is unavailable")
-assert(releaseMacSource.includes("hdiutil create"), "mac release must probe DMG capability before packaging")
+assert(releaseMacSource.includes("TERRA_EDU_MAC_TARGET=zip"), "mac release must ask electron-builder for only the signed app and ZIP")
+assert(releaseMacSource.includes("dmgBlockmap") && releaseMacSource.includes("unlinkSync(dmgBlockmap)"), "mac release must remove the stale electron-builder DMG blockmap")
+assert(releaseMacSource.includes("createDmgFromVerifiedApp") && releaseMacSource.includes("ditto ${app} ${stagedApp}"), "mac release must stage the verified app with ditto before creating a DMG")
+assert(releaseMacSource.includes("codesign --verify --deep --strict ${stagedApp}") && releaseMacSource.includes("ln -s /Applications"), "mac release must verify the staged app and add the Applications link before creating a DMG")
+assert(releaseMacSource.includes("hdiutil create -size 1m -fs APFS") && releaseMacSource.includes("hdiutil create -fs APFS") && releaseMacSource.includes("-srcfolder ${staging}"), "mac release must probe and create an APFS DMG directly from the verified staging directory")
 assert(releaseMacSource.includes("ZIP-only"), "mac release must explain ZIP-only fallback")
 
 assert(source.includes("prepare_ego_task"), "ego-browser prepare action is missing")

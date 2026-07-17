@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 import { $ } from "bun"
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const mode = "free"
 const releaseDir = join(process.cwd(), "dist", "release-notes")
 const electronBuilderCache = join(process.cwd(), ".cache", "electron-builder")
 const dmg = join(process.cwd(), "dist", "terra-edu-application-agent-mac-arm64.dmg")
+const dmgBlockmap = `${dmg}.blockmap`
 const zip = join(process.cwd(), "dist", "terra-edu-application-agent-mac-arm64.zip")
 
 console.log("Preparing Terra-Edu Application Agent macOS customer release...")
@@ -14,20 +16,24 @@ console.log("Signing/notarization: free ad-hoc build. macOS may ask the customer
 
 mkdirSync(electronBuilderCache, { recursive: true })
 
-const macTarget = await detectMacPackageTarget()
+const dmgAvailable = await canCreateDmg()
 
 await $`bun test`
 await $`bun verify:application-agent`
 await $`bun verify:application-agent:e2e`
 await $`bun typecheck`
 await $`OPENCODE_CHANNEL=prod bun run build`
-await $`ELECTRON_BUILDER_CACHE=${electronBuilderCache} OPENCODE_CHANNEL=prod TERRA_EDU_MAC_TARGET=${macTarget} bun run package:mac`
+if (existsSync(dmg)) unlinkSync(dmg)
+if (existsSync(dmgBlockmap)) unlinkSync(dmgBlockmap)
+await $`ELECTRON_BUILDER_CACHE=${electronBuilderCache} OPENCODE_CHANNEL=prod TERRA_EDU_MAC_TARGET=zip bun run package:mac`
+if (dmgAvailable) {
+  await createDmgFromVerifiedApp()
+}
 await $`bun verify:application-agent:package`
 
 mkdirSync(releaseDir, { recursive: true })
 
 const generatedAt = new Date().toISOString()
-const dmgAvailable = macTarget.includes("dmg")
 
 writeFileSync(
   join(releaseDir, `mac-${mode}.md`),
@@ -78,15 +84,33 @@ console.log(`DMG: ${dmgAvailable ? dmg : "not generated because hdiutil create i
 console.log(`ZIP: ${zip}`)
 console.log(`Notes: ${join(releaseDir, `mac-${mode}.md`)}`)
 
-async function detectMacPackageTarget() {
-  if (process.platform !== "darwin") return "zip"
+async function canCreateDmg() {
+  if (process.platform !== "darwin") return false
 
   const probe = join(electronBuilderCache, `dmg-probe-${process.pid}.dmg`)
-  const result = await $`hdiutil create -size 1m -fs HFS+ -volname TerraEduProbe ${probe}`.quiet().nothrow()
+  const result = await $`hdiutil create -size 1m -fs APFS -volname TerraEduProbe ${probe}`.quiet().nothrow()
 
   if (existsSync(probe)) unlinkSync(probe)
-  if (result.exitCode === 0) return "dmg,zip"
+  if (result.exitCode === 0) return true
 
   console.warn("DMG creation is unavailable in this environment; falling back to a ZIP-only macOS package.")
-  return "zip"
+  return false
+}
+
+async function createDmgFromVerifiedApp() {
+  const app = join(process.cwd(), "dist", "mac-arm64", "Terra-Edu Application Agent.app")
+  if (!existsSync(app)) throw new Error(`Missing packaged application: ${app}`)
+
+  await $`codesign --verify --deep --strict ${app}`
+  const staging = mkdtempSync(join(tmpdir(), "terra-edu-dmg-staging-"))
+  const stagedApp = join(staging, "Terra-Edu Application Agent.app")
+
+  try {
+    await $`ditto ${app} ${stagedApp}`
+    await $`ln -s /Applications ${join(staging, "Applications")}`
+    await $`codesign --verify --deep --strict ${stagedApp}`
+    await $`hdiutil create -fs APFS -volname ${"Terra-Edu Application Agent"} -srcfolder ${staging} -ov -format UDZO ${dmg}`
+  } finally {
+    rmSync(staging, { recursive: true, force: true })
+  }
 }
