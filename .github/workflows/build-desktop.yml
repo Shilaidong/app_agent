@@ -32,6 +32,11 @@ jobs:
           bun run verify:e2e
           bun run typecheck:desktop
       - name: Build macOS package
+        # This project uses only its checked-in ad-hoc signer (`codesign --sign -`).
+        # electron-builder otherwise skips even that signer for pull requests,
+        # leaving a renamed Electron bundle with an incomplete resource seal.
+        env:
+          CSC_FOR_PULL_REQUEST: "true"
         run: bun run release:mac
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
