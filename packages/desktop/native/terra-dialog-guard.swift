@@ -81,6 +81,9 @@ private struct DialogResult: Codable {
 
 private let textRoles = Set([kAXStaticTextRole as String, kAXHeadingRole as String])
 private let editableRoles = Set([kAXTextFieldRole as String, kAXTextAreaRole as String, kAXComboBoxRole as String])
+// AX subroles are stable string values. Some macOS runner SDKs do not export
+// kAXApplicationDialogSubrole even though Chromium reports AXApplicationDialog.
+private let applicationDialogSubrole = "AXApplicationDialog"
 
 private func parseOptions() -> Options {
     var options = Options()
@@ -517,7 +520,7 @@ private func dialogCandidates(_ application: NSRunningApplication, options: Opti
         complete = complete && windowTitle.complete && chrome.complete
         let dialogs = chrome.nodes.filter { node in
             node.role == kAXGroupRole as String &&
-                node.subrole == kAXApplicationDialogSubrole as String
+                node.subrole == applicationDialogSubrole
         }
         dialogs.forEach { dialog in
             if !applicationDialogs.contains(where: { CFEqual($0, dialog.element) }) {

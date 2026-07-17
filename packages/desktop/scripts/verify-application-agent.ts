@@ -242,7 +242,11 @@ assert(desktopServerSource.includes("OPENCODE_RIPGREP_PATH"), "Customer build mu
 assert(ripgrepSource.includes("Configured ripgrep binary is missing"), "OpenCode must prefer the bundled ripgrep binary")
 assert(source.includes("terra-ocr"), "Customer build must install the bundled OCR wrapper")
 assert(source.includes("terra-dialog-guard"), "Customer build must install the native-dialog wrapper")
-assert(dialogGuardSource.includes("kAXApplicationDialogSubrole"), "Native dialog helper must match Chromium AXApplicationDialog exactly")
+assert(
+  dialogGuardSource.includes('private let applicationDialogSubrole = "AXApplicationDialog"') &&
+    dialogGuardSource.includes("node.subrole == applicationDialogSubrole"),
+  "Native dialog helper must match Chromium AXApplicationDialog exactly without requiring a newer SDK constant",
+)
 assert(dialogGuardSource.includes('readAttribute(element, "AXCustomContent" as CFString)') && dialogGuardSource.includes("CustomContentEvidence"), "Native dialog helper must decode AXCustomContent instead of relying on screenshots")
 assert(dialogGuardSource.includes("AXUIElementSetMessagingTimeout"), "Native dialog helper must bound accessibility calls to a wedged browser")
 assert(dialogGuardSource.includes("options.processIdentifier != nil") && dialogGuardSource.includes("executablePathPrefix"), "Native dialog helper must require an exact managed process target")
