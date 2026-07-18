@@ -200,8 +200,6 @@ function runWrapperRound(label: string, source: string) {
   return output
 }
 
-const fixturePort = 40_000 + (process.pid % 10_000)
-const fixtureOrigin = `http://127.0.0.1:${fixturePort}`
 const fixtureHtml = `<!doctype html>
 <body data-navigation-state="waiting" data-alert-state="waiting" data-delayed-state="waiting" data-iframe-state="waiting" data-confirm-state="waiting" data-prompt-state="waiting">
   <button id="alert-trigger" onclick="alert(${JSON.stringify(`${marker}-alert`)});document.body.dataset.alertState='accepted'">Open alert</button>
@@ -214,16 +212,17 @@ const fixtureHtml = `<!doctype html>
   <script>window.blockBeforeUnload=true;window.__disableBeforeUnload=()=>{window.blockBeforeUnload=false};setTimeout(()=>{alert(${JSON.stringify(`${marker}-navigation-alert`)});document.body.dataset.navigationState='accepted'},600);window.addEventListener('beforeunload',(event)=>{if(!window.blockBeforeUnload)return;event.preventDefault();event.returnValue=''})</script>
 </body>`
 const fixtureFrameHtml = `<!doctype html><body><script>window.openIframeAlert=()=>{alert(${JSON.stringify(`${marker}-iframe-alert: Title of degree; Abbreviation; Date of award`)});parent.document.body.dataset.iframeState='accepted'}</script></body>`
+const fixtureReadyPath = join(runtimeRoot, "dialog-fixture-ready")
 const fixtureServer = Bun.spawn(
   [
     process.execPath,
     "-e",
-    "Bun.serve({hostname:'127.0.0.1',port:Number(process.env.TERRA_EDU_FIXTURE_PORT),fetch(request){const path=new URL(request.url).pathname;if(path==='/dialog-frame.html')return new Response(process.env.TERRA_EDU_FIXTURE_FRAME_HTML,{headers:{'content-type':'text/html; charset=utf-8'}});if(path==='/left.html')return new Response('<!doctype html><title>unexpected navigation</title>',{headers:{'content-type':'text/html; charset=utf-8'}});if(path!=='/dialog-smoke.html')return new Response('Not found',{status:404});return new Response(process.env.TERRA_EDU_FIXTURE_HTML,{headers:{'content-type':'text/html; charset=utf-8'}})}});setInterval(()=>{},2**30)",
+    "const readyPath=process.env.TERRA_EDU_FIXTURE_READY_PATH;if(!readyPath)throw new Error('missing fixture readiness path');const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch(request){const path=new URL(request.url).pathname;if(path==='/dialog-frame.html')return new Response(process.env.TERRA_EDU_FIXTURE_FRAME_HTML,{headers:{'content-type':'text/html; charset=utf-8'}});if(path==='/left.html')return new Response('<!doctype html><title>unexpected navigation</title>',{headers:{'content-type':'text/html; charset=utf-8'}});if(path!=='/dialog-smoke.html')return new Response('Not found',{status:404});return new Response(process.env.TERRA_EDU_FIXTURE_HTML,{headers:{'content-type':'text/html; charset=utf-8'}})}});await Bun.write(readyPath,String(server.port));setInterval(()=>{},2**30)",
   ],
   {
     env: {
       ...process.env,
-      TERRA_EDU_FIXTURE_PORT: String(fixturePort),
+      TERRA_EDU_FIXTURE_READY_PATH: fixtureReadyPath,
       TERRA_EDU_FIXTURE_HTML: fixtureHtml,
       TERRA_EDU_FIXTURE_FRAME_HTML: fixtureFrameHtml,
     },
@@ -232,17 +231,35 @@ const fixtureServer = Bun.spawn(
   },
 )
 
-const sourceUrl = `${fixtureOrigin}/dialog-smoke.html`
 let taskId: number | undefined
 
 try {
-  const fixtureReady = await Promise.all(
-    Array.from({ length: 20 }, async (_, index) => {
-      await Bun.sleep(index * 50)
-      return fetch(sourceUrl).then((response) => response.ok).catch(() => false)
-    }),
-  )
-  if (!fixtureReady.some(Boolean)) fail("loopback fixture did not start")
+  let fixtureReadyValue: string | undefined
+  const fixturePort = await (async () => {
+    for (let attempt = 1; attempt <= 100; attempt++) {
+      if (await Bun.file(fixtureReadyPath).exists()) {
+        const ready = (await Bun.file(fixtureReadyPath).text()).trim()
+        fixtureReadyValue = ready
+        const port = Number(ready)
+        if (Number.isInteger(port) && port > 0 && port <= 65_535) return port
+      }
+      await Promise.race([Bun.sleep(100), fixtureServer.exited])
+    }
+    return undefined
+  })()
+  if (!fixturePort) {
+    fixtureServer.kill()
+    const exitCode = await fixtureServer.exited
+    const stderr = await new Response(fixtureServer.stderr).text()
+    fail(
+      `loopback fixture did not report readiness within 10 seconds (exit ${exitCode}, last readiness payload ${JSON.stringify(fixtureReadyValue)}): ${stderr.trim() || "no stderr"}`,
+    )
+  }
+  const sourceUrl = `http://127.0.0.1:${fixturePort}/dialog-smoke.html`
+  const fixtureResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(5_000) }).catch(() => undefined)
+  if (!fixtureResponse?.ok || !(await fixtureResponse.text()).includes(marker)) {
+    fail(`loopback fixture readiness endpoint was invalid: ${fixtureResponse?.status ?? "unreachable"}`)
+  }
   await waitForBundledApp()
   await waitForBundledService()
 
