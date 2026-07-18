@@ -3,7 +3,7 @@ import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
-import type { ApplicationTask } from "./application-agent"
+import type { ApplicationRefillAttempt, ApplicationTask } from "./application-agent"
 
 const root = dirname(fileURLToPath(import.meta.url))
 const EGO_BROWSER_SKILL_PIN = "terra-pinned-2026-07-17"
@@ -444,6 +444,55 @@ ${EGO_BROWSER_PROTOCOL}
 请现在只执行“启动阶段”：优先创建 todowrite 计划；如果 todowrite 不可用就用文字计划继续；初始化目标申请工作区、同步状态并汇报结果。`
 }
 
+export function buildApplicationAgentRefillPrompt(task: ApplicationTask, attempt: ApplicationRefillAttempt) {
+  return `你现在是 Terra-Edu 重新填写 Agent。顾问刚刚在桌面软件明确点击了“重新填写”，这是一个全新的 OpenCode 对话；请立刻只接管 ${task.input.school} ${task.input.program} 的申请平台填写，不要继承或猜测旧对话中的任何结论。
+
+## 本次重新填写
+
+\`\`\`json
+${JSON.stringify(attempt, null, 2)}
+\`\`\`
+
+- 目标工作区：${task.workspacePath}
+- 申请平台链接：${task.input.applicationUrl}
+- 本次唯一 Ego task space 名称：${attempt.taskSpaceName}
+${attempt.batchId ? `- 这是选校批次 ${attempt.batchId} 的第 ${attempt.batchOrder || "?"} 所学校；只处理当前学校，不要并发启动批次内其他学校。批次共享材料已经整理完成，本次直接复用当前学校工作区的结构化产物。` : ""}
+
+## 这是填表专用会话，不是材料整理会话
+
+以下产物已经由原任务生成并经顾问确认，必须只读复用：
+
+- 03_state/task_state.json
+- 03_state/materials_index.json
+- 02_generated/student_profile.md
+- 03_state/application_requirements.json
+- 03_state/missing_items.json
+- 03_state/material_review.json
+- 00_original_backup 和 01_classified_materials
+
+严禁调用 application-agent_workspace、application-agent_materials、application-agent_requirements 或 application-agent_documents。严禁重新初始化工作区、复制材料、OCR、分类、抓取/重写申请要求、重新生成 student_profile.md 或重新做材料总结。工具层和当前 Agent 权限也会拒绝这些操作；如果任何必需产物看起来不完整，请清楚报告缺失并停止，不得自行兜底重建。
+
+## 第一轮执行
+
+1. 用 read 只读取上面列出的结构化文件，建立本次填表所需的最小上下文；不要读取旧聊天记录，也不要从旧 application_progress 恢复浏览器操作。本次旧进度已归档在 ${attempt.progressArchivePath}，它只用于审计，不是续填依据。
+2. 用 todowrite 建立 5 步填表计划：读取既有档案、创建独立 task space、观察并填写、逐页动态复查与保存、记录阻塞与总结。todowrite 失败一次就用文字计划继续，不要切换到材料整理。
+3. 调用 application-agent_cua，action 使用 prepare_ego_task，applicationUrl 使用 ${JSON.stringify(task.input.applicationUrl || "")}，taskSpaceName 必须精确使用 ${JSON.stringify(attempt.taskSpaceName)}。顾问点击“重新填写”已经只授权本次创建一个全新的独立 task space；不得复用、接管、按名称猜测或刷新旧空间。
+4. 严格执行下方 ego-browser 通用观察协议。拿到新空间的数值 taskSpaceId 后，立即再次调用 prepare_ego_task 保存 ID；后续每个浏览器回合都只使用这个 ID。
+
+${EGO_BROWSER_PROTOCOL}
+
+## 填写规则
+
+- 只填写 student_profile.md、application_requirements.json 和已确认材料能够直接证明的内容；不确定字段调用 question 询问顾问，并通过 application-agent_cua 记录。
+- 选择、添加/删除、自动完成、上传、保存和导航后必须重新观察动态字段；未通过最新 required-field 检查不得保存。
+- 原生 alert/beforeunload/confirm/prompt 按通用观察协议处理；不得刷新页面或要求无证据的重新登录。
+- 上传只能使用 ego-browser uploadFile，并在新观察中验证。
+- 最终提交、付款、不可逆推荐信邀请、保存账号密码和猜填始终禁止。
+- 只有整个当前学校申请的可自动填写阶段真正完成时，才可 completeTaskSpace；不能每页完成就结束空间。
+
+请现在开始第一轮：先简短告诉顾问“正在复用已整理内容并创建全新填表空间”，只读载入结构化档案，然后准备本次独立 Ego task space。`
+}
+
 
 const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象是留学顾问。
 
@@ -496,6 +545,14 @@ ${EGO_BROWSER_PROTOCOL}
 - 可以填写、上传和保存，但最终提交必须由顾问人工确认。
 
 你必须在每个关键阶段通过对话框告诉顾问当前进度。`
+
+const DEFAULT_APPLICATION_REFILL_PROMPT = `你是 Terra-Edu 重新填写 Agent，服务对象是留学顾问。你只负责基于当前申请工作区中已经整理并确认的内容，重新启动一个干净的申请平台填表过程。
+
+当前会话不得执行材料准备工作：不得初始化/刷新工作区，不得复制材料，不得 OCR 或分类，不得重新抓取申请要求，不得生成顾问文档，不得生成或改写 student_profile.md。只读载入 task_state.json、materials_index.json、student_profile.md、application_requirements.json、missing_items.json 和 material_review.json；如果这些产物缺失或不可信，清楚报告并停止，不做兜底。
+
+浏览器操作只能使用随包 ego-browser skill 和 application-agent_cua。每次新会话必须使用启动消息给出的唯一 taskSpaceName 创建独立 task space，不得复用、接管或猜测旧空间。严格执行“先 pageInfo 观察 → 一个逻辑动作组 → 再观察”的协议；对动态字段、原生弹窗、保存验证和顾问接管遵守 ego-browser skill 与启动消息中的全部约束。
+
+只填写结构化档案和已确认材料能够证明的信息；不确定字段询问顾问，不猜填。不得自动最终提交、付款、发送不可逆推荐信邀请、保存账号密码或执行不可逆确认。选校批次始终只处理当前学校，不并发打开其他学校。`
 
 const SKILL_DEFINITIONS = [
   {
@@ -725,7 +782,7 @@ ${command[2]}
 
 function renderApplicationAgentTools() {
   return String.raw`import { existsSync } from "node:fs"
-import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises"
+import { cp, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, extname, join, relative, resolve } from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
@@ -808,6 +865,33 @@ const workspaceDirs = [
 function root(ctx: { directory?: string }) {
   if (!ctx.directory) throw new Error("OpenCode tool context is missing directory")
   return ctx.directory
+}
+
+function rejectPreparationMutationForRefill(ctx: ToolContext, operation: string) {
+  if (ctx.agent !== "application-refill-agent") return
+  throw new Error(
+    "REFILL_PREPARATION_LOCKED: 重新填写会话只允许复用已确认产物并操作申请平台，已拒绝 " + operation + "。请不要初始化工作区、复制/OCR/分类材料、重写申请要求、student_profile 或顾问文档。",
+  )
+}
+
+async function materialReviewPreparationComplete(workspace: string, materialReview: Record<string, any>) {
+  if (Date.parse(String(materialReview.preparationCompleteAt || ""))) return true
+  if (materialReview.mode === "skip") return true
+  const submittedAt = Date.parse(String(materialReview.submittedAt || ""))
+  if (!submittedAt || (materialReview.mode !== "note" && materialReview.mode !== "supplement_folder")) return true
+  const required = ["02_generated/student_profile.md", "03_state/missing_items.json"]
+  if (materialReview.mode === "supplement_folder") {
+    const supplementalFolder = String(materialReview.supplementalFolder || "").trim()
+    if (!supplementalFolder || !existsSync(supplementalFolder)) return false
+    required.push("03_state/materials_index.json")
+    if ((await listFiles(supplementalFolder)).some((path) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(path))) {
+      required.push("03_state/ocr_index.json")
+    }
+  }
+  return (await Promise.all(required.map((path) => stat(join(workspace, path)).then(
+    (info) => info.mtimeMs >= submittedAt,
+    () => false,
+  )))).every(Boolean)
 }
 
 async function readJson(path: string, fallback: any) {
@@ -1387,6 +1471,7 @@ export const workspace = {
     sourceFolder: { type: "string", description: "Optional source student folder. Defaults to task input sourceFolder." },
   }),
   async execute(args, ctx) {
+    rejectPreparationMutationForRefill(ctx, "application-agent_workspace")
     const input = args.input || {}
     const workspace = root(ctx)
     await ensureTaskIsActive(workspace)
@@ -1422,6 +1507,7 @@ export const materials = {
     action: { type: "string", enum: ["extract_text", "classify"], description: "Extract material text before classification, or classify all backed-up materials" },
   }, ["action"]),
   async execute(args, ctx) {
+    rejectPreparationMutationForRefill(ctx, "application-agent_materials")
     const workspace = root(ctx)
     await ensureTaskIsActive(workspace)
     const task = await loadTask(workspace)
@@ -1518,6 +1604,7 @@ export const state = {
     message: { type: "string", description: "Human-readable progress message for the consultant" },
   }, ["status", "message"]),
   async execute(args, ctx) {
+    rejectPreparationMutationForRefill(ctx, "application-agent_state")
     const input = args.input || {}
     const workspace = root(ctx)
     await ensureTaskIsActive(workspace)
@@ -1541,6 +1628,7 @@ export const documents = {
     action: { type: "string", enum: ["generate_forms", "generate_word", "generate_summary", "generate_all"], description: "Which document set to generate" },
   }),
   async execute(args, ctx) {
+    rejectPreparationMutationForRefill(ctx, "application-agent_documents")
     const inputArgs = args.input || {}
     const action = inputArgs.action || "generate_all"
     const workspace = root(ctx)
@@ -1571,6 +1659,12 @@ export const documents = {
       await writeFile(join(workspace, "02_generated/task_summary.md"), lines.join("\n") + "\n", "utf8")
     }
     const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
+    if (materialReview.status === "approved" && !materialReview.preparationCompleteAt && await materialReviewPreparationComplete(workspace, materialReview)) {
+      await writeJson(join(workspace, "03_state/material_review.json"), {
+        ...materialReview,
+        preparationCompleteAt: new Date().toISOString(),
+      })
+    }
     const needsMaterialReview = !progress.egoBrowser?.preparedAt && materialReview.status !== "approved"
     if (needsMaterialReview) {
       await writeJson(join(workspace, "03_state/material_review.json"), {
@@ -1613,6 +1707,7 @@ const legacyRuntime = {
     maxResults: { type: "number", description: "Maximum web search results or file entries" },
   }, ["action"]),
   async execute(args, ctx) {
+    rejectPreparationMutationForRefill(ctx, "application-agent_runtime")
     const input = args.input || {}
     const action = String(input.action || "")
     const workspace = root(ctx)
@@ -1733,6 +1828,7 @@ export const requirements = {
     notes: { type: "string", description: "Short consultant-facing research summary" },
   }),
   async execute(args, ctx) {
+    rejectPreparationMutationForRefill(ctx, "application-agent_requirements")
     const input = args.input || {}
     const workspace = root(ctx)
     await ensureTaskIsActive(workspace)
@@ -1821,6 +1917,8 @@ export const cua = {
     applicationUrl: { type: "string", description: "Application platform URL, defaults to task input." },
     taskSpaceName: { type: "string", description: "ego-browser task space name for this application task." },
     taskSpaceId: { type: "string", description: "String form of the numeric ego-browser task.id returned by useOrCreateTaskSpace." },
+    taskSpaceObservedName: { type: "string", description: "Exact task-space name returned by listTaskSpaces after the fresh space was created." },
+    taskSpaceOwnership: { type: "string", enum: ["agent", "agentDelegatedToUser", "user"], description: "Exact ownership returned by listTaskSpaces for taskSpaceId." },
     currentUrl: { type: "string", description: "Top-level current URL reported by the most recent unobstructed ego-browser pageInfo. Never pass an iframe dialog URL here." },
     dialogUrl: { type: "string", description: "For record_blocker only: the native dialog source URL from pageInfo().dialog.url, which may be an iframe URL." },
     dialogFrameId: { type: "string", description: "For record_blocker only: the native dialog frameId from pageInfo().dialog.frameId." },
@@ -1857,6 +1955,12 @@ export const cua = {
     const task = await loadTask(workspace)
     const progress = await readJson(join(workspace, "03_state/application_progress.json"), { currentPage: "", completedPages: [], savedPages: [], uploadedMaterials: [], failedActions: [], highRiskBlocks: [] })
     const auditAction = String(input.action || "unknown")
+    const activeRefillSessionID = String(progress.refillAttempt?.sessionID || "").trim()
+    if (progress.refillAttempt && (!activeRefillSessionID || ctx?.sessionID !== activeRefillSessionID)) {
+      const error = "REFILL_SESSION_MISMATCH: 当前学校已经切换到全新的重新填写对话；旧对话或其他子代理不得再操作本次浏览器状态。"
+      await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+      throw new Error(error)
+    }
     await appendAudit(workspace, "cua", auditAction, "started", input.detail || "")
     if (input.action === "block_high_risk") {
       return await risk.execute({ input: { action: input.detail || "high risk application action", page: progress.currentPage || "" } }, ctx as any)
@@ -1896,17 +2000,46 @@ export const cua = {
     }
     if (input.action === "prepare_ego_task") {
       const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
-      if (materialReview.status === "pending") {
-        await appendAudit(workspace, "cua", auditAction, "failed", "material review has not been approved", ctx)
-        throw new Error("材料整理已完成，但顾问尚未在材料确认面板完成选择。请停止，不要启动 ego-browser；等待 material_review.json 的 status 变为 approved。")
+      if (materialReview.status !== "approved" || !(await materialReviewPreparationComplete(workspace, materialReview))) {
+        await appendAudit(workspace, "cua", auditAction, "failed", "material review has not been approved and fully applied", ctx)
+        throw new Error("材料确认或补充内容同步尚未完成。请停止，不要启动 ego-browser；等待 material_review.json 记录 preparationCompleteAt。")
       }
       ensureCuaProgress(progress)
-      const url = String(input.applicationUrl || task.input?.applicationUrl || "").trim()
+      const refillAttemptId = String(progress.refillAttempt?.id || "").trim()
+      const refillTaskSpaceName = String(progress.egoBrowser?.taskSpaceName || "").trim()
+      const refillApplicationUrl = String(progress.egoBrowser?.applicationUrl || task.input?.applicationUrl || "").trim()
+      const isRefillAgent = ctx?.agent === "application-refill-agent"
+      const requestedUrl = String(input.applicationUrl || task.input?.applicationUrl || "").trim()
+      const url = isRefillAgent ? refillApplicationUrl : requestedUrl
       if (!url) throw new Error("applicationUrl is required for prepare_ego_task")
-      const taskSpaceName = String(input.taskSpaceName || progress.egoBrowser?.taskSpaceName || ["Terra-Edu", task.input?.studentName, task.input?.school, task.input?.program].filter(Boolean).join(" / ")).trim()
+      const requestedTaskSpaceName = String(input.taskSpaceName || "").trim()
+      const taskSpaceName = isRefillAgent
+        ? refillTaskSpaceName
+        : String(requestedTaskSpaceName || progress.egoBrowser?.taskSpaceName || ["Terra-Edu", task.input?.studentName, task.input?.school, task.input?.program].filter(Boolean).join(" / ")).trim()
       const savedTaskSpaceId = numericTaskSpaceId(progress.egoBrowser?.taskSpaceId)
       const suppliedTaskSpaceId = String(input.taskSpaceId || "").trim()
-      const taskSpaceError =
+      const observedTaskSpaceName = String(input.taskSpaceObservedName || "").trim()
+      const observedTaskSpaceOwnership = String(input.taskSpaceOwnership || "").trim()
+      const refillAuthorizationError = isRefillAgent
+        ? !refillAttemptId || progress.egoBrowser?.refillAttemptId !== refillAttemptId || !progress.egoBrowser?.freshTaskSpaceAuthorizedAt || progress.egoBrowser?.freshTaskSpaceAuthorizedBy !== "consultant_refill_click"
+          ? "REFILL_FRESH_TASK_SPACE_NOT_AUTHORIZED: 本会话没有桌面端持久化的重新填写授权，已拒绝创建或绑定浏览器空间。"
+          : !refillTaskSpaceName
+            ? "REFILL_TASK_SPACE_NAME_REQUIRED: 本次重新填写记录缺少独立 taskSpaceName。"
+            : requestedTaskSpaceName && requestedTaskSpaceName !== refillTaskSpaceName
+              ? "REFILL_TASK_SPACE_NAME_MISMATCH: 不得覆盖本次重新填写的独立 taskSpaceName。"
+              : requestedUrl && requestedUrl !== refillApplicationUrl
+                ? "REFILL_APPLICATION_URL_MISMATCH: 不得在重新填写会话中替换当前学校的申请平台链接。"
+                : suppliedTaskSpaceId && !progress.egoBrowser?.freshTaskSpaceCreationIssuedAt
+                  ? "REFILL_CREATE_TASK_SPACE_FIRST: 首轮必须先调用 prepare_ego_task 取得创建独立空间脚本，不得直接绑定现有 taskSpaceId。"
+                  : suppliedTaskSpaceId && progress.egoBrowser?.freshTaskSpaceCreationIssuedForSessionID !== ctx?.sessionID
+                    ? "REFILL_CREATE_TASK_SPACE_SESSION_MISMATCH: 只有取得本次创建脚本的新对话可以绑定 taskSpaceId。"
+                    : suppliedTaskSpaceId && observedTaskSpaceName !== refillTaskSpaceName
+                      ? "REFILL_TASK_SPACE_OBSERVED_NAME_MISMATCH: listTaskSpaces 返回的空间名称与本次唯一 taskSpaceName 不一致。"
+                      : suppliedTaskSpaceId && observedTaskSpaceOwnership !== "agent"
+                        ? "REFILL_TASK_SPACE_OWNERSHIP_MISMATCH: 新空间必须由 Agent 持有控制权，不能绑定用户或已交接空间。"
+                  : ""
+        : ""
+      const taskSpaceError = refillAuthorizationError ||
         (suppliedTaskSpaceId && requireNumericTaskSpaceId(suppliedTaskSpaceId)) ||
         (savedTaskSpaceId && suppliedTaskSpaceId && savedTaskSpaceId !== suppliedTaskSpaceId
           ? "BROWSER_TASK_SPACE_MISMATCH: prepare_ego_task cannot replace the saved ego-browser task space."
@@ -1962,6 +2095,10 @@ export const cua = {
         applicationUrl: url,
         backend: "ego-browser",
         preparedAt: new Date().toISOString(),
+        freshTaskSpaceCreationIssuedAt: progress.egoBrowser?.freshTaskSpaceCreationIssuedAt || (isRefillAgent && !suppliedTaskSpaceId ? new Date().toISOString() : undefined),
+        freshTaskSpaceCreationIssuedForSessionID: progress.egoBrowser?.freshTaskSpaceCreationIssuedForSessionID || (isRefillAgent && !suppliedTaskSpaceId ? ctx?.sessionID : undefined),
+        freshTaskSpaceBoundAt: progress.egoBrowser?.freshTaskSpaceBoundAt || (isRefillAgent && selectedFreshTaskSpaceId ? new Date().toISOString() : undefined),
+        freshTaskSpaceBoundBySessionID: progress.egoBrowser?.freshTaskSpaceBoundBySessionID || (isRefillAgent && selectedFreshTaskSpaceId ? ctx?.sessionID : undefined),
         awaitingFreshTaskSpaceId: !savedTaskSpaceId && !selectedLegacyTaskSpaceId && !selectedFreshTaskSpaceId,
       }
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
@@ -1976,10 +2113,11 @@ export const cua = {
             : "已找到保存的数值 ego-browser taskSpaceId。正常回合只可复用这个 ID，不得按名称新建或匹配空间。",
           "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
           "const taskSpaceId = " + JSON.stringify(activeTaskSpaceId),
+          "const expectedTaskSpaceName = " + JSON.stringify(isRefillAgent ? taskSpaceName : ""),
           "const spaces = await listTaskSpaces()",
           "const space = spaces.find((item) => String(item.id ?? item.taskId) === taskSpaceId)",
-          "if (!space || space.ownership !== 'agent') {",
-          "  cliLog(JSON.stringify({ taskSpaceId, control: space?.ownership || 'missing' }, null, 2))",
+          "if (!space || space.ownership !== 'agent' || (expectedTaskSpaceName && space.name !== expectedTaskSpaceName)) {",
+          "  cliLog(JSON.stringify({ taskSpaceId, expectedTaskSpaceName, actualTaskSpaceName: space?.name || 'missing', control: space?.ownership || 'missing' }, null, 2))",
           "} else {",
           "  const task = await useOrCreateTaskSpace(taskSpaceId)",
           "  const beforeNavigation = await pageInfo()",
@@ -2029,14 +2167,16 @@ export const cua = {
       return [
         "ego-browser 填表任务已准备。下一步必须使用官方 ego-browser skill，不要调用 cua-driver。",
         "",
-        "首轮只创建隔离 task space 并返回数值 ID；不得在同一回合打开学校网址。拿到 ID 后立刻再次调用 prepare_ego_task 并传 taskSpaceId，下一回合才会按直接 Ego 观察协议导航。",
+        "首轮只创建隔离 task space 并返回数值 ID、真实名称和 ownership；不得在同一回合打开学校网址。拿到结果后立刻再次调用 prepare_ego_task，并原样传 taskSpaceId、taskSpaceObservedName、taskSpaceOwnership；下一回合才会按直接 Ego 观察协议导航。",
         "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
         "const task = await useOrCreateTaskSpace(" + JSON.stringify(taskSpaceName) + ")",
+        "const spaces = await listTaskSpaces()",
+        "const created = spaces.find((item) => String(item.id ?? item.taskId) === String(task.id))",
         "const initialInfo = await pageInfo()",
-        "cliLog(JSON.stringify({ taskSpaceId: task.id, info: initialInfo }, null, 2))",
+        "cliLog(JSON.stringify({ taskSpaceId: task.id, taskSpaceObservedName: created?.name ?? task.name, taskSpaceOwnership: created?.ownership ?? task.ownership, info: initialInfo }, null, 2))",
         "EOF",
         "",
-        "不要把这个空白 task space 记作学校页面观察。用返回的数值 taskSpaceId 再次调用 application-agent_cua prepare_ego_task；不要按名称恢复或自行在本轮导航。",
+        "不要把这个空白 task space 记作学校页面观察。把输出中的三个 task-space 字段原样传给 application-agent_cua prepare_ego_task；不要按名称恢复或自行在本轮导航。",
       ].join("\n")
     }
     if (input.action === "record_observation") {
@@ -2595,6 +2735,79 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
         websearch: "allow",
         },
       },
+      "application-refill-agent": {
+        description: "Terra-Edu 重新填写 Agent，只读复用已确认材料与档案，在全新对话和独立 Ego task space 中重新填表。",
+        mode: "primary",
+          model: APPLICATION_AGENT_MODEL,
+          prompt: "{file:./prompts/application-refill-agent.md}",
+          permission: {
+            "*": "allow",
+            read: {
+              "*": "deny",
+              "00_original_backup/**": "allow",
+              "01_classified_materials/**": "allow",
+              "02_generated/student_profile.md": "allow",
+              "03_state/task_state.json": "allow",
+              "03_state/task_control.json": "allow",
+              "03_state/materials_index.json": "allow",
+              "03_state/ocr_index.json": "allow",
+              "03_state/extracted_text/**": "allow",
+              "03_state/application_requirements.json": "allow",
+              "03_state/missing_items.json": "allow",
+              "03_state/material_review.json": "allow",
+              "03_state/application_progress.json": "allow",
+              "06_new_materials/**": "allow",
+              "*.env": "deny",
+              "*.env.*": "deny",
+            },
+            glob: "allow",
+            grep: "deny",
+          edit: {
+            "*": "deny",
+            "00_original_backup/**": "deny",
+            "01_classified_materials/**": "deny",
+            "02_generated/student_profile.md": "deny",
+            "02_generated/application_requirements.md": "deny",
+            "03_state/materials_index.json": "deny",
+            "03_state/application_requirements.json": "deny",
+            "03_state/missing_items.json": "deny",
+            "03_state/material_review.json": "deny",
+            "03_state/application_progress.json": "deny",
+            "03_state/task_state.json": "deny",
+            "06_new_materials/**": "deny",
+          },
+          bash: {
+            "*": "deny",
+            "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs*": "allow",
+          },
+          question: "allow",
+          task: "deny",
+          skill: {
+            "*": "allow",
+            "task-initialization": "deny",
+            "workspace-building": "deny",
+            "student-file-reading": "deny",
+            "material-organization": "deny",
+            "student-profile-generation": "deny",
+            "application-target-analysis": "deny",
+            "missing-content-recording": "deny",
+            "word-checklist-generation": "deny",
+            "continue-after-supplement": "deny",
+          },
+          todowrite: "allow",
+          webfetch: "deny",
+          websearch: "deny",
+          "application-agent_workspace": "deny",
+          "application-agent_state": "deny",
+          "application-agent_materials": "deny",
+          "application-agent_documents": "deny",
+          "application-agent_requirements": "deny",
+          "application-agent_runtime": "deny",
+          "cua_final_submit": "deny",
+          "cua_payment": "deny",
+          "cua_recommendation_invite": "deny",
+        },
+      },
     },
     tool_output: {
       max_lines: 300,
@@ -2609,6 +2822,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
     },
   })
   await writeGeneratedFile(join(base, "prompts/application-agent.md"), DEFAULT_APPLICATION_PROMPT)
+  await writeGeneratedFile(join(base, "prompts/application-refill-agent.md"), DEFAULT_APPLICATION_REFILL_PROMPT)
   await writeGeneratedFile(
     join(base, "agents/application-agent.md"),
     `---
@@ -2639,6 +2853,79 @@ permission:
 ---
 
 ${DEFAULT_APPLICATION_PROMPT}
+`,
+  )
+  await writeGeneratedFile(
+    join(base, "agents/application-refill-agent.md"),
+    `---
+description: Terra-Edu 重新填写 Agent，只读复用已确认材料与档案，在全新对话和独立 Ego task space 中重新填表。
+mode: primary
+model: opencode-go/deepseek-v4-pro
+permission:
+  "*": allow
+  read:
+    "*": deny
+    "00_original_backup/**": allow
+    "01_classified_materials/**": allow
+    "02_generated/student_profile.md": allow
+    "03_state/task_state.json": allow
+    "03_state/task_control.json": allow
+    "03_state/materials_index.json": allow
+    "03_state/ocr_index.json": allow
+    "03_state/extracted_text/**": allow
+    "03_state/application_requirements.json": allow
+    "03_state/missing_items.json": allow
+    "03_state/material_review.json": allow
+    "03_state/application_progress.json": allow
+    "06_new_materials/**": allow
+    "*.env": deny
+    "*.env.*": deny
+  glob: allow
+  grep: deny
+  edit:
+    "*": deny
+    "00_original_backup/**": deny
+    "01_classified_materials/**": deny
+    "02_generated/student_profile.md": deny
+    "02_generated/application_requirements.md": deny
+    "03_state/materials_index.json": deny
+    "03_state/application_requirements.json": deny
+    "03_state/missing_items.json": deny
+    "03_state/material_review.json": deny
+    "03_state/application_progress.json": deny
+    "03_state/task_state.json": deny
+    "06_new_materials/**": deny
+  bash:
+    "*": deny
+    'PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs*': allow
+  question: allow
+  task: deny
+  skill:
+    "*": allow
+    task-initialization: deny
+    workspace-building: deny
+    student-file-reading: deny
+    material-organization: deny
+    student-profile-generation: deny
+    application-target-analysis: deny
+    missing-content-recording: deny
+    word-checklist-generation: deny
+    continue-after-supplement: deny
+  todowrite: allow
+  webfetch: deny
+  websearch: deny
+  application-agent_workspace: deny
+  application-agent_state: deny
+  application-agent_materials: deny
+  application-agent_documents: deny
+  application-agent_requirements: deny
+  application-agent_runtime: deny
+  cua_final_submit: deny
+  cua_payment: deny
+  cua_recommendation_invite: deny
+---
+
+${DEFAULT_APPLICATION_REFILL_PROMPT}
 `,
   )
   for (const skill of SKILL_DEFINITIONS) {

@@ -74,6 +74,8 @@ const api: ElectronAPI = {
   downloadApplicationSelectionListTemplate: () =>
     ipcRenderer.invoke("application-agent:download-selection-list-template"),
   startApplicationAgentSession: (task) => ipcRenderer.invoke("application-agent:start-session", task),
+  startApplicationAgentRefillSession: (input) =>
+    ipcRenderer.invoke("application-agent:start-refill-session", input),
   resendApplicationAgentStartPrompt: (session, task) =>
     ipcRenderer.invoke("application-agent:resend-start-prompt", session, task),
   sendApplicationAgentPrompt: (session, prompt) => ipcRenderer.invoke("application-agent:send-prompt", session, prompt),

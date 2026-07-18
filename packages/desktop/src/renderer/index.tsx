@@ -589,6 +589,8 @@ function ApplicationAgentShell(props: {
   const [savedPlatformAccount, setSavedPlatformAccount] = createSignal<{ username: string; updatedAt: string } | null>(null)
   const [supplementalFolder, setSupplementalFolder] = createSignal("")
   const [materialNote, setMaterialNote] = createSignal("")
+  const [showRefillConfirmation, setShowRefillConfirmation] = createSignal(false)
+  const [refillRequestID, setRefillRequestID] = createSignal("")
   let agentChatListRef: HTMLDivElement | undefined
   let lastAgentMessageSignature = ""
   let lastAutomationNotificationKey = ""
@@ -964,19 +966,38 @@ function ApplicationAgentShell(props: {
     }
   }
 
-  const rebuildOpenCodeSession = async () => {
+  const openRefillConfirmation = () => {
+    if (!refillRequestID()) setRefillRequestID(window.crypto.randomUUID())
+    setShowRefillConfirmation(true)
+  }
+
+  const cancelRefillConfirmation = () => {
+    setShowRefillConfirmation(false)
+  }
+
+  const startRefillSession = async () => {
     const current = task()
     if (!current) return
     setBusy(true)
     setError(null)
     try {
-      const session = await window.api.startApplicationAgentSession(current)
-      setOpenCodeSession(session)
+      const result = await window.api.startApplicationAgentRefillSession({
+        task: current,
+        requestID: refillRequestID() || window.crypto.randomUUID(),
+        sourceSessionID: opencodeSession()?.sessionID,
+      })
+      setOpenCodeSession(result.session)
       setAgentMessages([])
-      persistActiveSession(session)
-      setRestoreNotice("已重建 OpenCode 会话，并发送精简启动指令。旧会话不会被隐藏，可通过 OpenCode 原生页查看。")
-      await refreshAgentMessages(session)
+      persistActiveSession(result.session)
+      setShowOpenCode(false)
+      setShowRefillConfirmation(false)
+      setRefillRequestID("")
+      setRestoreNotice(
+        `已新建第 ${result.attempt.ordinal} 次独立填表会话。材料、学生档案和学校要求继续复用；旧对话、旧浏览器进度与审计记录均已保留。`,
+      )
+      await refreshAgentMessages(result.session)
       await refreshAuthStatus()
+      await loadApplicationTasks()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -995,6 +1016,18 @@ function ApplicationAgentShell(props: {
 
   const taskNeedsExplicitContinue = (status: ApplicationTask["status"]) =>
     ["已暂停", "等待顾问登录", "等待顾问接管浏览器"].includes(status)
+
+  const canStartRefill = (status: ApplicationTask["status"]) => [
+    "正在填写申请平台",
+    "正在保存申请进度",
+    "正在上传材料",
+    "等待补充材料",
+    "等待顾问登录",
+    "等待顾问接管浏览器",
+    "阶段性完成",
+    "异常中断",
+    "已暂停",
+  ].includes(status)
 
   const toggleTaskPause = async () => {
     const current = task()
@@ -1079,6 +1112,8 @@ function ApplicationAgentShell(props: {
     setOpenCodeSession(null)
     setShowOpenCode(false)
     setError(null)
+    setShowRefillConfirmation(false)
+    setRefillRequestID("")
   }
 
   const switchTask = async (next: ApplicationTask, notice?: string, force = false) => {
@@ -1095,6 +1130,8 @@ function ApplicationAgentShell(props: {
       setInput(latestTask.input)
       setSupplementalFolder("")
       setMaterialNote("")
+      setShowRefillConfirmation(false)
+      setRefillRequestID("")
       setOpenCodeSession(session)
       setShowOpenCode(false)
       setAgentMessages([])
@@ -1585,7 +1622,7 @@ function ApplicationAgentShell(props: {
               <Show when={currentTask().input.batchId}>
                 <section class="side-section">
                   <h2>批次处理</h2>
-                  <p>当前为第 {currentTask().input.batchOrder || "?"} 所学校。完成本校后再进入下一所，OCR 会复用批次结果。</p>
+                  <p>当前为第 {currentTask().input.batchOrder || "?"} 所学校。完成本校后再进入下一所，学生材料与 OCR 结果会继续复用；各校填表会话和浏览器进度彼此隔离。</p>
                   <button type="button" disabled={busy()} onClick={switchToNextBatchTask}>进入下一所学校</button>
                 </section>
               </Show>
@@ -1620,6 +1657,29 @@ function ApplicationAgentShell(props: {
               <div class="application-agent-context">
                 <Show when={restoreNotice()}>
                   {(notice) => <div class="restore-notice">{notice()}</div>}
+                </Show>
+                <Show when={showRefillConfirmation()}>
+                  <section class="refill-confirmation" aria-live="polite">
+                    <div>
+                      <p>重新填写</p>
+                      <h2>新建一个干净的填表对话？</h2>
+                      <span>不会再次 OCR、分类或生成学生档案，也不会继续读取旧聊天上下文。</span>
+                    </div>
+                    <ul>
+                      <li><strong>继续复用：</strong>现有材料、学生档案、学校要求、缺失项</li>
+                      <li><strong>重新开始：</strong>OpenCode 对话、独立 Ego 浏览器空间、当次填表进度</li>
+                      <li><strong>完整保留：</strong>旧对话、旧浏览器进度和审计记录</li>
+                    </ul>
+                    <div class="refill-confirmation-actions">
+                      <Show when={currentTask().input.batchId}>
+                        <small>批量任务会按学校逐个重开，避免多个浏览器互相干扰；切换到下一所后可再次使用本功能，仍复用同一批学生材料。</small>
+                      </Show>
+                      <button type="button" class="primary-action" disabled={busy()} onClick={startRefillSession}>
+                        {busy() ? "正在创建干净会话..." : "确认重新填写"}
+                      </button>
+                      <button type="button" disabled={busy()} onClick={cancelRefillConfirmation}>取消</button>
+                    </div>
+                  </section>
                 </Show>
                 <Show when={currentTask().status === "等待顾问确认材料"}>
                   <section class="material-review-gate" aria-live="polite">
@@ -1697,8 +1757,17 @@ function ApplicationAgentShell(props: {
                   </div>
                   <div class="workspace-actions">
                     <button type="button" class="danger-outline" disabled={busy()} onClick={toggleTaskPause}>{taskNeedsExplicitContinue(currentTask().status) ? "继续任务" : "暂停任务"}</button>
-                    <button type="button" disabled={busy() || !opencodeSession()} onClick={resendStartPrompt}>重新发送启动指令</button>
-                    <button type="button" disabled={busy()} onClick={rebuildOpenCodeSession}>重建 OpenCode 会话</button>
+                    <Show when={currentTask().status === "已创建"}>
+                      <button type="button" disabled={busy() || !opencodeSession()} onClick={resendStartPrompt}>重新发送启动指令</button>
+                    </Show>
+                    <Show
+                      when={
+                        canStartRefill(currentTask().status) &&
+                        taskGeneratedFiles(currentTask()).some((file) => file.label === "学生申请档案")
+                      }
+                    >
+                      <button type="button" class="refill-action" disabled={busy() || showRefillConfirmation()} onClick={openRefillConfirmation}>根据现有内容重新填写</button>
+                    </Show>
                     <button type="button" onClick={() => setShowOpenCode(true)}>进入 OpenCode 对话</button>
                     <button type="button" onClick={() => window.api.openPath(currentTask().workspacePath)}>打开申请工作区</button>
                   </div>

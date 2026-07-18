@@ -4,10 +4,20 @@ import { cp, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, extname, join, relative } from "node:path"
 import { app } from "electron"
 import { writeOpenCodeConfig } from "./application-agent-opencode"
+import {
+  completeApplicationRefillState,
+  inspectApplicationRefillState,
+  markApplicationRefillPromptSentState,
+  prepareApplicationRefillState,
+  validateApplicationRefillArtifacts,
+  type ApplicationRefillAttempt,
+} from "./application-agent-refill"
 import { previewSelectionList, type SelectionListRow } from "./application-selection-list"
 
-export { buildApplicationAgentStartPrompt } from "./application-agent-opencode"
+export { buildApplicationAgentRefillPrompt, buildApplicationAgentStartPrompt } from "./application-agent-opencode"
+export { applicationRefillSessionTitle } from "./application-agent-refill"
 export { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
+export type { ApplicationRefillAttempt } from "./application-agent-refill"
 
 export type ApplicationTaskInput = {
   studentName: string
@@ -440,6 +450,13 @@ export async function continueApplicationTask(workspacePath: string): Promise<Ap
   const missingItems = inferMissingItems(task.input, materials)
   const progress = await readJson<ApplicationProgress>(join(workspacePath, "03_state/application_progress.json"), initialApplicationProgress())
   await writeGeneratedDocuments(workspacePath, task.input, materials, missingItems, progress)
+  const materialReview = await readJson<Record<string, unknown>>(join(workspacePath, "03_state/material_review.json"), {})
+  if (materialReview.status === "approved" && !materialReview.preparationCompleteAt) {
+    await writeJson(join(workspacePath, "03_state/material_review.json"), {
+      ...materialReview,
+      preparationCompleteAt: new Date().toISOString(),
+    })
+  }
 
   task.counts = summarizeCounts(allFiles.length, missingItems)
   task.status = missingItems.length > 0 ? "等待补充材料" : "阶段性完成"
@@ -478,12 +495,14 @@ export async function submitApplicationMaterialReview(workspacePath: string, inp
     await cp(sourceFolder, supplementalFolder, { recursive: true, force: false, errorOnExist: false })
   }
 
+  const submittedAt = new Date().toISOString()
   await writeJson(join(workspacePath, "03_state/material_review.json"), {
     status: "approved",
     mode: input.mode,
     note,
     supplementalFolder: supplementalFolder || undefined,
-    submittedAt: new Date().toISOString(),
+    submittedAt,
+    preparationCompleteAt: input.mode === "skip" ? submittedAt : undefined,
   })
   task.status = "可继续申请"
   task.updatedAt = new Date().toISOString()
@@ -556,6 +575,56 @@ export async function refreshApplicationTaskDocuments(workspacePath: string): Pr
   await persistTask(task)
   await appendLog(workspacePath, "agent", "已刷新缺失项结构和顾问文档，已解决的申请平台表单错误不会再出现在补充清单。")
   return task
+}
+
+export async function prepareApplicationRefillAttempt(
+  workspacePath: string,
+  requestID: string,
+  sourceSessionID?: string,
+): Promise<ApplicationRefillAttempt> {
+  const task = await getApplicationTask(workspacePath)
+  const result = await prepareApplicationRefillState({ workspacePath, task, requestID, sourceSessionID })
+  if (!result.created) return result.attempt
+  await setTaskPaused(workspacePath, false)
+  await appendProgress(task, "正在填写申请平台")
+  await appendLog(
+    workspacePath,
+    "agent",
+    `顾问已创建第 ${result.attempt.ordinal} 次重新填写：复用既有整理产物，新建 OpenCode 对话和独立 Ego task space；旧浏览器进度已归档到 ${result.attempt.progressArchivePath}。`,
+  )
+  return result.attempt
+}
+
+export async function validateApplicationRefillReadiness(workspacePath: string): Promise<void> {
+  await validateApplicationRefillArtifacts(workspacePath, await getApplicationTask(workspacePath))
+}
+
+export async function inspectApplicationRefillAttempt(
+  workspacePath: string,
+  requestID: string,
+): Promise<ApplicationRefillAttempt | undefined> {
+  const task = await getApplicationTask(workspacePath)
+  return inspectApplicationRefillState({ workspacePath, task, requestID })
+}
+
+export async function completeApplicationRefillAttempt(
+  workspacePath: string,
+  attemptID: string,
+  sessionID: string,
+): Promise<ApplicationRefillAttempt> {
+  const result = await completeApplicationRefillState(workspacePath, attemptID, sessionID)
+  if (result.changed) {
+    await appendLog(workspacePath, "agent", `第 ${result.attempt.ordinal} 次重新填写已绑定全新 OpenCode 对话 ${sessionID.trim()}。`)
+  }
+  return result.attempt
+}
+
+export async function markApplicationRefillPromptSent(
+  workspacePath: string,
+  attemptID: string,
+  sessionID: string,
+): Promise<ApplicationRefillAttempt> {
+  return (await markApplicationRefillPromptSentState(workspacePath, attemptID, sessionID)).attempt
 }
 
 export async function blockHighRiskAction(workspacePath: string, action: string): Promise<ApplicationTask> {

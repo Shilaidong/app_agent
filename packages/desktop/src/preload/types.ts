@@ -150,6 +150,34 @@ export type ApplicationAgentSession = {
   workspacePath: string
 }
 
+export type ApplicationAgentRefillRequest = {
+  task: ApplicationTask
+  requestID: string
+  sourceSessionID?: string
+}
+
+export type ApplicationRefillAttempt = {
+  id: string
+  requestID: string
+  workspacePath: string
+  ordinal: number
+  createdAt: string
+  status: "prepared" | "session_created"
+  sourceSessionID?: string
+  sessionID?: string
+  promptSentAt?: string
+  taskSpaceName: string
+  progressArchivePath: string
+  reusedArtifacts: string[]
+  batchId?: string
+  batchOrder?: number
+}
+
+export type ApplicationAgentRefillSession = {
+  session: ApplicationAgentSession
+  attempt: ApplicationRefillAttempt
+}
+
 export type ApplicationAgentChatItem = {
   id: string
   role: "user" | "assistant" | "tool" | "system"
@@ -250,6 +278,9 @@ export type ElectronAPI = {
   createApplicationTasksFromSelectionList: (input: ApplicationSelectionListInput) => Promise<ApplicationSelectionListBatch>
   downloadApplicationSelectionListTemplate: () => Promise<string | null>
   startApplicationAgentSession: (task: ApplicationTask) => Promise<ApplicationAgentSession>
+  startApplicationAgentRefillSession: (
+    input: ApplicationAgentRefillRequest,
+  ) => Promise<ApplicationAgentRefillSession>
   resendApplicationAgentStartPrompt: (session: ApplicationAgentSession, task: ApplicationTask) => Promise<void>
   sendApplicationAgentPrompt: (session: ApplicationAgentSession, prompt: string) => Promise<void>
   getApplicationAgentMessages: (session: ApplicationAgentSession) => Promise<ApplicationAgentChatItem[]>

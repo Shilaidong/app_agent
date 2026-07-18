@@ -13,6 +13,8 @@ import contextMenu from "electron-context-menu"
 
 import type {
   ApplicationAgentChatItem,
+  ApplicationAgentRefillRequest,
+  ApplicationAgentRefillSession,
   ApplicationAgentSession,
   ApplicationTask,
   InitStep,
@@ -20,7 +22,19 @@ import type {
   SqliteMigrationProgress,
   WslConfig,
 } from "../preload/types"
-import { APPLICATION_AGENT_MODEL_ID, buildApplicationAgentStartPrompt, prepareApplicationAgentConfig } from "./application-agent"
+import {
+  APPLICATION_AGENT_MODEL_ID,
+  applicationRefillSessionTitle,
+  buildApplicationAgentRefillPrompt,
+  buildApplicationAgentStartPrompt,
+  completeApplicationRefillAttempt,
+  getApplicationTask,
+  inspectApplicationRefillAttempt,
+  markApplicationRefillPromptSent,
+  prepareApplicationAgentConfig,
+  prepareApplicationRefillAttempt,
+  validateApplicationRefillReadiness,
+} from "./application-agent"
 import { writeOpenCodeConfig } from "./application-agent-opencode"
 import { checkAppExists, resolveAppPath, wslPath } from "./apps"
 import { CHANNEL, UPDATER_ENABLED } from "./constants"
@@ -341,6 +355,9 @@ const main = Effect.gen(function* () {
     if (text.includes("你现在是 Terra-Edu 申请 Agent")) {
       return "任务启动指令已发送给 OpenCode Agent。Agent 将从创建隔离工作区开始自动执行申请流程。"
     }
+    if (text.includes("你现在是 Terra-Edu 重新填写 Agent")) {
+      return "重新填写指令已发送。新 Agent 将复用已经整理好的材料和申请档案，只重新执行当前学校的浏览器填表。"
+    }
     return truncateChatBody(text, 900)
   }
 
@@ -394,7 +411,7 @@ const main = Effect.gen(function* () {
           id: `${session.sessionID}:message-read-error`,
           role: "system",
           title: "OpenCode 消息读取失败",
-          body: `${summarizeOpenCodeReadError(readError)}\n\n${applicationAgentLogHelp(session)}\n\n可以先点“重新发送启动指令”；如果仍失败，再点“重建 OpenCode 会话”。`,
+          body: `${summarizeOpenCodeReadError(readError)}\n\n${applicationAgentLogHelp(session)}\n\n材料整理尚未完成时，可以先点“重新发送启动指令”；如果材料整理已经完成，请回到任务页使用“根据现有内容重新填写”。`,
           status: "error",
           time: Date.now(),
         },
@@ -492,7 +509,7 @@ const main = Effect.gen(function* () {
         role: "system",
         title: stalled ? "Agent 可能卡住" : "OpenCode Agent 正在运行",
         body: stalled
-          ? `Assistant 已超过 3 分钟没有新的回复、part 或工具结果。\n\n${applicationAgentLogHelp(session)}\n\n可以先点“重新发送启动指令”；如果仍失败，再点“重建 OpenCode 会话”。`
+          ? `Assistant 已超过 3 分钟没有新的回复、part 或工具结果。\n\n${applicationAgentLogHelp(session)}\n\n材料整理尚未完成时，可以先点“重新发送启动指令”；如果材料整理已经完成，请回到任务页使用“根据现有内容重新填写”。`
           : "Agent 正在处理当前申请任务。这里会自动刷新新的回复、工具调用和结果。",
         status: stalled ? "error" : "running",
         time: last.info.time?.created,
@@ -533,7 +550,13 @@ const main = Effect.gen(function* () {
     const found = sessions
       .filter((item) => item.directory === workspacePath)
       .sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
-      .find((item) => item.agent === "application-agent" || item.title?.includes("申请任务"))
+      .find(
+        (item) =>
+          item.agent === "application-agent" ||
+          item.agent === "application-refill-agent" ||
+          item.title?.includes("申请任务") ||
+          item.title?.includes("重新填写"),
+      )
     if (!found) {
       const created = await postSidecarJson<{ id: string }>(
         "/session",
@@ -597,7 +620,158 @@ const main = Effect.gen(function* () {
     return session
   }
 
+  const applicationAgentRefillSessions = new Map<
+    string,
+    { requestID: string; pending: Promise<ApplicationAgentRefillSession> }
+  >()
+
+  const startApplicationAgentRefillSession = (
+    input: ApplicationAgentRefillRequest,
+  ): Promise<ApplicationAgentRefillSession> => {
+    const requestID = input.requestID.trim()
+    if (!requestID) return Promise.reject(new Error("重新填写请求缺少 requestID。"))
+
+    const key = resolve(input.task.workspacePath)
+    const running = applicationAgentRefillSessions.get(key)
+    if (running?.requestID === requestID) return running.pending
+    if (running) return Promise.reject(new Error("正在创建重新填写会话，请稍候。"))
+
+    const pending = (async () => {
+      const task = await getApplicationTask(input.task.workspacePath)
+      const inspected = await inspectApplicationRefillAttempt(task.workspacePath, requestID)
+      await validateApplicationRefillReadiness(task.workspacePath)
+      await prepareApplicationAgentConfig(task.sessionDirectory)
+      await ensureApplicationAgentQuota("start_application_refill", task.workspacePath)
+      const sourceSessionID = inspected?.sourceSessionID || input.sourceSessionID?.trim()
+      if (!inspected?.sessionID && sourceSessionID) {
+        type SidecarSourceSession = { id: string; directory?: string; agent?: string }
+        const source = await getSidecarJson<SidecarSourceSession>(
+          `/session/${encodeURIComponent(sourceSessionID)}`,
+          task.sessionDirectory,
+        ).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error)
+          if (/\b404\b|not found|does not exist/i.test(message)) return undefined
+          throw error
+        })
+        if (source && (
+          resolve(source.directory || "") !== resolve(task.sessionDirectory) ||
+          (source.agent !== "application-agent" && source.agent !== "application-refill-agent")
+        )) {
+          throw new Error("旧填写会话不属于当前学校工作区，已拒绝中止；没有启动新的填写任务。")
+        }
+        if (source) {
+        await postSidecarJson<boolean>(
+          `/session/${encodeURIComponent(sourceSessionID)}/abort`,
+          task.sessionDirectory,
+          undefined,
+        ).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error)
+          if (/\b404\b|not found|does not exist/i.test(message)) return false
+          throw new Error(`无法停止旧填写会话，未启动新的填写任务：${message}`)
+        })
+        }
+      }
+      const prepared = await prepareApplicationRefillAttempt(
+        task.workspacePath,
+        requestID,
+        sourceSessionID,
+      )
+      type SidecarRefillSession = {
+        id: string
+        directory?: string
+        agent?: string
+        title?: string
+        time?: { created?: number }
+      }
+      const title = applicationRefillSessionTitle(task, prepared)
+      const findCreatedSession = async () => (await getSidecarJson<SidecarRefillSession[]>(
+        `/session?search=${encodeURIComponent(prepared.id)}&limit=20`,
+        task.sessionDirectory,
+      ))
+        .filter((session) =>
+          resolve(session.directory || "") === resolve(task.sessionDirectory) &&
+          session.agent === "application-refill-agent" &&
+          session.title === title
+        )
+        .sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
+        .at(0)
+      const recovered = prepared.sessionID ? undefined : await findCreatedSession()
+      const created = prepared.sessionID
+        ? { id: prepared.sessionID }
+        : recovered || await postSidecarJson<SidecarRefillSession>(
+            "/session",
+            task.sessionDirectory,
+            {
+              title,
+              agent: "application-refill-agent",
+              model: {
+                providerID: "opencode-go",
+                id: APPLICATION_AGENT_MODEL_ID,
+              },
+            },
+          ).catch(async (error) => {
+            const recoveredAfterUncertainCreate = await findCreatedSession()
+            if (recoveredAfterUncertainCreate) return recoveredAfterUncertainCreate
+            const message = error instanceof Error ? error.message : String(error)
+            throw new Error(`新填表对话的创建结果尚未确认：${message}。请保留当前确认面板并再次点击，系统会先查找同一次对话，不会直接重复创建。`)
+          })
+      const attempt = prepared.sessionID
+        ? prepared
+        : await completeApplicationRefillAttempt(task.workspacePath, prepared.id, created.id)
+      const session: ApplicationAgentSession = {
+        sessionID: created.id,
+        directory: task.sessionDirectory,
+        workspacePath: task.workspacePath,
+      }
+      type SidecarRefillMessage = { info?: { role?: string } }
+      const messages = await getSidecarJson<SidecarRefillMessage[]>(
+        `/session/${session.sessionID}/message?limit=80`,
+        session.directory,
+      )
+      if (!messages.some((message) => message.info?.role === "user")) {
+        await ensureApplicationAgentQuota("send_refill_prompt", task.workspacePath, session.sessionID)
+        await postSidecarJson<void>(
+          `/session/${session.sessionID}/prompt_async`,
+          session.directory,
+          {
+            agent: "application-refill-agent",
+            model: {
+              providerID: "opencode-go",
+              modelID: APPLICATION_AGENT_MODEL_ID,
+            },
+            parts: [{ type: "text", text: buildApplicationAgentRefillPrompt(task, attempt) }],
+          },
+          false,
+        ).catch(async (error) => {
+          const recoveredMessages = await getSidecarJson<SidecarRefillMessage[]>(
+            `/session/${session.sessionID}/message?limit=80`,
+            session.directory,
+          ).catch(() => [])
+          if (recoveredMessages.some((message) => message.info?.role === "user")) return
+          throw error
+        })
+      }
+      return {
+        session,
+        attempt: await markApplicationRefillPromptSent(task.workspacePath, attempt.id, session.sessionID),
+      }
+    })()
+    applicationAgentRefillSessions.set(key, { requestID, pending })
+    void pending.then(
+      () => {
+        if (applicationAgentRefillSessions.get(key)?.pending === pending) applicationAgentRefillSessions.delete(key)
+      },
+      () => {
+        if (applicationAgentRefillSessions.get(key)?.pending === pending) applicationAgentRefillSessions.delete(key)
+      },
+    )
+    return pending
+  }
+
   const resendApplicationAgentStartPrompt = async (session: ApplicationAgentSession, task: ApplicationTask) => {
+    if (await applicationAgentForSession(session) !== "application-agent") {
+      throw new Error("重新填写会话不能重新发送材料整理启动指令；请直接在当前对话中补充填表信息。")
+    }
     await prepareApplicationAgentConfig(task.sessionDirectory)
     await ensureApplicationAgentQuota("resend_start_prompt", task.workspacePath, session.sessionID)
     await postSidecarJson<void>(
@@ -615,7 +789,20 @@ const main = Effect.gen(function* () {
     )
   }
 
+  const applicationAgentForSession = async (session: ApplicationAgentSession) => {
+    const info = await getSidecarJson<{ id: string; directory?: string; agent?: string }>(
+      `/session/${encodeURIComponent(session.sessionID)}`,
+      session.directory,
+    )
+    if (resolve(info.directory || "") !== resolve(session.directory)) {
+      throw new Error("OpenCode 对话不属于当前申请工作区，已拒绝发送消息。")
+    }
+    if (info.agent === "application-agent" || info.agent === "application-refill-agent") return info.agent
+    throw new Error("当前 OpenCode 对话不是申请 Agent 会话，已拒绝发送消息。")
+  }
+
   const sendApplicationAgentPrompt = async (session: ApplicationAgentSession, prompt: string) => {
+    const agent = await applicationAgentForSession(session)
     await ensureApplicationAgentQuota("send_agent_prompt", session.workspacePath, session.sessionID)
     const questions = await getSidecarJson<PendingQuestionRequest[]>("/question", session.directory).catch(() => [])
     const pendingQuestion = questions.find((item) => item.sessionID === session.sessionID)
@@ -627,7 +814,13 @@ const main = Effect.gen(function* () {
         false,
       )
     }
-    const text = `请在目标申请工作区继续执行快捷操作：${prompt}
+    const text = agent === "application-refill-agent"
+      ? `顾问在当前“根据现有内容重新填写”对话中发来补充或操作指令：${prompt}
+
+目标申请工作区：${session.workspacePath}
+
+本会话边界保持不变：只复用已经确认的材料、student_profile.md、application_requirements.json、missing_items.json 和当前 application_progress.json；不得重新初始化工作区、OCR、分类、研究要求、生成档案或读取旧对话/归档进度。只继续当前学校的 Ego 填表；不要新建另一个 task space，也不要切换到批次内其他学校。不确定信息继续使用 question 询问顾问，最终提交、付款、不可逆推荐信邀请和密码保存仍然禁止。`
+      : `请在目标申请工作区继续执行快捷操作：${prompt}
 
 目标申请工作区：${session.workspacePath}
 
@@ -638,7 +831,7 @@ const main = Effect.gen(function* () {
       `/session/${session.sessionID}/prompt_async`,
       session.directory,
       {
-        agent: "application-agent",
+        agent,
         model: {
           providerID: "opencode-go",
           modelID: APPLICATION_AGENT_MODEL_ID,
@@ -706,6 +899,7 @@ const main = Effect.gen(function* () {
     installUpdate: async () => installUpdate(killSidecar),
     setBackgroundColor: (color) => setBackgroundColor(color),
     startApplicationAgentSession,
+    startApplicationAgentRefillSession,
     resendApplicationAgentStartPrompt,
     sendApplicationAgentPrompt,
     getApplicationAgentMessages,

@@ -6,6 +6,8 @@ import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 
 import type {
   ApplicationAgentChatItem,
+  ApplicationAgentRefillRequest,
+  ApplicationAgentRefillSession,
   ApplicationAgentSession,
   ApplicationMaterialReviewInput,
   ApplicationSelectionListInput,
@@ -70,6 +72,9 @@ type Deps = {
   installUpdate: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
   startApplicationAgentSession: (task: ApplicationTask) => Promise<ApplicationAgentSession>
+  startApplicationAgentRefillSession: (
+    input: ApplicationAgentRefillRequest,
+  ) => Promise<ApplicationAgentRefillSession>
   resendApplicationAgentStartPrompt: (session: ApplicationAgentSession, task: ApplicationTask) => Promise<void>
   sendApplicationAgentPrompt: (session: ApplicationAgentSession, prompt: string) => Promise<void>
   getApplicationAgentMessages: (session: ApplicationAgentSession) => Promise<ApplicationAgentChatItem[]>
@@ -266,6 +271,11 @@ export function registerIpcHandlers(deps: Deps) {
   })
   ipcMain.handle("application-agent:start-session", (_event: IpcMainInvokeEvent, task: ApplicationTask) =>
     deps.startApplicationAgentSession(task),
+  )
+  ipcMain.handle(
+    "application-agent:start-refill-session",
+    (_event: IpcMainInvokeEvent, input: ApplicationAgentRefillRequest) =>
+      deps.startApplicationAgentRefillSession(input),
   )
   ipcMain.handle(
     "application-agent:resend-start-prompt",

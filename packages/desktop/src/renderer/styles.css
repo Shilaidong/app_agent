@@ -974,6 +974,72 @@ button {
   padding: 7px 10px;
 }
 
+.refill-confirmation {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.8fr) minmax(320px, 1.35fr) minmax(220px, 0.8fr);
+  align-items: center;
+  gap: 14px;
+  border: 1px solid rgba(47, 93, 62, 0.28);
+  border-radius: 12px;
+  background: #f3f8f2;
+  padding: 14px;
+}
+
+.refill-confirmation p {
+  margin: 0 0 3px;
+  color: #2f5d3e;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.refill-confirmation h2 {
+  margin: 0;
+  color: #2e3230;
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.refill-confirmation span,
+.refill-confirmation small {
+  display: block;
+  color: #625d54;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.refill-confirmation span {
+  margin-top: 5px;
+}
+
+.refill-confirmation ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #4f574f;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.refill-confirmation-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.refill-confirmation-actions small {
+  grid-column: 1 / -1;
+}
+
+.refill-confirmation-actions button {
+  min-height: 36px;
+}
+
+.workspace-actions .refill-action {
+  border-color: rgba(47, 93, 62, 0.3);
+  background: #edf6ef;
+  color: #2f5d3e;
+}
+
 .material-review-gate {
   display: grid;
   grid-template-columns: minmax(190px, 0.75fr) minmax(160px, 0.45fr) minmax(320px, 1.35fr);
@@ -1718,6 +1784,14 @@ button {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
+  .refill-confirmation {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .refill-confirmation-actions {
+    grid-column: 1 / -1;
+  }
+
   .material-review-actions {
     grid-column: 1 / -1;
   }
@@ -1728,8 +1802,13 @@ button {
   .field-grid,
   .application-agent-workspace,
   .progress-strip,
+  .refill-confirmation,
   .material-review-gate {
     grid-template-columns: 1fr;
+  }
+
+  .refill-confirmation-actions {
+    grid-column: auto;
   }
 
   .application-agent-sidebar,
