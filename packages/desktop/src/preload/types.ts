@@ -35,6 +35,7 @@ export type ApplicationTaskInput = {
   platformUsername?: string
   batchId?: string
   batchWorkspacePath?: string
+  sharedWorkspacePath?: string
   batchOrder?: number
   selectionListPath?: string
   selectionListRow?: number
@@ -136,12 +137,14 @@ export type ApplicationTask = {
     message: string
   }>
   reusedExisting?: boolean
+  sharedDossierStatus?: "preparing" | "prepared" | "ready"
 }
 
 export type ApplicationMaterialReviewInput = {
   mode: "supplement_folder" | "skip" | "note"
   sourceFolder?: string
   note?: string
+  scope?: "school" | "student"
 }
 
 export type ApplicationAgentSession = {

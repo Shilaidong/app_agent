@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs"
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises"
-import { basename, dirname, join } from "node:path"
+import { basename, dirname, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
 import type { ApplicationRefillAttempt, ApplicationTask } from "./application-agent"
@@ -132,6 +132,7 @@ function shellQuote(value: string) {
 export type OpenCodeResourceOverrides = {
   egoLiteAppPath?: string
   egoRuntimeRoot?: string
+  sharedWorkspacePath?: string
 }
 
 function renderEgoBrowserWrapper(overrides?: OpenCodeResourceOverrides) {
@@ -383,14 +384,19 @@ ${inputJson}
 - 原始学生资料文件夹（只读来源）：${task.input.sourceFolder}
 - 申请平台链接：${task.input.applicationUrl || "待官方核验"}
 ${task.input.batchWorkspacePath ? `- 选校批次工作区：${task.input.batchWorkspacePath}
-- 当前批次顺序：第 ${task.input.batchOrder || "?"} 所；原始材料已统一暂存。OCR 时会自动复用批次共享结果，后续学校请按顺序处理，不要重复扫描同一份材料。` : ""}
+- 当前批次顺序：第 ${task.input.batchOrder || "?"} 所；学校任务位于学生工作区的 schools 目录中。` : ""}
+${task.input.sharedWorkspacePath ? `- 学生共享资料库（只通过申请专用工具更新）：${task.input.sharedWorkspacePath}
+- 共享原始材料：${join(task.input.sharedWorkspacePath, "00_original_backup")}
+- 共享 OCR 与材料索引：${join(task.input.sharedWorkspacePath, "03_state")}
+- 共享学生核心档案：${join(task.input.sharedWorkspacePath, "02_generated/student_profile.md")}
+- 当前学校只独立保存申请要求、学校缺失项、Ego task space、填表进度和审计。先调用 application-agent_workspace initialize：如果返回 reusedSharedDossier:true，必须跳过 OCR、分类和 student_profile 生成，直接只读复用本地同步的共享档案；如果返回 ownerPreparation:true，当前任务才负责完成一次材料整理并发布共享档案。` : ""}
 
 ## 申请专用 Custom Tools
 
 你必须优先使用这些 OpenCode Custom Tools 完成可工具化步骤，不要只靠普通 shell 临时拼流程：
 
-- application-agent_workspace：创建目录、复制原始材料到 00_original_backup、刷新文件计数。
-- application-agent_materials：调用随包 PaddleOCR 提取扫描 PDF/图片文字，再分类 00_original_backup 中的材料，写入 materials_index；选校批次会复用已完成的共享 OCR 结果。
+- application-agent_workspace：创建学校工作区；单校任务复制原始材料，选校批次则检查并同步学生共享资料库。
+- application-agent_materials：调用随包 PaddleOCR 提取扫描 PDF/图片文字并分类材料；选校批次只允许资料库负责人执行一次，后续学校直接复用共享结果。
 - application-agent_documents：从 missing_items.json 生成信息表、材料表、Word 清单和任务总结。
 - application-agent_state：按统一 task_state.json schema 更新状态、统计和进度。
 - ego-browser skill：macOS 申请平台填表的唯一浏览器自动化后端。通过 ego lite 的独立 task space 打开/复用申请平台，使用 snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace 完成真人式观察、填写、复查和保存。
@@ -400,7 +406,7 @@ ${task.input.batchWorkspacePath ? `- 选校批次工作区：${task.input.batchW
 
 ## 工具调用硬性约束
 
-- 启动阶段只做三件事：输出简短进度、优先调用 OpenCode 内置 todowrite 建立默认计划、调用 application-agent_workspace 初始化工作区并复制材料副本。todowrite 如果失败一次，不要重试、不要调用 runtime、不要阻塞启动；改用文字列出计划并继续 workspace 初始化。
+- 启动阶段只做三件事：输出简短进度、优先调用 OpenCode 内置 todowrite 建立默认计划、调用 application-agent_workspace 初始化工作区或同步学生共享档案。todowrite 如果失败一次，不要重试、不要调用 runtime、不要阻塞启动；改用文字列出计划并继续 workspace 初始化。
 - 启动阶段不要调用 webfetch、websearch、application-agent_requirements、ego-browser 或填表相关工具；这些放到工作区初始化成功后的后续阶段逐步执行。
 - 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
 - 后续阶段中，学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方学校/项目/申请要求页面。抓取结果必须调用 application-agent_requirements 落盘。
@@ -420,9 +426,9 @@ ${EGO_BROWSER_PROTOCOL}
 
 1. 先用 1-2 句话告诉顾问：申请任务已接管，正在创建隔离工作区。
 2. 优先调用 OpenCode 内置 todowrite 创建默认 10 步计划；如果 todowrite 调用失败一次，直接用文字列出默认计划并继续下一步。
-3. 调用 application-agent_workspace，action 使用 initialize，初始化目标申请工作区并复制原始材料副本。
-4. 调用 application-agent_state，把状态更新为“正在读取文件”或写入 workspace 初始化结果。
-5. 输出工作区路径、材料副本位置和下一步计划。
+3. 调用 application-agent_workspace，action 使用 initialize。单校任务初始化并复制副本；选校批次由工具判断当前任务是一次性资料整理负责人，还是直接同步已发布的共享档案。
+4. 调用 application-agent_state 同步 workspace 结果：ownerPreparation:true 更新为“正在读取文件”；reusedSharedDossier:true 更新为“正在检查缺失内容”，不要把状态退回材料准备阶段。
+5. 输出学校工作区、学生共享资料库（如有）、是否复用共享档案和下一步计划。若工具返回 reusedSharedDossier:true，后续计划必须删除 OCR、分类和重新生成学生档案三步。
 
 启动阶段不要读取材料正文、不要抓取学校网页、不要打开申请平台、不要调用 runtime 兜底。完成上述步骤后，再按下面的后续阶段逐步推进。
 
@@ -457,6 +463,8 @@ ${JSON.stringify(attempt, null, 2)}
 - 申请平台链接：${task.input.applicationUrl}
 - 本次唯一 Ego task space 名称：${attempt.taskSpaceName}
 ${attempt.batchId ? `- 这是选校批次 ${attempt.batchId} 的第 ${attempt.batchOrder || "?"} 所学校；只处理当前学校，不要并发启动批次内其他学校。批次共享材料已经整理完成，本次直接复用当前学校工作区的结构化产物。` : ""}
+${task.input.sharedWorkspacePath ? `- 学生共享资料库：${task.input.sharedWorkspacePath}
+- 学生核心档案和材料证据来自该共享资料库；它在本会话中严格只读。当前学校自己的 requirements、missing_items、application_progress 和浏览器审计仍在目标学校工作区内。` : ""}
 
 ## 这是填表专用会话，不是材料整理会话
 
@@ -469,6 +477,7 @@ ${attempt.batchId ? `- 这是选校批次 ${attempt.batchId} 的第 ${attempt.ba
 - 03_state/missing_items.json
 - 03_state/material_review.json
 - 00_original_backup 和 01_classified_materials
+${task.input.sharedWorkspacePath ? `- ${task.input.sharedWorkspacePath} 下的共享原始材料、分类材料、OCR 文字与学生核心档案` : ""}
 
 严禁调用 application-agent_workspace、application-agent_materials、application-agent_requirements 或 application-agent_documents。严禁重新初始化工作区、复制材料、OCR、分类、抓取/重写申请要求、重新生成 student_profile.md 或重新做材料总结。工具层和当前 Agent 权限也会拒绝这些操作；如果任何必需产物看起来不完整，请清楚报告缺失并停止，不得自行兜底重建。
 
@@ -502,11 +511,11 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 
 默认流程：
 1. 优先调用 OpenCode 内置 todowrite 创建 10 步计划，并在每个阶段更新进度；如果 todowrite 调用失败一次，用文字计划继续，不要阻塞工作区初始化。
-2. 调用 application-agent_workspace 创建/刷新专属申请工作区，并把原始资料复制到 00_original_backup。
-3. 调用 application-agent_materials，action 使用 extract_text，对扫描 PDF/图片运行随包 PaddleOCR，并读取生成的文字索引。
-4. 调用 application-agent_materials，action 使用 classify 整理材料，无法判断的文件放入 needs_review。
+2. 调用 application-agent_workspace 创建/刷新学校工作区。单校任务复制原始资料；选校批次先检查学生共享资料库角色。
+3. 只有工具返回 ownerPreparation:true 或单校任务时，才调用 application-agent_materials extract_text 运行 PaddleOCR；reusedSharedDossier:true 时必须跳过。
+4. 只有资料库负责人或单校任务调用 application-agent_materials classify；后续学校直接复用共享材料索引。
 5. 使用 webfetch 读取申请链接；信息不足时用 websearch 查找官方学校/项目要求，并调用 application-agent_requirements 落盘。
-6. 生成结构化 student_profile.md。
+6. 资料库负责人生成只含学生事实的 student_profile.md；后续学校只读复用，不得重新生成。
 7. 检查缺失信息和缺失材料，已有信息不要重复要求，并写入 03_state/missing_items.json。
 8. 调用 application-agent_documents，根据 missing_items.json 生成信息表、材料表、Word 清单和总结。
 9. 材料、缺失项和顾问文档生成后，必须先汇报材料总结并停止。此时桌面应用会显示“材料确认”面板；在 03_state/material_review.json 的 status 变为 approved 且收到顾问后续指令前，严禁调用 application-agent_cua 的 prepare_ego_task、严禁启动 ego-browser 或打开申请平台。
@@ -523,7 +532,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - application-agent_requirements：保存学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
 
 工具调用硬性约束：
-- 启动阶段只做 todowrite、application-agent_workspace initialize 和 application-agent_state 状态同步；todowrite 如果失败一次，用文字计划继续，不要阻塞工作区初始化；不要在启动阶段调用 webfetch、websearch、application-agent_requirements 或 ego-browser。
+- 启动阶段只做 todowrite、application-agent_workspace initialize 和 application-agent_state 状态同步；todowrite 如果失败一次，用文字计划继续，不要阻塞工作区初始化；选校批次必须依据 workspace 返回值删去重复准备步骤；不要在启动阶段调用 webfetch、websearch、application-agent_requirements 或 ego-browser。
 - 后续阶段中，学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方页面。抓取结果必须调用 application-agent_requirements 落盘。
 - 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
 - 客户端已随包提供 ripgrep 和 OCR，不要下载工具、不要用 Python，也不要用 bash 读写状态 JSON。文件读取使用 OpenCode 内置 read/glob/grep；扫描材料调用 application-agent_materials 的 extract_text；状态更新只调用申请专用工具。
@@ -585,15 +594,15 @@ const SKILL_DEFINITIONS = [
   },
   {
     name: "workspace-building",
-    description: "创建隔离申请工作区，复制原始材料，建立标准目录和初始状态文件。",
+    description: "创建学校隔离工作区；选校批次检查并复用学生共享资料库。",
     body: `执行步骤：
 1. 调用 application-agent_workspace，action 使用 initialize。
-2. 确认目录包含 00_original_backup、01_classified_materials、02_generated、03_state、04_logs、05_screenshots、06_new_materials。
-3. 确认原始学生文件夹没有被修改；所有后续读写都在申请工作区内完成。
-4. 调用 application-agent_state，把状态更新为“正在读取文件”。
+2. 检查工具返回的 reusedSharedDossier 和 ownerPreparation。reusedSharedDossier:true 时必须删除计划中的 OCR、分类和学生档案生成步骤；ownerPreparation:true 时才执行一次共享材料准备。
+3. 单校任务确认本地标准目录；批次任务确认共享材料只在 shared 目录，学校目录只保存学校状态和兼容快照。
+4. 调用 application-agent_state：首次整理更新为“正在读取文件”，复用共享档案更新为“正在检查缺失内容”。
 
 输出要求：
-- 告诉顾问工作区已创建，原始材料已复制为副本。
+- 告诉顾问学校工作区、学生共享资料库以及本次是首次整理还是直接复用。
 - 如果复制失败，记录失败文件和原因，不要继续假装完成。`,
   },
   {
@@ -601,10 +610,11 @@ const SKILL_DEFINITIONS = [
     description: "按身份、学术、语言、文书、推荐、财务、平台相关、其他、待确认分类材料。",
     body: `执行步骤：
 1. 调用 application-agent_materials，先用 extract_text 生成扫描材料文字，再用 classify 对 00_original_backup 中的文件分类。
-2. 优先结合文件名、03_state/extracted_text/ 中的文字和文件内容判断用途。
-3. 分类目录必须覆盖 identity、academic、language、essays、recommendation、financial、platform_related、other、needs_review。
-4. 不确定材料进入 needs_review，并在 missing_items.json 中加入“待确认材料用途”。
-5. 分类完成后调用 application-agent_state 更新为“正在生成学生资料”。
+2. 如果 application-agent_workspace 已返回 reusedSharedDossier:true，禁止执行本 skill；直接读取同步后的 materials_index 和共享档案。
+3. 优先结合文件名、共享资料库 03_state/extracted_text/ 中的文字和文件内容判断用途。
+4. 分类目录必须覆盖 identity、academic、language、essays、recommendation、financial、platform_related、other、needs_review。
+5. 不确定材料进入 needs_review，并在 missing_items.json 中加入“待确认材料用途”。
+6. 分类完成后调用 application-agent_state 更新为“正在生成学生资料”。
 
 输出要求：
 - 汇报已分类数量、主要材料类型、待确认数量。
@@ -615,10 +625,11 @@ const SKILL_DEFINITIONS = [
     description: "根据已有材料生成结构化 student_profile.md，作为后续填表核心资料库。",
     body: `执行步骤：
 1. 读取 03_state/materials_index.json、文本/OCR 提取结果、已有缺失项和任务输入。
-2. 生成或更新 02_generated/student_profile.md。
-3. 档案必须包含：基本信息、联系方式、家庭信息、教育经历、成绩、语言成绩、活动、奖项、文书、推荐人、申请目标、材料目录、材料路径、缺失信息、不确定信息、填表注意事项。
-4. 对无法确认的字段写“待确认”，不要编造。
-5. 生成后调用 application-agent_state 更新为“正在检查缺失内容”。
+2. 如果 application-agent_workspace 已返回 reusedSharedDossier:true，禁止重新生成或改写 student_profile.md；只读使用工具同步的共享档案快照。
+3. 只有资料库负责人生成或更新 02_generated/student_profile.md。档案只包含可跨学校复用的学生事实：基本信息、联系方式、家庭信息、教育经历、成绩、语言成绩、活动、奖项、推荐人事实和材料证据路径。
+4. 学校、项目、截止日期、学校特定文书观点、学校问题答案、学校缺失项和浏览器状态严禁写入学生核心档案；它们分别保存在 task_input、application_requirements、missing_items 和 application_progress。
+5. 对无法确认的字段写“待确认”，不要编造。
+6. 生成后调用 application-agent_state 更新为“正在检查缺失内容”。
 
 输出要求：
 - 告诉顾问档案路径和主要已确认信息。
@@ -781,8 +792,9 @@ ${command[2]}
 }
 
 function renderApplicationAgentTools() {
-  return String.raw`import { existsSync } from "node:fs"
-import { cp, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises"
+  return String.raw`import { createHash } from "node:crypto"
+import { existsSync } from "node:fs"
+import { cp, mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, extname, join, relative, resolve } from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
@@ -877,21 +889,21 @@ function rejectPreparationMutationForRefill(ctx: ToolContext, operation: string)
 async function materialReviewPreparationComplete(workspace: string, materialReview: Record<string, any>) {
   if (Date.parse(String(materialReview.preparationCompleteAt || ""))) return true
   if (materialReview.mode === "skip") return true
-  const submittedAt = Date.parse(String(materialReview.submittedAt || ""))
-  if (!submittedAt || (materialReview.mode !== "note" && materialReview.mode !== "supplement_folder")) return true
-  const required = ["02_generated/student_profile.md", "03_state/missing_items.json"]
-  if (materialReview.mode === "supplement_folder") {
-    const supplementalFolder = String(materialReview.supplementalFolder || "").trim()
-    if (!supplementalFolder || !existsSync(supplementalFolder)) return false
-    required.push("03_state/materials_index.json")
-    if ((await listFiles(supplementalFolder)).some((path) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(path))) {
-      required.push("03_state/ocr_index.json")
-    }
+  if (!Date.parse(String(materialReview.submittedAt || ""))) return false
+  if (!existsSync(join(workspace, "02_generated", "student_profile.md")) || !existsSync(join(workspace, "03_state", "missing_items.json"))) return false
+  if (materialReview.mode === "note") {
+    const profile = materialReview.scope === "student"
+      ? String(materialReview.sharedProfileCandidatePath || "")
+      : join(workspace, "02_generated", "student_profile.md")
+    const before = String(materialReview.scope === "student" ? materialReview.sharedProfileSha256Before || "" : materialReview.profileSha256Before || "")
+    return Boolean(before) && Boolean(profile) && existsSync(profile) && before !== await hashFile(profile)
   }
-  return (await Promise.all(required.map((path) => stat(join(workspace, path)).then(
-    (info) => info.mtimeMs >= submittedAt,
-    () => false,
-  )))).every(Boolean)
+  if (materialReview.mode !== "supplement_folder") return false
+  const expected = Array.isArray(materialReview.sourceManifest)
+    ? materialReview.sourceManifest.map((item: any) => String(item?.sha256 || "")).filter(Boolean)
+    : []
+  const applied = new Set(Array.isArray(materialReview.appliedSourceHashes) ? materialReview.appliedSourceHashes.map(String) : [])
+  return expected.length > 0 && expected.every((hash: string) => applied.has(hash))
 }
 
 async function readJson(path: string, fallback: any) {
@@ -905,6 +917,177 @@ async function readJson(path: string, fallback: any) {
 async function writeJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, JSON.stringify(value, null, 2) + "\n", "utf8")
+}
+
+async function writeAtomicJson(path: string, value: unknown) {
+  await mkdir(dirname(path), { recursive: true })
+  const staged = join(dirname(path), "." + basename(path) + ".staged-" + process.pid + "-" + Date.now())
+  await writeFile(staged, JSON.stringify(value, null, 2) + "\n", "utf8")
+  await rename(staged, path)
+}
+
+function sharedStudentDossier(task: any) {
+  const taskWorkspace = resolve(String(task.workspacePath || task.sessionDirectory || "").trim())
+  const schools = dirname(taskWorkspace)
+  if (basename(schools) !== "schools") return undefined
+  const batchWorkspace = dirname(schools)
+  const workspace = join(batchWorkspace, "shared")
+  const configuredShared = String(task.input?.sharedWorkspacePath || "").trim()
+  const configuredBatch = String(task.input?.batchWorkspacePath || "").trim()
+  if (
+    (configuredShared && resolve(configuredShared) !== workspace) ||
+    (configuredBatch && resolve(configuredBatch) !== batchWorkspace)
+  ) {
+    throw new Error("STUDENT_DOSSIER_PATH_MISMATCH: 当前学校任务与学生共享资料库路径不一致，已拒绝跨学生读取。")
+  }
+  if (!existsSync(workspace) || !existsSync(join(batchWorkspace, "03_state", "batch_state.json"))) return undefined
+  return {
+    workspace,
+    materials: join(workspace, "00_original_backup"),
+    classified: join(workspace, "01_classified_materials"),
+    generated: join(workspace, "02_generated"),
+    state: join(workspace, "03_state"),
+    profile: join(workspace, "02_generated", "student_profile.md"),
+    materialsIndex: join(workspace, "03_state", "materials_index.json"),
+    ocrIndex: join(workspace, "03_state", "ocr_index.json"),
+    extractedText: join(workspace, "03_state", "extracted_text"),
+    manifest: join(workspace, "03_state", "shared_dossier_state.json"),
+  }
+}
+
+async function sharedDossierAccess(task: any) {
+  const shared = sharedStudentDossier(task)
+  if (!shared) return undefined
+  const state = await readJson(shared.manifest, {})
+  if (state.status === "ready") return { shared, state, role: "reader" as const }
+  if (String(state.ownerTaskId || "") === String(task.id || "")) {
+    return { shared, state, role: "owner" as const }
+  }
+  throw new Error("STUDENT_DOSSIER_NOT_READY: 第一所学校尚未完成学生共享档案。请先完成批次第 1 所学校的材料整理和材料确认，再启动当前学校。")
+}
+
+async function hydrateSharedDossier(workspace: string, task: any, access: any) {
+  if (access.role !== "reader") return
+  const required = [access.shared.profile, access.shared.materialsIndex]
+  if (!required.every(existsSync)) {
+    throw new Error("STUDENT_DOSSIER_INCOMPLETE: 共享档案已标记完成，但学生档案或材料索引缺失。请暂停当前学校并修复学生共享资料库。")
+  }
+  const expectedHashes = access.state.hashes || {}
+  if (
+    !expectedHashes.studentProfileSha256 ||
+    !expectedHashes.materialsIndexSha256 ||
+    !expectedHashes.rawMaterialsSha256 ||
+    !expectedHashes.classifiedMaterialsSha256 ||
+    !expectedHashes.extractedTextSha256 ||
+    (expectedHashes.studentProfileSha256 && expectedHashes.studentProfileSha256 !== await hashFile(access.shared.profile)) ||
+    (expectedHashes.materialsIndexSha256 && expectedHashes.materialsIndexSha256 !== await hashFile(access.shared.materialsIndex)) ||
+    (expectedHashes.ocrIndexSha256 && (!existsSync(access.shared.ocrIndex) || expectedHashes.ocrIndexSha256 !== await hashFile(access.shared.ocrIndex))) ||
+    expectedHashes.rawMaterialsSha256 !== await hashTree(access.shared.materials) ||
+    expectedHashes.classifiedMaterialsSha256 !== await hashTree(access.shared.classified) ||
+    expectedHashes.extractedTextSha256 !== await hashTree(access.shared.extractedText)
+  ) {
+    throw new Error("STUDENT_DOSSIER_HASH_MISMATCH: 学生共享档案在发布后发生变化，已停止同步；请由顾问重新确认材料档案。")
+  }
+  const localProfile = join(workspace, "02_generated", "student_profile.md")
+  const localMaterialsIndex = join(workspace, "03_state", "materials_index.json")
+  const localOcrIndex = join(workspace, "03_state", "ocr_index.json")
+  await cp(access.shared.profile, join(workspace, "02_generated", "shared_student_profile.md"), { force: true })
+  await cp(access.shared.materialsIndex, join(workspace, "03_state", "shared_materials_index.json"), { force: true })
+  if (!existsSync(localProfile)) await cp(access.shared.profile, localProfile, { force: true })
+  if (!existsSync(localMaterialsIndex)) await cp(access.shared.materialsIndex, localMaterialsIndex, { force: true })
+  if (existsSync(access.shared.ocrIndex)) {
+    await cp(access.shared.ocrIndex, join(workspace, "03_state", "shared_ocr_index.json"), { force: true })
+    if (!existsSync(localOcrIndex)) await cp(access.shared.ocrIndex, localOcrIndex, { force: true })
+  }
+  await writeJson(join(workspace, "03_state", "shared_dossier_snapshot.json"), {
+    status: "ready",
+    reusedSharedDossier: true,
+    sharedWorkspacePath: access.shared.workspace,
+    version: Number(access.state.version || 1),
+    publishedAt: access.state.publishedAt || access.state.updatedAt || "",
+    synchronizedAt: new Date().toISOString(),
+  })
+}
+
+async function hashFile(path: string) {
+  return createHash("sha256").update(await readFile(path)).digest("hex")
+}
+
+async function hashTree(path: string) {
+  const files = existsSync(path) ? await listFiles(path) : []
+  const records = await Promise.all(
+    files.sort().map(async (file) => relative(path, file).replaceAll("\\", "/") + "\\0" + await hashFile(file)),
+  )
+  return createHash("sha256").update(records.join("\n")).digest("hex")
+}
+
+async function publishSharedDossier(workspace: string, task: any, ready: boolean) {
+  const access = await sharedDossierAccess(task)
+  if (!access || access.role !== "owner") return undefined
+  if (!ready && access.state.status === "prepared") {
+    return { sharedWorkspacePath: access.shared.workspace, preparedAt: access.state.preparedAt || access.state.updatedAt || "", publishedAt: "", hashes: access.state.hashes || {} }
+  }
+  const materialReview = ready ? await readJson(join(workspace, "03_state", "material_review.json"), {}) : {}
+  const localProfile = ready && materialReview.scope === "student" && existsSync(String(materialReview.sharedProfileCandidatePath || ""))
+    ? String(materialReview.sharedProfileCandidatePath)
+    : join(workspace, "02_generated", "student_profile.md")
+  const localMaterialsIndex = join(workspace, "03_state", "materials_index.json")
+  if (!existsSync(localProfile) || !existsSync(localMaterialsIndex)) {
+    throw new Error("STUDENT_DOSSIER_INCOMPLETE: 发布共享档案前必须生成 student_profile.md 和 materials_index.json。")
+  }
+  await mkdir(access.shared.generated, { recursive: true })
+  const stagedProfile = join(access.shared.generated, ".student_profile.md.staged-" + process.pid + "-" + Date.now())
+  await cp(localProfile, stagedProfile, { force: true })
+  await rename(stagedProfile, access.shared.profile)
+  if (!existsSync(access.shared.materialsIndex)) await cp(localMaterialsIndex, access.shared.materialsIndex, { force: true })
+  if (!existsSync(access.shared.ocrIndex) && existsSync(join(workspace, "03_state", "ocr_index.json"))) {
+    await cp(join(workspace, "03_state", "ocr_index.json"), access.shared.ocrIndex, { force: true })
+  }
+  const preparedAt = new Date().toISOString()
+  const hashes = {
+    studentProfileSha256: await hashFile(access.shared.profile),
+    materialsIndexSha256: await hashFile(access.shared.materialsIndex),
+    ocrIndexSha256: existsSync(access.shared.ocrIndex) ? await hashFile(access.shared.ocrIndex) : "",
+    rawMaterialsSha256: await hashTree(access.shared.materials),
+    classifiedMaterialsSha256: await hashTree(access.shared.classified),
+    extractedTextSha256: await hashTree(access.shared.extractedText),
+  }
+  await writeAtomicJson(access.shared.manifest, {
+    ...access.state,
+    status: ready ? "ready" : "prepared",
+    version: Math.max(1, Number(access.state.version || 0) + 1),
+    ownerTaskId: task.id,
+    profilePath: access.shared.profile,
+    materialsIndexPath: access.shared.materialsIndex,
+    ocrIndexPath: access.shared.ocrIndex,
+    hashes,
+    preparedAt,
+    publishedAt: ready ? preparedAt : "",
+    updatedAt: preparedAt,
+  })
+  await writeJson(join(workspace, "03_state", "shared_dossier_snapshot.json"), {
+    status: ready ? "ready" : "prepared",
+    ownerPreparation: true,
+    sharedWorkspacePath: access.shared.workspace,
+    version: Math.max(1, Number(access.state.version || 0) + 1),
+    preparedAt,
+    publishedAt: ready ? preparedAt : "",
+    hashes,
+  })
+  return { sharedWorkspacePath: access.shared.workspace, preparedAt, publishedAt: ready ? preparedAt : "", hashes }
+}
+
+async function finalizePreparedSharedDossier(task: any) {
+  const access = await sharedDossierAccess(task)
+  if (!access || access.role !== "owner" || access.state.status !== "prepared") return undefined
+  const publishedAt = new Date().toISOString()
+  await writeAtomicJson(access.shared.manifest, {
+    ...access.state,
+    status: "ready",
+    publishedAt,
+    updatedAt: publishedAt,
+  })
+  return { sharedWorkspacePath: access.shared.workspace, preparedAt: access.state.preparedAt || "", publishedAt, hashes: access.state.hashes || {} }
 }
 
 function redactSensitiveText(value: unknown) {
@@ -1368,9 +1551,13 @@ function renderRequirementsMarkdown(task: any, requirements: any) {
 }
 
 async function summarizeCounts(workspace: string) {
+  const input = await readJson(join(workspace, "03_state/task_input.json"), {})
+  const sharedMaterials = String(input.sharedWorkspacePath || "").trim()
+    ? join(String(input.sharedWorkspacePath), "00_original_backup")
+    : ""
   const totalFiles = (
     await Promise.all(
-      [join(workspace, "00_original_backup"), join(workspace, "06_new_materials")]
+      [sharedMaterials || join(workspace, "00_original_backup"), join(workspace, "06_new_materials")]
         .filter(existsSync)
         .map((directory) => listFiles(directory)),
     )
@@ -1397,7 +1584,9 @@ async function loadTask(workspace: string) {
   const fallbackInput = await readJson(join(workspace, "03_state/task_input.json"), {})
   const now = new Date().toISOString()
   const task = await readJson(join(workspace, "03_state/task_state.json"), null)
-  if (task?.input) return task
+  if (task?.input) {
+    return { ...task, workspacePath: workspace, sessionDirectory: workspace }
+  }
   return {
     id: task?.id ?? task?.task_id ?? basename(workspace),
     slug: task?.slug ?? basename(workspace),
@@ -1456,16 +1645,27 @@ async function uniquePath(path: string) {
 }
 
 function sharedOcrState(task: any) {
+  const shared = sharedStudentDossier(task)
+  if (shared) {
+    return {
+      outputDir: shared.extractedText,
+      indexPath: shared.ocrIndex,
+      sourceDir: shared.materials,
+      layoutVersion: 2,
+    }
+  }
   const batchWorkspace = String(task.input?.batchWorkspacePath || "").trim()
   if (!batchWorkspace || !existsSync(batchWorkspace)) return undefined
   return {
     outputDir: join(batchWorkspace, "03_state", "shared_extracted_text"),
     indexPath: join(batchWorkspace, "03_state", "shared_ocr_index.json"),
+    sourceDir: "",
+    layoutVersion: 1,
   }
 }
 
 export const workspace = {
-  description: "Create or refresh the isolated Terra-Edu application workspace. Copies the original student folder into 00_original_backup without modifying the source folder.",
+  description: "Create or refresh an isolated Terra-Edu school workspace. Single-school tasks copy source materials; selection-list tasks prepare or reuse one read-only student dossier shared by all school children.",
   args: inputArg({
     action: { type: "string", enum: ["initialize", "refresh"], description: "initialize creates directories and copies source materials; refresh only updates counts" },
     sourceFolder: { type: "string", description: "Optional source student folder. Defaults to task input sourceFolder." },
@@ -1479,6 +1679,45 @@ export const workspace = {
     const task = await loadTask(workspace)
     const action = input.action || "initialize"
     await appendAudit(workspace, "workspace", action, "started")
+    const sharedAccess = await sharedDossierAccess(task)
+    if (sharedAccess) {
+      if (sharedAccess.role === "reader") {
+        await hydrateSharedDossier(workspace, task, sharedAccess)
+        await appendLog(workspace, "agent", "已同步学生共享资料库第 " + Number(sharedAccess.state.version || 1) + " 版；本校不再重复 OCR、分类或生成学生核心档案。")
+        await saveTask(workspace, task, "正在检查缺失内容", "已复用学生共享档案；本校将直接研究申请要求并进入学校独立流程。")
+        await appendAudit(workspace, "workspace", action, "completed", "reused shared student dossier v" + Number(sharedAccess.state.version || 1))
+        return JSON.stringify({
+          status: "completed",
+          reusedSharedDossier: true,
+          ownerPreparation: false,
+          sharedWorkspacePath: sharedAccess.shared.workspace,
+          sharedProfilePath: sharedAccess.shared.profile,
+          version: Number(sharedAccess.state.version || 1),
+          nextSteps: ["读取共享 student_profile 和 materials_index", "抓取当前学校要求", "生成本校缺失项和顾问文档"],
+          skippedSteps: ["复制原始材料", "PaddleOCR", "材料分类", "重新生成学生核心档案"],
+        }, null, 2)
+      }
+      await writeJson(join(workspace, "03_state", "shared_dossier_snapshot.json"), {
+        status: "preparing",
+        ownerPreparation: true,
+        reusedSharedDossier: false,
+        sharedWorkspacePath: sharedAccess.shared.workspace,
+        sharedMaterialsPath: sharedAccess.shared.materials,
+        updatedAt: new Date().toISOString(),
+      })
+      await appendLog(workspace, "agent", "当前为本选校批次的资料整理负责人。原始材料已在学生共享资料库中，只会执行一次 OCR、分类和学生核心档案生成。")
+      await saveTask(workspace, task, "正在读取文件", "学生共享资料库已就绪；当前任务负责一次性完成材料整理。")
+      await appendAudit(workspace, "workspace", action, "completed", "shared dossier owner preparation")
+      return JSON.stringify({
+        status: "completed",
+        reusedSharedDossier: false,
+        ownerPreparation: true,
+        sharedWorkspacePath: sharedAccess.shared.workspace,
+        sharedMaterialsPath: sharedAccess.shared.materials,
+        sharedProfilePath: sharedAccess.shared.profile,
+        nextSteps: ["一次性 PaddleOCR", "一次性材料分类", "生成纯学生事实档案", "发布共享档案"],
+      }, null, 2)
+    }
     const source = input.sourceFolder || task.input?.sourceFolder
     if (action === "initialize") {
       if (!source) throw new Error("sourceFolder is required for workspace initialization")
@@ -1511,18 +1750,36 @@ export const materials = {
     const workspace = root(ctx)
     await ensureTaskIsActive(workspace)
     const task = await loadTask(workspace)
+    const sharedAccess = await sharedDossierAccess(task)
     const action = String(args.input?.action || "")
     const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
-    const supplementalRoot = join(workspace, "06_new_materials")
+    const reviewedSupplementalFolder = String(materialReview.supplementalFolder || "").trim()
+    const supplementalRoot = reviewedSupplementalFolder && existsSync(reviewedSupplementalFolder)
+      ? reviewedSupplementalFolder
+      : join(workspace, "06_new_materials")
     const hasSupplementalMaterials = materialReview.status === "approved" && materialReview.mode === "supplement_folder" && existsSync(supplementalRoot)
+    const schoolOverlay = hasSupplementalMaterials && materialReview.scope !== "student"
     await appendAudit(workspace, "materials", action, "started")
+    if (sharedAccess?.role === "reader" && !hasSupplementalMaterials) {
+      await hydrateSharedDossier(workspace, task, sharedAccess)
+      await appendAudit(workspace, "materials", action, "completed", "preparation locked; reused shared dossier v" + Number(sharedAccess.state.version || 1))
+      return JSON.stringify({
+        status: "completed",
+        preparationLocked: true,
+        reusedSharedDossier: true,
+        version: Number(sharedAccess.state.version || 1),
+        message: "学生材料已经统一整理完成；当前学校不得重复 OCR、分类或改写共享档案。",
+      }, null, 2)
+    }
     if (action === "extract_text") {
       const ocr = join(workspace, ".opencode", "bin", "terra-ocr")
       if (!existsSync(ocr)) throw new Error("Terra-Edu bundled OCR wrapper is missing: " + ocr)
-      const shared = sharedOcrState(task)
+      const shared = schoolOverlay ? undefined : sharedOcrState(task)
       const localOutputDir = join(workspace, "03_state", "extracted_text")
       if (shared && existsSync(shared.indexPath) && !hasSupplementalMaterials) {
-        await cp(shared.outputDir, localOutputDir, { recursive: true, force: false, errorOnExist: false })
+        if (shared.layoutVersion === 1) {
+          await cp(shared.outputDir, localOutputDir, { recursive: true, force: false, errorOnExist: false })
+        }
         const results = await readJson(shared.indexPath, [])
         await writeJson(join(workspace, "03_state", "ocr_index.json"), results)
         await appendLog(workspace, "agent", "已复用选校批次共享的 PaddleOCR 提取结果，无需重复 OCR。")
@@ -1532,68 +1789,129 @@ export const materials = {
       }
       const outputDir = shared?.outputDir || localOutputDir
       await mkdir(outputDir, { recursive: true })
-      const candidates = (await listFiles(hasSupplementalMaterials ? supplementalRoot : join(workspace, "00_original_backup"))).filter((file) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(file))
-      const previous = hasSupplementalMaterials
-        ? (await readJson<Array<{ file: string; output: string; textLength: number; error: string }>>(join(workspace, "03_state", "ocr_index.json"), [])).filter(
-            (item) => !item.file.startsWith("06_new_materials/"),
-          )
-        : []
+      const candidates = (await listFiles(hasSupplementalMaterials ? supplementalRoot : shared?.sourceDir || join(workspace, "00_original_backup"))).filter((file) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(file))
+      const overlayOcrPath = join(workspace, "03_state", "school_ocr_overlay.json")
+      const resultStore = schoolOverlay ? overlayOcrPath : shared?.indexPath || join(workspace, "03_state", "ocr_index.json")
+      const previous = await readJson<Array<{ file: string; output: string; textLength: number; error: string; sourceSha256?: string }>>(resultStore, [])
       const results = [...previous]
       await appendLog(workspace, "agent", "已启动随包 PaddleOCR，正在逐份扫描 " + candidates.length + " 份 PDF/图片材料。大型扫描件通常需要 3–8 分钟，请保持应用打开。")
       await saveTask(workspace, task, "正在读取文件", "PaddleOCR 正在逐份扫描 " + candidates.length + " 份材料；大型扫描件通常需要 3–8 分钟，请保持应用打开。")
       for (const [index, file] of candidates.entries()) {
         await ensureTaskIsActive(workspace)
+        const sourceSha256 = await hashFile(file)
+        if (results.some((item) => item.sourceSha256 === sourceSha256)) continue
         await saveTask(workspace, task, "正在读取文件", "PaddleOCR 正在扫描第 " + (index + 1) + "/" + candidates.length + " 份材料；大型扫描件通常需要 3–8 分钟。")
-        const output = join(outputDir, relative(workspace, file).replace(/[\\/]/g, "__") + ".txt")
+        const output = join(outputDir, sourceSha256 + ".txt")
         const result = await execFileAsync(ocr, [file], { maxBuffer: 16 * 1024 * 1024 }).then(
           ({ stdout, stderr }) => ({ text: stdout.trim(), error: stderr.trim() }),
           (error) => ({ text: "", error: error instanceof Error ? error.message : String(error) }),
         )
         if (result.text) await writeFile(output, result.text + "\n", "utf8")
-        results.push({ file: relative(workspace, file), output: relative(workspace, output), textLength: result.text.length, error: result.error })
+        results.push({
+          file: shared?.layoutVersion === 2 ? file : relative(workspace, file),
+          output: shared?.layoutVersion === 2 ? output : relative(workspace, output),
+          textLength: result.text.length,
+          error: result.error,
+          sourceSha256,
+        })
       }
-      const completed = results.filter((result) => result.textLength > 0)
-      const failed = results.filter((result) => result.error || result.textLength === 0)
-      await writeJson(join(workspace, "03_state", "ocr_index.json"), results)
-      if (shared) await writeJson(shared.indexPath, results)
-      await appendLog(workspace, "agent", "已使用随包 PaddleOCR 提取 " + completed.length + "/" + results.length + " 份扫描材料文字。")
+      await writeJson(resultStore, results)
+      const baseResults = schoolOverlay && sharedAccess ? await readJson(sharedAccess.shared.ocrIndex, []) : []
+      const schoolOcrOverlay = !schoolOverlay ? await readJson(join(workspace, "03_state", "school_ocr_overlay.json"), []) : []
+      const combinedResults = schoolOverlay ? [...baseResults, ...results] : [...results, ...schoolOcrOverlay]
+      await writeJson(join(workspace, "03_state", "ocr_index.json"), combinedResults)
+      if (schoolOverlay) {
+        await writeJson(join(workspace, "03_state", "material_review.json"), {
+          ...materialReview,
+          ocrAppliedSourceHashes: results.map((item) => item.sourceSha256).filter(Boolean),
+          ocrAppliedAt: new Date().toISOString(),
+        })
+      }
+      const completed = combinedResults.filter((result: any) => result.textLength > 0)
+      const failed = combinedResults.filter((result: any) => result.error || result.textLength === 0)
+      await appendLog(workspace, "agent", "已使用随包 PaddleOCR 提取或复用 " + completed.length + "/" + combinedResults.length + " 份扫描材料文字。")
       await saveTask(workspace, task, "正在读取文件", "已完成扫描材料 OCR：成功 " + completed.length + " 份，失败或无文字 " + failed.length + " 份。")
-      await appendAudit(workspace, "materials", action, "completed", "ocr " + completed.length + "/" + results.length)
-      return JSON.stringify({ status: "completed", completed: completed.length, failed: failed.length, files: results }, null, 2)
+      await appendAudit(workspace, "materials", action, "completed", "ocr " + completed.length + "/" + combinedResults.length)
+      return JSON.stringify({ status: "completed", completed: completed.length, failed: failed.length, files: combinedResults }, null, 2)
     }
 
+    if (sharedAccess?.role === "owner" && existsSync(sharedAccess.shared.materialsIndex) && !hasSupplementalMaterials) {
+      const records = await readJson(sharedAccess.shared.materialsIndex, [])
+      await writeJson(join(workspace, "03_state/materials_index.json"), records)
+      if (existsSync(join(sharedAccess.shared.generated, "materials_index.md"))) {
+        await cp(join(sharedAccess.shared.generated, "materials_index.md"), join(workspace, "02_generated/materials_index.md"), { force: true })
+      }
+      await saveTask(workspace, task, "正在生成学生资料", "已复用当前学生资料库中已完成的材料分类结果。")
+      await appendAudit(workspace, "materials", action, "completed", "reused owner classification " + records.length)
+      return JSON.stringify({ status: "completed", reusedSharedClassification: true, files: records.length }, null, 2)
+    }
+
+    const sharedMaterialsRoot = sharedAccess?.shared.materials || join(workspace, "00_original_backup")
     const files = (
       await Promise.all(
-        [join(workspace, "00_original_backup"), supplementalRoot].filter(existsSync).map((directory) => listFiles(directory)),
+        (hasSupplementalMaterials ? [supplementalRoot] : [sharedMaterialsRoot]).filter(existsSync).map((directory) => listFiles(directory)),
       )
     ).flat()
-    const records = []
+    const overlayIndexPath = join(workspace, "03_state", "school_materials_overlay.json")
+    const baseRecords = schoolOverlay && sharedAccess ? await readJson(sharedAccess.shared.materialsIndex, []) : []
+    const records = schoolOverlay
+      ? await readJson(overlayIndexPath, [])
+      : hasSupplementalMaterials && sharedAccess
+        ? await readJson(sharedAccess.shared.materialsIndex, [])
+        : []
     for (const file of files) {
       const fileName = basename(file)
+      const sourceSha256 = await hashFile(file)
+      if (records.some((item: any) => item.sourceSha256 === sourceSha256 || resolve(String(item.originalPath || "")) === resolve(file))) continue
       const [category, reason] = categoryFor(fileName)
-      const targetDir = join(workspace, "01_classified_materials", category)
+      const targetDir = join(schoolOverlay ? join(workspace, "01_classified_materials") : sharedAccess?.shared.classified || join(workspace, "01_classified_materials"), category)
       await mkdir(targetDir, { recursive: true })
-      const target = await uniquePath(join(targetDir, fileName))
-      await cp(file, target, { force: false, errorOnExist: false })
+      const target = hasSupplementalMaterials
+        ? join(targetDir, sourceSha256.slice(0, 12) + "-" + fileName)
+        : await uniquePath(join(targetDir, fileName))
+      if (!existsSync(target)) await cp(file, target, { force: false, errorOnExist: false })
       records.push({
         originalPath: file,
-        backupPath: relative(workspace, file),
-        classifiedPath: relative(workspace, target),
+        backupPath: schoolOverlay ? relative(workspace, file) : sharedAccess ? file : relative(workspace, file),
+        classifiedPath: schoolOverlay ? relative(workspace, target) : sharedAccess ? target : relative(workspace, target),
         fileName,
+        sourceSha256,
         extension: extname(fileName).toLowerCase(),
         category,
         confidence: category === "needs_review" ? "needs_review" : category === "other" ? "medium" : "high",
         reason,
       })
     }
-    await writeJson(join(workspace, "03_state/materials_index.json"), records)
-    const md = ["# 材料目录", "", "原始材料副本目录：" + join(workspace, "00_original_backup"), ""]
-    for (const item of records) md.push("- " + item.fileName + " -> " + item.classifiedPath + "（" + item.category + "，" + item.reason + "）")
+    const existingSchoolOverlay = !schoolOverlay ? await readJson(overlayIndexPath, []) : []
+    const combinedRecords = schoolOverlay ? [...baseRecords, ...records] : [...records, ...existingSchoolOverlay]
+    await writeJson(join(workspace, "03_state/materials_index.json"), combinedRecords)
+    if (schoolOverlay) await writeJson(overlayIndexPath, records)
+    if (sharedAccess && !schoolOverlay) await writeJson(sharedAccess.shared.materialsIndex, records)
+    const md = ["# 材料目录", "", "学生共享原始材料目录：" + sharedMaterialsRoot, ""]
+    for (const item of combinedRecords) md.push("- " + item.fileName + " -> " + item.classifiedPath + "（" + item.category + "，" + item.reason + "）")
     await writeFile(join(workspace, "02_generated/materials_index.md"), md.join("\n") + "\n", "utf8")
-    await appendLog(workspace, "agent", "已完成材料分类，共 " + records.length + " 个文件。")
+    if (sharedAccess && !schoolOverlay) {
+      const sharedMd = ["# 材料目录", "", "学生共享原始材料目录：" + sharedMaterialsRoot, ""]
+      for (const item of records) sharedMd.push("- " + item.fileName + " -> " + item.classifiedPath + "（" + item.category + "，" + item.reason + "）")
+      await writeFile(join(sharedAccess.shared.generated, "materials_index.md"), sharedMd.join("\n") + "\n", "utf8")
+    }
+    if (hasSupplementalMaterials) {
+      const appliedSourceHashes = records.map((item: any) => String(item.sourceSha256 || "")).filter(Boolean)
+      const expectedSourceHashes = Array.isArray(materialReview.sourceManifest)
+        ? materialReview.sourceManifest.map((item: any) => String(item?.sha256 || "")).filter(Boolean)
+        : []
+      await writeJson(join(workspace, "03_state", "material_review.json"), {
+        ...materialReview,
+        appliedSourceHashes,
+        appliedAt: expectedSourceHashes.length > 0 && expectedSourceHashes.every((hash: string) => appliedSourceHashes.includes(hash))
+          ? new Date().toISOString()
+          : undefined,
+      })
+    }
+    await appendLog(workspace, "agent", "已完成材料分类或复用，共 " + combinedRecords.length + " 个文件。")
     await saveTask(workspace, task, "正在生成学生资料", "材料已分类完成，materials_index 已更新。")
-    await appendAudit(workspace, "materials", action, "completed", "classified " + records.length + " files")
-    return "已分类 " + records.length + " 个文件。无法确认用途的文件会留在 needs_review。"
+    await appendAudit(workspace, "materials", action, "completed", "classified " + combinedRecords.length + " files")
+    return "已分类或复用 " + combinedRecords.length + " 个文件。无法确认用途的文件会留在 needs_review。"
   },
 }
 
@@ -1652,20 +1970,43 @@ export const documents = {
       await writeFile(join(workspace, "02_generated/missing_materials.docx"), makeDocx(renderWordChecklist(title, input, missing)))
     }
     if (action === "generate_summary" || action === "generate_all") {
-      const lines = ["# " + title + " 申请任务总结", "", "## 已完成", "", "- 已创建隔离申请工作区。", "- 已复制原始材料副本，未修改原始文件夹。", "- 已整理材料 " + materials.length + " 个。", "- 已生成或更新缺失项清单和顾问可转发文档。", "", "## 仍需处理", ""]
+      const lines = [
+        "# " + title + " 申请任务总结",
+        "",
+        "## 已完成",
+        "",
+        "- 已创建学校隔离申请工作区。",
+        sharedStudentDossier(task)
+          ? "- 已只读复用学生共享资料库；本校没有重复 OCR、分类或生成学生核心档案。"
+          : "- 已复制原始材料副本，未修改原始文件夹。",
+        "- 已整理或复用材料 " + materials.length + " 个。",
+        "- 已生成或更新本校缺失项清单和顾问可转发文档。",
+        "",
+        "## 仍需处理",
+        "",
+      ]
       if (missing.length === 0) lines.push("- 暂无仍需补充的缺失项。")
       for (const item of missing) lines.push("- " + item.name + "：" + item.whyNeeded)
       lines.push("", "## 人工处理事项", "", "- 最终提交申请、付款、不可逆推荐信邀请和账号密码输入必须由顾问人工确认。")
       await writeFile(join(workspace, "02_generated/task_summary.md"), lines.join("\n") + "\n", "utf8")
     }
     const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
-    if (materialReview.status === "approved" && !materialReview.preparationCompleteAt && await materialReviewPreparationComplete(workspace, materialReview)) {
+    const reviewComplete = materialReview.status === "approved" && await materialReviewPreparationComplete(workspace, materialReview)
+    const sharedPublication = materialReview.status !== "approved"
+      ? await publishSharedDossier(workspace, task, false)
+      : reviewComplete && materialReview.scope === "student"
+        ? await publishSharedDossier(workspace, task, true)
+        : reviewComplete
+          ? await finalizePreparedSharedDossier(task)
+          : undefined
+    if (reviewComplete && !materialReview.preparationCompleteAt) {
       await writeJson(join(workspace, "03_state/material_review.json"), {
         ...materialReview,
         preparationCompleteAt: new Date().toISOString(),
       })
     }
     const needsMaterialReview = !progress.egoBrowser?.preparedAt && materialReview.status !== "approved"
+    const reviewAwaitingApplication = materialReview.status === "approved" && !reviewComplete
     if (needsMaterialReview) {
       await writeJson(join(workspace, "03_state/material_review.json"), {
         status: "pending",
@@ -1677,12 +2018,24 @@ export const documents = {
     await saveTask(
       workspace,
       task,
-      needsMaterialReview ? "等待顾问确认材料" : !progress.egoBrowser?.preparedAt ? "可继续申请" : missing.some((item: any) => item.blocksProgress) ? "等待补充材料" : "阶段性完成",
+      needsMaterialReview ? "等待顾问确认材料" : reviewAwaitingApplication ? "正在检查缺失内容" : !progress.egoBrowser?.preparedAt ? "可继续申请" : missing.some((item: any) => item.blocksProgress) ? "等待补充材料" : "阶段性完成",
       needsMaterialReview
         ? "材料整理、缺失项和阶段总结已完成。请在申请 Agent 的材料确认面板决定是否补充，再进入浏览器。"
-        : "已生成信息表、材料表、Word 缺失清单和阶段总结。",
+        : reviewAwaitingApplication
+          ? "补充内容尚未通过应用校验，暂不启动浏览器。"
+          : "已生成信息表、材料表、Word 缺失清单和阶段总结。",
     )
-    await appendAudit(workspace, "documents", action, "completed", "generated documents from missing_items.json")
+    await appendAudit(
+      workspace,
+      "documents",
+      action,
+      "completed",
+      sharedPublication
+        ? materialReview.status === "approved"
+          ? "generated school documents and published shared student dossier"
+          : "generated school documents and prepared shared student dossier for consultant review"
+        : "generated documents from missing_items.json",
+    )
     return needsMaterialReview
       ? "文档已生成到 02_generated，任务已停在材料确认关口。请等待顾问在桌面应用选择补充文件夹、填写文字补充或确认暂不补充；不要启动 ego-browser。"
       : "文档已生成到 02_generated。Word 清单基于 03_state/missing_items.json。"
@@ -2013,9 +2366,13 @@ export const cua = {
       const url = isRefillAgent ? refillApplicationUrl : requestedUrl
       if (!url) throw new Error("applicationUrl is required for prepare_ego_task")
       const requestedTaskSpaceName = String(input.taskSpaceName || "").trim()
+      const isolatedTaskSpaceName = [
+        requestedTaskSpaceName || ["Terra-Edu", task.input?.studentName, task.input?.school, task.input?.program].filter(Boolean).join(" / "),
+        "task=" + String(task.id || basename(workspace)),
+      ].filter(Boolean).join(" / ")
       const taskSpaceName = isRefillAgent
         ? refillTaskSpaceName
-        : String(requestedTaskSpaceName || progress.egoBrowser?.taskSpaceName || ["Terra-Edu", task.input?.studentName, task.input?.school, task.input?.program].filter(Boolean).join(" / ")).trim()
+        : String(progress.egoBrowser?.taskSpaceName || isolatedTaskSpaceName).trim()
       const savedTaskSpaceId = numericTaskSpaceId(progress.egoBrowser?.taskSpaceId)
       const suppliedTaskSpaceId = String(input.taskSpaceId || "").trim()
       const observedTaskSpaceName = String(input.taskSpaceObservedName || "").trim()
@@ -2660,6 +3017,12 @@ function crc32(buffer: Buffer) {
 
 export async function writeOpenCodeConfig(workspacePath: string, overrides?: OpenCodeResourceOverrides) {
   const base = join(workspacePath, ".opencode")
+  const sharedReadPattern = overrides?.sharedWorkspacePath && existsSync(overrides.sharedWorkspacePath)
+    ? relative(workspacePath, overrides.sharedWorkspacePath).replaceAll("\\", "/") + "/**"
+    : ""
+  const sharedExternalPattern = overrides?.sharedWorkspacePath && existsSync(overrides.sharedWorkspacePath)
+    ? overrides.sharedWorkspacePath.replaceAll("\\", "/") + "/**"
+    : ""
   await mkdir(join(base, "agents"), { recursive: true })
   await mkdir(join(base, "bin"), { recursive: true })
   await mkdir(join(base, "commands"), { recursive: true })
@@ -2697,11 +3060,10 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
       websearch: "allow",
       question: "allow",
       bash: {
-        "*": "allow",
-        "rm -rf *": "deny",
-        "git push*": "deny",
-        "python*": "deny",
-        "python3*": "deny",
+        "*": "deny",
+        "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs*": "allow",
+        "ego-browser nodejs*": "allow",
+        "*>*": "deny",
       },
       "cua_final_submit": "deny",
       "cua_payment": "deny",
@@ -2721,12 +3083,21 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
           "*.env.*": "deny",
           "*.env.example": "allow",
         },
+        edit: {
+          "*": "allow",
+          "../*": "deny",
+          ...(sharedReadPattern ? { [sharedReadPattern]: "deny" } : {}),
+        },
+        external_directory: sharedExternalPattern
+          ? { "*": "deny", [sharedExternalPattern]: "allow" }
+          : { "*": "deny" },
         glob: "allow",
         grep: "allow",
         bash: {
-          "*": "allow",
-          "rm -rf *": "deny",
-          "git push*": "deny",
+          "*": "deny",
+          "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs*": "allow",
+          "ego-browser nodejs*": "allow",
+          "*>*": "deny",
         },
         question: "allow",
         skill: { "*": "allow" },
@@ -2758,6 +3129,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
               "03_state/material_review.json": "allow",
               "03_state/application_progress.json": "allow",
               "06_new_materials/**": "allow",
+              ...(sharedReadPattern ? { [sharedReadPattern]: "allow" } : {}),
               "*.env": "deny",
               "*.env.*": "deny",
             },
@@ -2776,10 +3148,16 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
             "03_state/application_progress.json": "deny",
             "03_state/task_state.json": "deny",
             "06_new_materials/**": "deny",
+            ...(sharedReadPattern ? { [sharedReadPattern]: "deny" } : {}),
           },
+          external_directory: sharedExternalPattern
+            ? { "*": "deny", [sharedExternalPattern]: "allow" }
+            : { "*": "deny" },
           bash: {
             "*": "deny",
             "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs*": "allow",
+            "ego-browser nodejs*": "allow",
+            "*>*": "deny",
           },
           question: "allow",
           task: "deny",
@@ -2837,14 +3215,18 @@ permission:
     "*.env": deny
     "*.env.*": deny
     "*.env.example": allow
-  glob: allow
+${sharedReadPattern ? `    "${sharedReadPattern}": allow\n` : ""}  edit:
+    "*": allow
+    "../*": deny
+${sharedReadPattern ? `    "${sharedReadPattern}": deny\n` : ""}  external_directory:
+    "*": deny
+${sharedExternalPattern ? `    "${sharedExternalPattern}": allow\n` : ""}  glob: allow
   grep: allow
   bash:
-    "*": allow
-    "rm -rf *": deny
-    "git push*": deny
-    "python*": deny
-    "python3*": deny
+    "*": deny
+    'PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs*': allow
+    "ego-browser nodejs*": allow
+    "*>*": deny
   question: allow
   skill:
     "*": allow
@@ -2880,7 +3262,7 @@ permission:
     "03_state/material_review.json": allow
     "03_state/application_progress.json": allow
     "06_new_materials/**": allow
-    "*.env": deny
+${sharedReadPattern ? `    "${sharedReadPattern}": allow\n` : ""}    "*.env": deny
     "*.env.*": deny
   glob: allow
   grep: deny
@@ -2897,9 +3279,13 @@ permission:
     "03_state/application_progress.json": deny
     "03_state/task_state.json": deny
     "06_new_materials/**": deny
-  bash:
+${sharedReadPattern ? `    "${sharedReadPattern}": deny\n` : ""}  external_directory:
+    "*": deny
+${sharedExternalPattern ? `    "${sharedExternalPattern}": allow\n` : ""}  bash:
     "*": deny
     'PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs*': allow
+    "ego-browser nodejs*": allow
+    "*>*": deny
   question: allow
   task: deny
   skill:

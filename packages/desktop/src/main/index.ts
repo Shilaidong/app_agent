@@ -557,25 +557,7 @@ const main = Effect.gen(function* () {
           item.title?.includes("申请任务") ||
           item.title?.includes("重新填写"),
       )
-    if (!found) {
-      const created = await postSidecarJson<{ id: string }>(
-        "/session",
-        workspacePath,
-        {
-          title: "申请任务（恢复会话）",
-          agent: "application-agent",
-          model: {
-            providerID: "opencode-go",
-            id: APPLICATION_AGENT_MODEL_ID,
-          },
-        },
-      )
-      return {
-        sessionID: created.id,
-        directory: workspacePath,
-        workspacePath,
-      }
-    }
+    if (!found) return null
     return {
       sessionID: found.id,
       directory: workspacePath,

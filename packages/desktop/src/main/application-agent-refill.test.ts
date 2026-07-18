@@ -303,6 +303,7 @@ describe("application refill state", () => {
 
   test("builds a fill-only prompt from the archived attempt without restarting preparation", async () => {
     const fixture = await createFixture({ batchId: "batch-prompt", batchOrder: 3 })
+    fixture.task.input.sharedWorkspacePath = "/tmp/terra-student/shared"
     const prepared = await prepareApplicationRefillState({
       workspacePath: fixture.workspacePath,
       task: fixture.task,
@@ -324,6 +325,8 @@ describe("application refill state", () => {
     expect(prompt).toContain("重新生成 student_profile.md")
     expect(prompt).toContain("最终提交、付款、不可逆推荐信邀请")
     expect(prompt).toContain("只处理当前学校，不要并发启动批次内其他学校")
+    expect(prompt).toContain("学生共享资料库：/tmp/terra-student/shared")
+    expect(prompt).toContain("它在本会话中严格只读")
     expect(prompt).not.toContain("请现在只执行“启动阶段”")
     expect(prompt).not.toContain("初始化目标申请工作区、同步状态")
   })
@@ -346,7 +349,8 @@ describe("application refill state", () => {
     expect(agent.permission.read["03_state/filling_attempts/**"]).toBeUndefined()
     expect(agent.permission.bash["*"]).toBe("deny")
     expect(agent.permission.bash['PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs*']).toBe("allow")
-    expect(Object.values(agent.permission.bash).filter((value) => value === "allow")).toEqual(["allow"])
+    expect(agent.permission.bash["ego-browser nodejs*"]).toBe("allow")
+    expect(agent.permission.bash["*>*"]).toBe("deny")
     expect(agent.permission.edit["00_original_backup/**"]).toBe("deny")
     expect(agent.permission.edit["*"]).toBe("deny")
     expect(agent.permission.task).toBe("deny")
@@ -370,6 +374,41 @@ describe("application refill state", () => {
     expect(tools).toContain("REFILL_SESSION_MISMATCH")
     expect(tools).toContain("REFILL_TASK_SPACE_OBSERVED_NAME_MISMATCH")
     expect(tools).toContain("freshTaskSpaceCreationIssuedForSessionID")
+  })
+
+  test("allows exact read-only access to a student shared dossier from a nested school workspace", async () => {
+    const root = await makeTemporaryDirectory("terra-shared-config-")
+    const sharedWorkspacePath = join(root, "student", "shared")
+    const workspacePath = join(root, "student", "schools", "01-hku")
+    await Promise.all([
+      mkdir(sharedWorkspacePath, { recursive: true }),
+      mkdir(workspacePath, { recursive: true }),
+    ])
+
+    await writeOpenCodeConfig(workspacePath, { sharedWorkspacePath })
+
+    const config = await readJson<OpenCodeConfig>(join(workspacePath, ".opencode/opencode.json"))
+    const sharedReadPattern = "../../shared/**"
+    const sharedExternalPattern = `${sharedWorkspacePath}/**`
+    const refill = config.agent["application-refill-agent"].permission
+    const primary = config.agent["application-agent"].permission
+    expect(refill.read[sharedReadPattern]).toBe("allow")
+    expect(refill.edit[sharedReadPattern]).toBe("deny")
+    expect(refill.external_directory).toEqual({ "*": "deny", [sharedExternalPattern]: "allow" })
+    expect(primary.edit[sharedReadPattern]).toBe("deny")
+    expect(primary.external_directory).toEqual({ "*": "deny", [sharedExternalPattern]: "allow" })
+    expect(primary.bash["*"]).toBe("deny")
+    expect(primary.bash['PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs*']).toBe("allow")
+    expect(primary.bash["*>*"]).toBe("deny")
+
+    const refillAgentMarkdown = await Bun.file(join(workspacePath, ".opencode/agents/application-refill-agent.md")).text()
+    expect(refillAgentMarkdown).toContain(`"${sharedReadPattern}": allow`)
+    expect(refillAgentMarkdown).toContain(`"${sharedReadPattern}": deny`)
+    expect(refillAgentMarkdown).toContain(`"${sharedExternalPattern}": allow`)
+    const tools = await Bun.file(join(workspacePath, ".opencode/tools/application-agent.ts")).text()
+    expect(tools).toContain("STUDENT_DOSSIER_NOT_READY")
+    expect(tools).toContain("reusedSharedDossier")
+    expect(() => new Bun.Transpiler({ loader: "ts" }).transformSync(tools)).not.toThrow()
   })
 })
 

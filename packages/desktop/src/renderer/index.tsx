@@ -40,6 +40,7 @@ import {
   quickCommands,
   taskGeneratedFiles,
   taskGoals,
+  taskGroupKey,
   taskCounts,
   taskProgress,
 } from "./application-agent-view-model"
@@ -578,7 +579,7 @@ function ApplicationAgentShell(props: {
   const [restoreNotice, setRestoreNotice] = createSignal<string | null>(null)
   const [applicationTasks, setApplicationTasks] = createSignal<ApplicationTask[]>([])
   const [homeMode, setHomeMode] = createSignal<"new" | "read">("new")
-  const [selectedTaskStudent, setSelectedTaskStudent] = createSignal("")
+  const [selectedTaskGroupKey, setSelectedTaskGroupKey] = createSignal("")
   const [authStatus, setAuthStatus] = createSignal<TerraAuthStatus | null>(null)
   const [loginEmail, setLoginEmail] = createSignal("")
   const [loginPassword, setLoginPassword] = createSignal("")
@@ -589,6 +590,7 @@ function ApplicationAgentShell(props: {
   const [savedPlatformAccount, setSavedPlatformAccount] = createSignal<{ username: string; updatedAt: string } | null>(null)
   const [supplementalFolder, setSupplementalFolder] = createSignal("")
   const [materialNote, setMaterialNote] = createSignal("")
+  const [shareSupplementAcrossSchools, setShareSupplementAcrossSchools] = createSignal(false)
   const [showRefillConfirmation, setShowRefillConfirmation] = createSignal(false)
   const [refillRequestID, setRefillRequestID] = createSignal("")
   let agentChatListRef: HTMLDivElement | undefined
@@ -597,10 +599,11 @@ function ApplicationAgentShell(props: {
   let lastBrowserHandoffNotificationKey = ""
   let lastProgressNotificationKey = ""
   let lastQuestionNotificationKey = ""
+  let lastSelectedActiveWorkspacePath = ""
   const taskGroups = createMemo(() => groupedTasks(applicationTasks()))
   const selectedTaskGroup = createMemo(() => {
     const groups = taskGroups()
-    return groups.find((group) => group.student === selectedTaskStudent()) ?? groups[0]
+    return groups.find((group) => group.key === selectedTaskGroupKey()) ?? groups[0]
   })
   const needsLogin = createMemo(() => Boolean(authStatus()?.configured && !authStatus()?.authenticated))
   const quotaText = createMemo(() => {
@@ -723,13 +726,17 @@ function ApplicationAgentShell(props: {
         mode,
         sourceFolder: mode === "supplement_folder" ? supplementalFolder() : undefined,
         note: note || undefined,
+        scope: shareSupplementAcrossSchools() ? "student" : "school",
       })
       setTask(reviewed)
       await window.api.sendApplicationAgentPrompt(
         session,
         [
           "顾问已在桌面应用的材料确认关口完成选择，material_review.json 已批准。",
-          "先读取 03_state/material_review.json 和 06_new_materials，再继续。",
+          "先读取 03_state/material_review.json，并以其中 supplementalFolder 的真实路径读取补充材料；不要猜固定目录。",
+          shareSupplementAcrossSchools()
+            ? "顾问已明确选择“同步到学生共享资料库”。只把跨学校通用事实写入 material_review.json 指定的 sharedProfileCandidatePath；当前学校专用内容仍留在本校 student_profile。应用完成并校验后才可发布共享档案新版本。"
+            : "顾问选择“仅当前学校”，所有补充内容必须保留在本校 overlay 中，不得改写学生共享资料库。",
           mode === "supplement_folder"
             ? "请先对新增文件运行 OCR、材料分类、学生档案和缺失项复查，并重新生成顾问文档。"
             : mode === "note"
@@ -740,6 +747,7 @@ function ApplicationAgentShell(props: {
       )
       setSupplementalFolder("")
       setMaterialNote("")
+      setShareSupplementAcrossSchools(false)
       setRestoreNotice("材料确认已交给 Agent。它会先同步补充内容，再启动 ego-lite 填表。")
       await refreshAgentMessages(session)
       await loadApplicationTasks()
@@ -920,7 +928,7 @@ function ApplicationAgentShell(props: {
       setOpenCodeSession(session)
       persistActiveSession(session)
       setShowOpenCode(false)
-      setRestoreNotice(`已创建 ${batch.tasks.length} 个学校任务；学生材料已在批次工作区统一暂存，将从第 1 个任务开始依次处理。`)
+      setRestoreNotice(`已创建 1 个学生工作区和 ${batch.tasks.length} 个学校子任务；材料、OCR、分类和学生核心档案只整理一次，将从第 1 所学校开始。`)
       await refreshAgentMessages(session)
       await refreshAuthStatus()
       await loadApplicationTasks()
@@ -1029,6 +1037,10 @@ function ApplicationAgentShell(props: {
     "已暂停",
   ].includes(status)
 
+  const canEnterNextSchool = (current: ApplicationTask) =>
+    current.sharedDossierStatus === "ready" &&
+    ["阶段性完成", "等待补充材料", "异常中断", "已暂停"].includes(current.status)
+
   const toggleTaskPause = async () => {
     const current = task()
     if (!current) return
@@ -1102,6 +1114,7 @@ function ApplicationAgentShell(props: {
 
   const resetToHome = () => {
     clearActiveSession()
+    lastSelectedActiveWorkspacePath = ""
     setInput(defaultTaskInput())
     setCreationMode("manual")
     setSelectionListPath("")
@@ -1125,11 +1138,12 @@ function ApplicationAgentShell(props: {
     try {
       const latestTask = await window.api.getApplicationTask(next.workspacePath)
       const session = await window.api.findApplicationAgentSession(latestTask.workspacePath)
-      if (!session) throw new Error("未找到或无法创建该申请的 OpenCode 会话")
+        ?? await window.api.startApplicationAgentSession(latestTask)
       setTask(latestTask)
       setInput(latestTask.input)
       setSupplementalFolder("")
       setMaterialNote("")
+      setShareSupplementAcrossSchools(false)
       setShowRefillConfirmation(false)
       setRefillRequestID("")
       setOpenCodeSession(session)
@@ -1149,6 +1163,10 @@ function ApplicationAgentShell(props: {
   const switchToNextBatchTask = async () => {
     const current = task()
     if (!current?.input.batchId) return
+    if (!canEnterNextSchool(current)) {
+      setRestoreNotice("请先完成学生共享档案，并完成或暂停当前学校。资料整理、材料确认或浏览器填写仍在进行时，不会并发启动下一所学校。")
+      return
+    }
     const next = applicationTasks()
       .filter((item) => item.input.batchId === current.input.batchId && (item.input.batchOrder ?? 0) > (current.input.batchOrder ?? 0))
       .sort((a, b) => (a.input.batchOrder ?? Number.MAX_SAFE_INTEGER) - (b.input.batchOrder ?? Number.MAX_SAFE_INTEGER))[0]
@@ -1156,7 +1174,8 @@ function ApplicationAgentShell(props: {
       setRestoreNotice("这是本批次最后一个学校任务。")
       return
     }
-    await switchTask(next, `已切换到批次第 ${next.input.batchOrder} 所学校，继续复用同一份材料来源。`)
+    if (current.status !== "已暂停") await window.api.pauseApplicationTask(current.workspacePath)
+    await switchTask(next, `已暂停上一所学校并切换到第 ${next.input.batchOrder} 所；新 Agent 将直接复用学生共享档案，不再重复 OCR、分类和整理资料。`)
   }
 
   const renderTaskList = () => (
@@ -1170,11 +1189,12 @@ function ApplicationAgentShell(props: {
             {(group) => (
               <button
                 type="button"
-                classList={{ active: group.student === selectedTaskGroup()?.student }}
-                onClick={() => setSelectedTaskStudent(group.student)}
+                classList={{ active: group.key === selectedTaskGroup()?.key }}
+                onClick={() => setSelectedTaskGroupKey(group.key)}
+                title={group.key}
               >
                 <strong>{group.student}</strong>
-                <small>{group.items.length} 个申请</small>
+                <small>{group.items.length} 个申请 · {new Date(Math.min(...group.items.map((item) => new Date(item.createdAt).getTime()))).toLocaleDateString()} · {group.items[0]?.input.school || "未命名批次"}</small>
               </button>
             )}
           </For>
@@ -1251,16 +1271,23 @@ function ApplicationAgentShell(props: {
   createEffect(() => {
     const groups = taskGroups()
     if (groups.length === 0) {
-      setSelectedTaskStudent("")
+      setSelectedTaskGroupKey("")
       return
     }
-    const activeStudent = task()?.input.studentName.trim()
-    if (activeStudent && groups.some((group) => group.student === activeStudent)) {
-      setSelectedTaskStudent(activeStudent)
+    const activeTask = task()
+    const activeKey = activeTask ? taskGroupKey(activeTask) : ""
+    if (
+      activeTask?.workspacePath &&
+      activeTask.workspacePath !== lastSelectedActiveWorkspacePath &&
+      activeKey &&
+      groups.some((group) => group.key === activeKey)
+    ) {
+      lastSelectedActiveWorkspacePath = activeTask.workspacePath
+      setSelectedTaskGroupKey(activeKey)
       return
     }
-    if (!groups.some((group) => group.student === selectedTaskStudent())) {
-      setSelectedTaskStudent(groups[0].student)
+    if (!groups.some((group) => group.key === selectedTaskGroupKey())) {
+      setSelectedTaskGroupKey(groups[0].key)
     }
   })
 
@@ -1484,7 +1511,7 @@ function ApplicationAgentShell(props: {
                     <header>
                       <div>
                         <h2>选校清单导入</h2>
-                        <p>一个学校/项目创建一个申请任务。学生原始材料会先统一暂存一次，再按学校依次处理。</p>
+                        <p>系统会创建一个学生工作区，材料、OCR、分类和学生核心档案只整理一次；每所学校作为独立子任务依次填写。</p>
                       </div>
                       <button type="button" disabled={busy()} onClick={downloadSelectionListTemplate}>下载无密码模板</button>
                     </header>
@@ -1622,8 +1649,19 @@ function ApplicationAgentShell(props: {
               <Show when={currentTask().input.batchId}>
                 <section class="side-section">
                   <h2>批次处理</h2>
-                  <p>当前为第 {currentTask().input.batchOrder || "?"} 所学校。完成本校后再进入下一所，学生材料与 OCR 结果会继续复用；各校填表会话和浏览器进度彼此隔离。</p>
-                  <button type="button" disabled={busy()} onClick={switchToNextBatchTask}>进入下一所学校</button>
+                  <p>当前为第 {currentTask().input.batchOrder || "?"} 所学校。学生材料、OCR、分类结果和核心档案统一复用；各校要求、缺失项、Agent 对话、Ego 空间和填表进度彼此隔离。</p>
+                  <div class="student-workspace-actions">
+                    <button type="button" onClick={() => window.api.openPath(currentTask().input.batchWorkspacePath || currentTask().workspacePath)}>打开学生工作区</button>
+                    <Show when={currentTask().input.sharedWorkspacePath}>
+                      {(path) => <button type="button" onClick={() => window.api.openPath(path())}>打开共享资料库</button>}
+                    </Show>
+                    <button
+                      type="button"
+                      disabled={busy() || !canEnterNextSchool(currentTask())}
+                      title="当前学校完成或暂停后，才会启动下一所学校"
+                      onClick={switchToNextBatchTask}
+                    >进入下一所学校</button>
+                  </div>
                 </section>
               </Show>
               <section class="side-section">
@@ -1710,6 +1748,19 @@ function ApplicationAgentShell(props: {
                           placeholder="例如：学生确认当前无工作经历；父母职业信息待填……"
                         />
                       </label>
+                      <Show when={currentTask().input.sharedWorkspacePath}>
+                        <label class="material-review-scope">
+                          <input
+                            type="checkbox"
+                            checked={shareSupplementAcrossSchools()}
+                            onChange={(event) => setShareSupplementAcrossSchools(event.currentTarget.checked)}
+                          />
+                          <span>
+                            <strong>同步到这个学生的后续学校</strong>
+                            <small>仅勾选成绩单、证件、语言成绩等通用事实；当前学校专用文书或回答不要勾选。</small>
+                          </span>
+                        </label>
+                      </Show>
                       <div class="material-review-buttons">
                         <button
                           type="button"

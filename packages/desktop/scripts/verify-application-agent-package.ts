@@ -7,7 +7,7 @@ import { basename, join } from "node:path"
 
 const root = fileURLToPath(new URL("..", import.meta.url))
 const dist = join(root, "dist")
-const expectedVersion = "1.0.12"
+const expectedVersion = "1.0.13"
 const expectedEgoVersion = "0.4.4.15"
 const zip = join(dist, "terra-edu-application-agent-mac-arm64.zip")
 const dmg = join(dist, "terra-edu-application-agent-mac-arm64.dmg")

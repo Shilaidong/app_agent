@@ -741,6 +741,28 @@ button {
   overflow: hidden;
 }
 
+.student-workspace-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.student-workspace-actions button {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid rgba(74, 124, 89, 0.18);
+  border-radius: 10px;
+  background: #fff;
+  color: #2f5d3e;
+  font-weight: 800;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.student-workspace-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .task-list-shell {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -1142,6 +1164,33 @@ button {
   color: #2e3230;
   padding: 7px 9px;
   resize: vertical;
+}
+
+.material-review-scope {
+  display: flex !important;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid rgba(74, 124, 89, 0.18);
+  border-radius: 10px;
+  background: #f7fbf8;
+  padding: 10px 12px;
+}
+
+.material-review-scope input {
+  width: auto;
+  margin-top: 3px;
+}
+
+.material-review-scope span,
+.material-review-scope small {
+  display: block;
+}
+
+.material-review-scope small {
+  margin-top: 3px;
+  color: #6b6358;
+  font-weight: 500;
+  line-height: 1.45;
 }
 
 .material-review-buttons {
