@@ -209,7 +209,7 @@ const fixtureHtml = `<!doctype html>
   <button id="confirm-trigger" onclick="document.body.dataset.confirmState=confirm(${JSON.stringify(`${marker}-unknown confirmation`)})?'accepted':'cancelled'">Open confirmation</button>
   <button id="prompt-trigger" onclick="document.body.dataset.promptState=prompt(${JSON.stringify(`${marker}-unknown prompt`)},'fixture default')===null?'cancelled':'accepted'">Open prompt</button>
   <iframe title="same-origin alert fixture" src="/dialog-frame.html"></iframe>
-  <script>window.blockBeforeUnload=true;window.__disableBeforeUnload=()=>{window.blockBeforeUnload=false};setTimeout(()=>{alert(${JSON.stringify(`${marker}-navigation-alert`)});document.body.dataset.navigationState='accepted'},600);window.addEventListener('beforeunload',(event)=>{if(!window.blockBeforeUnload)return;event.preventDefault();event.returnValue=''})</script>
+  <script>window.blockBeforeUnload=true;window.__disableBeforeUnload=()=>{window.blockBeforeUnload=false};window.addEventListener('load',()=>{alert(${JSON.stringify(`${marker}-navigation-alert`)});document.body.dataset.navigationState='accepted'},{once:true});window.addEventListener('beforeunload',(event)=>{if(!window.blockBeforeUnload)return;event.preventDefault();event.returnValue=''})</script>
 </body>`
 const fixtureFrameHtml = `<!doctype html><body><script>window.openIframeAlert=()=>{alert(${JSON.stringify(`${marker}-iframe-alert: Title of degree; Abbreviation; Date of award`)});parent.document.body.dataset.iframeState='accepted'}</script></body>`
 const fixtureReadyPath = join(runtimeRoot, "dialog-fixture-ready")
