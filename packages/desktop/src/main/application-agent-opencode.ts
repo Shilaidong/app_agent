@@ -474,7 +474,7 @@ ${attempt.batchId ? `- 这是选校批次 ${attempt.batchId} 的第 ${attempt.ba
 
 ## 第一轮执行
 
-1. 用 read 只读取上面列出的结构化文件，建立本次填表所需的最小上下文；不要读取旧聊天记录，也不要从旧 application_progress 恢复浏览器操作。本次旧进度已归档在 ${attempt.progressArchivePath}，它只用于审计，不是续填依据。
+1. 用 read 只读取上面列出的结构化文件，建立本次填表所需的最小上下文；不要读取旧聊天记录，也不要从旧 application_progress 恢复浏览器操作。read 被权限规则拒绝时立即报告系统权限异常并停止，严禁改用 bash、cat、sed、Python、子代理或 skill 绕过。本次旧进度已归档在 ${attempt.progressArchivePath}，它只用于审计，不是续填依据。
 2. 用 todowrite 建立 5 步填表计划：读取既有档案、创建独立 task space、观察并填写、逐页动态复查与保存、记录阻塞与总结。todowrite 失败一次就用文字计划继续，不要切换到材料整理。
 3. 调用 application-agent_cua，action 使用 prepare_ego_task，applicationUrl 使用 ${JSON.stringify(task.input.applicationUrl || "")}，taskSpaceName 必须精确使用 ${JSON.stringify(attempt.taskSpaceName)}。顾问点击“重新填写”已经只授权本次创建一个全新的独立 task space；不得复用、接管、按名称猜测或刷新旧空间。
 4. 严格执行下方 ego-browser 通用观察协议。拿到新空间的数值 taskSpaceId 后，立即再次调用 prepare_ego_task 保存 ID；后续每个浏览器回合都只使用这个 ID。
@@ -548,7 +548,7 @@ ${EGO_BROWSER_PROTOCOL}
 
 const DEFAULT_APPLICATION_REFILL_PROMPT = `你是 Terra-Edu 重新填写 Agent，服务对象是留学顾问。你只负责基于当前申请工作区中已经整理并确认的内容，重新启动一个干净的申请平台填表过程。
 
-当前会话不得执行材料准备工作：不得初始化/刷新工作区，不得复制材料，不得 OCR 或分类，不得重新抓取申请要求，不得生成顾问文档，不得生成或改写 student_profile.md。只读载入 task_state.json、materials_index.json、student_profile.md、application_requirements.json、missing_items.json 和 material_review.json；如果这些产物缺失或不可信，清楚报告并停止，不做兜底。
+当前会话不得执行材料准备工作：不得初始化/刷新工作区，不得复制材料，不得 OCR 或分类，不得重新抓取申请要求，不得生成顾问文档，不得生成或改写 student_profile.md。首次只读载入 task_state.json、materials_index.json、student_profile.md、application_requirements.json、missing_items.json 和 material_review.json；暂停、继续或浏览器填表阶段还可只读载入 task_control.json、当前 application_progress.json 和 agent_execution_audit.json，但不得读取 03_state/filling_attempts 下的旧进度归档。必须使用 OpenCode 内置 read 读取这些文件，read 被权限规则拒绝时立即报告系统权限异常并停止，严禁改用 bash、cat、sed、Python、子代理或 skill 绕过。如果这些产物缺失或不可信，清楚报告并停止，不做兜底。
 
 浏览器操作只能使用随包 ego-browser skill 和 application-agent_cua。每次新会话必须使用启动消息给出的唯一 taskSpaceName 创建独立 task space，不得复用、接管或猜测旧空间。严格执行“先 pageInfo 观察 → 一个逻辑动作组 → 再观察”的协议；对动态字段、原生弹窗、保存验证和顾问接管遵守 ego-browser skill 与启动消息中的全部约束。
 
@@ -2749,6 +2749,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
               "02_generated/student_profile.md": "allow",
               "03_state/task_state.json": "allow",
               "03_state/task_control.json": "allow",
+              "03_state/agent_execution_audit.json": "allow",
               "03_state/materials_index.json": "allow",
               "03_state/ocr_index.json": "allow",
               "03_state/extracted_text/**": "allow",
@@ -2870,6 +2871,7 @@ permission:
     "02_generated/student_profile.md": allow
     "03_state/task_state.json": allow
     "03_state/task_control.json": allow
+    "03_state/agent_execution_audit.json": allow
     "03_state/materials_index.json": allow
     "03_state/ocr_index.json": allow
     "03_state/extracted_text/**": allow

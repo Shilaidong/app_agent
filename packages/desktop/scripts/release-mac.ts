@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const mode = "free"
+const opencodeDir = join(process.cwd(), "../opencode")
 const releaseDir = join(process.cwd(), "dist", "release-notes")
 const electronBuilderCache = join(process.cwd(), ".cache", "electron-builder")
 const dmg = join(process.cwd(), "dist", "terra-edu-application-agent-mac-arm64.dmg")
@@ -19,6 +20,8 @@ mkdirSync(electronBuilderCache, { recursive: true })
 const dmgAvailable = await canCreateDmg()
 
 await $`bun test`
+await $`bun test --timeout 30000 test/tool/read.test.ts`.cwd(opencodeDir)
+await $`bun typecheck`.cwd(opencodeDir)
 await $`bun verify:application-agent`
 await $`bun verify:application-agent:e2e`
 await $`bun typecheck`
@@ -50,7 +53,7 @@ writeFileSync(
     "",
     "## Verification",
     "",
-    "- Unit tests, static Application Agent contract verification, and deterministic E2E workspace verification passed.",
+    "- Desktop unit tests, OpenCode read-permission regression tests, static Application Agent contract verification, and deterministic E2E workspace verification passed.",
     "- TypeScript typecheck passed.",
     "- Electron production build passed.",
     dmgAvailable ? "- macOS DMG and ZIP package build passed." : "- macOS ZIP package build passed; DMG build was skipped after hdiutil capability probing failed.",

@@ -226,7 +226,9 @@ export const ReadTool = Tool.define(
 
       yield* ctx.ask({
         permission: "read",
-        patterns: [path.relative(instance.worktree, filepath)],
+        // Non-git projects use the global project with `/` as worktree. Permission
+        // rules from their local config are still scoped to the active directory.
+        patterns: [path.relative(instance.worktree === "/" ? instance.directory : instance.worktree, filepath)],
         always: ["*"],
         metadata: {},
       })
