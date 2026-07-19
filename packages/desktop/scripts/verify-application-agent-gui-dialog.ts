@@ -601,17 +601,19 @@ await useOrCreateTaskSpace(${taskId})
 await gotoAndWait(${JSON.stringify(cleanDialogUrl)}, { timeout: 30, settle: 1 })
 const before = await pageInfo()
 if (!before || before.dialog || !String(before.url || '').includes('skip-navigation-alert')) throw new Error('top-level alert round did not begin on the clean fixture page: ' + JSON.stringify(before))
-let result = await observePageAction(
-  () => click('#alert-trigger', { label: 'open alert fixture' }),
-  { actionTimeoutMs: 12000, settleMs: 2500, pageInfoTimeoutMs: 2000 },
-)
+// Accessibility-ref click and Runtime.evaluate(element.click) both failed to fire
+// the fixture onclick on CI. Use a real CDP mouse click at the button center.
+const target = await js("(() => { const el = document.querySelector('#alert-trigger'); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height, text: el.textContent || '' } })()")
+if (!target || !(target.w > 0) || !(target.h > 0)) throw new Error('alert trigger is missing or not laid out: ' + JSON.stringify(target))
+let result = await observePageAction(async () => {
+  await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1 })
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1 })
+}, { actionTimeoutMs: 12000, settleMs: 2500, pageInfoTimeoutMs: 2000 })
 if (result.kind !== 'dialog') {
   await new Promise((resolve) => setTimeout(resolve, 500))
   const polled = await pageInfo()
   if (polled && typeof polled === 'object' && 'dialog' in polled) result = { kind: 'dialog', info: polled, actionPromise: result.actionPromise }
 }
-// Prefer the native dialog path. On some CI Ego cold-starts the JS dialog is
-// auto-accepted before pageInfo can report it; the fixture still sets alertState.
 const alertState = await js("document.body.dataset.alertState")
 if (result.kind === 'dialog') {
   if (result.info.dialog.type !== 'alert' || result.info.dialog.message !== ${JSON.stringify(`${marker}-alert`)}) {
@@ -624,7 +626,7 @@ if (result.kind === 'dialog') {
   cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_HANDLED')
   cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_AUTO_ACCEPTED')
 } else {
-  throw new Error('top-level alert payload was not observed: ' + JSON.stringify({ result, alertState }))
+  throw new Error('top-level alert payload was not observed: ' + JSON.stringify({ result, alertState, target }))
 }
 `,
   )
