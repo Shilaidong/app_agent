@@ -593,8 +593,10 @@ cliLog('TERRA_EGO_VISUAL_SCREENSHOT_WRITTEN')
 await useOrCreateTaskSpace(${taskId})
 const before = await pageInfo()
 if (!before || before.dialog || before.url !== ${JSON.stringify(sourceUrl)}) throw new Error('top-level alert round did not begin with a clear page')
-// Use a real DOM click through js() so the fixture onclick path runs even when
-// accessibility-ref click fails to open the native alert on cold-start machines.
+// Initial navigation alert capture temporarily wraps window.alert. If restore was
+// incomplete, later clicks are swallowed without a native dialog. Force native alert
+// before the post-navigation alert cases.
+await js("(() => { for (const key of Object.getOwnPropertyNames(globalThis)) { if (!key.startsWith('__terraInitialAlertState_')) continue; try { globalThis[key]?.restore?.() } catch {} } const frame = document.createElement('iframe'); frame.style.display = 'none'; document.documentElement.appendChild(frame); globalThis.alert = frame.contentWindow.alert.bind(frame.contentWindow); frame.remove(); return typeof globalThis.alert })()")
 let result = await observePageAction(
   () => js("document.querySelector('#alert-trigger').click()"),
   { actionTimeoutMs: 12000, settleMs: 2500, pageInfoTimeoutMs: 2000 },
