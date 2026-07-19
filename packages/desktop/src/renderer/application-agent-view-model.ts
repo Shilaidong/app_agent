@@ -102,6 +102,78 @@ export function taskGroupKey(task: ApplicationTask) {
   return task.input.batchWorkspacePath?.trim() || `legacy:${normalizeTaskComparable(task.input.studentName)}`
 }
 
+export type ComposerRuntimeKind =
+  | "safety_stop"
+  | "paused"
+  | "awaiting_reply"
+  | "browser_handoff"
+  | "working"
+  | "idle"
+
+export type ComposerRuntimeState = {
+  kind: ComposerRuntimeKind
+  label: string
+  detail: string
+  canTogglePause: boolean
+}
+
+/** Pure UI state for the chat composer chip. Priority is safety > pause > wait > work. */
+export function deriveComposerRuntimeState(input: {
+  task: ApplicationTask | null | undefined
+  messages?: ApplicationAgentChatItem[]
+  questionPending?: boolean
+}): ComposerRuntimeState {
+  const task = input.task
+  if (!task) {
+    return { kind: "idle", label: "空闲", detail: "尚未选择任务", canTogglePause: false }
+  }
+  if (task.browserSafetyStop?.active || task.browserSafetyStop?.observationRequired || task.materialReviewTampered) {
+    return {
+      kind: "safety_stop",
+      label: "安全停止",
+      detail: task.materialReviewTamperMessage || task.browserSafetyStop?.kind || "需要顾问处理浏览器安全门控",
+      canTogglePause: false,
+    }
+  }
+  if (task.status === "已暂停") {
+    return { kind: "paused", label: "已暂停", detail: "点击可继续任务", canTogglePause: true }
+  }
+  if (input.questionPending || (input.messages || []).some((item) => item.status === "pending" && Boolean((item as { questions?: unknown }).questions))) {
+    return { kind: "awaiting_reply", label: "等待顾问回复", detail: "Agent 正在等待你的选项或补充", canTogglePause: true }
+  }
+  if (task.browserHandoffPending || task.status === "等待顾问登录" || task.status === "等待顾问接管浏览器") {
+    return {
+      kind: "browser_handoff",
+      label: task.status === "等待顾问登录" || task.browserHandoffType === "login" ? "等待顾问登录" : "等待顾问操作浏览器",
+      detail: "请在浏览器中完成操作后回来继续",
+      canTogglePause: true,
+    }
+  }
+  if (
+    task.status === "正在读取文件" ||
+    task.status === "正在整理材料" ||
+    task.status === "正在生成学生资料" ||
+    task.status === "正在检查缺失内容" ||
+    task.status === "正在填写申请平台" ||
+    task.status === "正在保存申请进度" ||
+    task.status === "正在上传材料" ||
+    task.status === "正在复制原始材料" ||
+    task.status === "正在创建申请工作区" ||
+    (input.messages || []).some((item) => item.status === "running" || item.status === "pending")
+  ) {
+    const ocr = task.ocr?.phase === "running" && task.ocr.total > 0
+      ? `OCR ${task.ocr.current}/${task.ocr.total}`
+      : task.status
+    return { kind: "working", label: "工作中", detail: ocr, canTogglePause: true }
+  }
+  return {
+    kind: "idle",
+    label: task.status === "阶段性完成" ? "阶段性完成" : "空闲",
+    detail: task.status,
+    canTogglePause: true,
+  }
+}
+
 export function mergeAgentMessages(current: ApplicationAgentChatItem[], next: ApplicationAgentChatItem[]) {
   if (current.length === 0) return next
   const byID = new Map(current.map((item) => [item.id, item]))

@@ -163,6 +163,8 @@ export type ApplicationTask = {
   ocr?: ApplicationOcrProgress
   materialReviewTampered?: boolean
   materialReviewTamperMessage?: string
+  browserHandoffPending?: boolean
+  browserHandoffType?: string
 }
 
 export type ApplicationMaterialReviewInput = {

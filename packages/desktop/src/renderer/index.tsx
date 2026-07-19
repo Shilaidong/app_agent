@@ -34,6 +34,7 @@ import {
   applicationTypes,
   base64Encode,
   defaultTaskInput,
+  deriveComposerRuntimeState,
   groupedTasks,
   isSameApplicationTaskInput,
   mergeAgentMessages,
@@ -612,6 +613,13 @@ function ApplicationAgentShell(props: {
     return `${quota.creditsRemaining} / ${quota.creditsTotal} credits`
   })
   const supplementalFolderName = createMemo(() => supplementalFolder().split("/").filter(Boolean).at(-1) || "")
+  const composerRuntime = createMemo(() =>
+    deriveComposerRuntimeState({
+      task: task(),
+      messages: agentMessages(),
+      questionPending: agentMessages().some((item) => Boolean(item.question) && item.status !== "completed"),
+    }),
+  )
 
   const persistActiveSession = (session: ApplicationAgentSession) => {
     localStorage.setItem(activeApplicationSessionKey, JSON.stringify({ ...session, savedAt: Date.now() }))
@@ -1949,6 +1957,19 @@ function ApplicationAgentShell(props: {
                       </Show>
                     </div>
                     <div class="agent-chat-input">
+                      <button
+                        type="button"
+                        class={`composer-runtime-chip composer-runtime-${composerRuntime().kind}`}
+                        disabled={busy() || !composerRuntime().canTogglePause}
+                        title={composerRuntime().detail}
+                        onClick={() => {
+                          if (!composerRuntime().canTogglePause) return
+                          void toggleTaskPause()
+                        }}
+                      >
+                        <strong>{composerRuntime().label}</strong>
+                        <small>{composerRuntime().detail}</small>
+                      </button>
                       <textarea
                         value={agentInput()}
                         onInput={(event) => setAgentInput(event.currentTarget.value)}

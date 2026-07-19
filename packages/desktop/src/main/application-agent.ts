@@ -91,6 +91,8 @@ export type ApplicationTask = {
   ocr?: ApplicationOcrProgress
   materialReviewTampered?: boolean
   materialReviewTamperMessage?: string
+  browserHandoffPending?: boolean
+  browserHandoffType?: string
 }
 
 export type ApplicationMaterialReviewInput = {
@@ -527,6 +529,16 @@ export async function getApplicationTask(workspacePath: string): Promise<Applica
   }
   const safety = browserSafetyStopSummary(progress)
   if (safety) normalized.browserSafetyStop = safety
+  if (progress && typeof progress === "object") {
+    const ego = (progress as { egoBrowser?: { handoffPending?: boolean; handoffAt?: string; handoffType?: string } }).egoBrowser
+    if (ego) {
+      const pending = ego.handoffPending === true || (Boolean(ego.handoffAt) && ego.handoffPending === undefined)
+      if (pending) {
+        normalized.browserHandoffPending = true
+        normalized.browserHandoffType = ego.handoffType || "browser_takeover"
+      }
+    }
+  }
   if (materialReviewTamperDetected(materialReview, materialReviewTrust)) {
     normalized.materialReviewTampered = true
     normalized.materialReviewTamperMessage =
