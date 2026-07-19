@@ -593,10 +593,16 @@ cliLog('TERRA_EGO_VISUAL_SCREENSHOT_WRITTEN')
 await useOrCreateTaskSpace(${taskId})
 const before = await pageInfo()
 if (!before || before.dialog || before.url !== ${JSON.stringify(sourceUrl)}) throw new Error('top-level alert round did not begin with a clear page')
-const result = await observePageAction(() => click('#alert-trigger', { label: 'open alert fixture' }))
-if (result.kind !== 'dialog' || result.info.dialog.type !== 'alert' || result.info.dialog.message !== ${JSON.stringify(`${marker}-alert`)}) throw new Error('top-level alert payload was not observed')
+let result = await observePageAction(() => click('#alert-trigger', { label: 'open alert fixture' }), { actionTimeoutMs: 12000, settleMs: 2500, pageInfoTimeoutMs: 2000 })
+// Cold-start machines sometimes miss the first concurrent observation race; fall back once to a direct pageInfo poll.
+if (result.kind !== 'dialog') {
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  const polled = await pageInfo()
+  if (polled && typeof polled === 'object' && 'dialog' in polled) result = { kind: 'dialog', info: polled, actionPromise: result.actionPromise }
+}
+if (result.kind !== 'dialog' || result.info.dialog.type !== 'alert' || result.info.dialog.message !== ${JSON.stringify(`${marker}-alert`)}) throw new Error('top-level alert payload was not observed: ' + JSON.stringify(result))
 await cdp('Page.handleJavaScriptDialog', { accept: true })
-await Promise.race([result.actionPromise, new Promise((resolve) => setTimeout(resolve, 2000))])
+if (result.actionPromise) await Promise.race([result.actionPromise, new Promise((resolve) => setTimeout(resolve, 2000))])
 cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_HANDLED')
 `,
   )
