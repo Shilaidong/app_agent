@@ -4,11 +4,11 @@
 
 ## 当前状态
 
-- 最新版本：[v1.0.3](https://github.com/Shilaidong/app_agent/releases/tag/v1.0.3)
+- 最新版本：[v1.0.14](https://github.com/Shilaidong/app_agent/releases/tag/v1.0.14)
 - 支持平台：macOS Apple Silicon
 - 交付文件：DMG / ZIP
 - 自动构建：GitHub Actions 仅构建 macOS arm64
-- 浏览器自动化：内置 ego-lite `0.4.2.15`
+- 浏览器自动化：内置并锁定官方签名 ego-lite `0.4.4.15`；updater payload 保留但不可执行
 - 模型和登录：随包配置 Supabase 登录、AI 额度和默认 OpenCode Go 路由
 
 ## 快速开始

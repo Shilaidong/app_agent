@@ -86,6 +86,8 @@ const api: ElectronAPI = {
   continueApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:continue-task", workspacePath),
   pauseApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:pause-task", workspacePath),
   resumeApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:resume-task", workspacePath),
+  authorizeBrowserSafetyContinue: (workspacePath, input) =>
+    ipcRenderer.invoke("application-agent:authorize-browser-safety-continue", workspacePath, input),
   submitApplicationMaterialReview: (workspacePath, input) =>
     ipcRenderer.invoke("application-agent:submit-material-review", workspacePath, input),
   blockHighRiskAction: (workspacePath, action) =>

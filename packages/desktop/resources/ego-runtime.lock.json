@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "terraPolicyRevision": "2026-07-19-browser-reliability-v2",
+  "version": "0.4.4.15",
+  "bundleVersion": "4.4.15",
+  "bundleIdentifier": "com.citrolabs.ego.lite",
+  "teamIdentifier": "JGQLC6YQYJ",
+  "signingAuthority": "Developer ID Application: CITRO LABS PTE. LIMITED (JGQLC6YQYJ)",
+  "cdHash": "36002e6015c38452782e7a082551916ac6a294e7",
+  "egoBrowserHelperSha256": "b69ff6f820e2bd73f9638fcd3b9db4a0c1d4b283407741794f8373142131388e",
+  "officialSkill": {
+    "relativePath": "Contents/Frameworks/ego Framework.framework/Versions/Current/Resources/ego-skills/ego-browser/SKILL.md",
+    "sha256": "44c119634df847861486c3b104cda3c2faa9dd4c71dbb3a854429098be962293",
+    "version": "1.2.3",
+    "date": "2026-06-25"
+  },
+  "updaterPayload": {
+    "mustBePresent": true,
+    "mustNotBeExecutable": true
+  }
+}

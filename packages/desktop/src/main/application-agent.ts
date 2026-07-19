@@ -18,11 +18,17 @@ import {
   type ApplicationRefillAttempt,
 } from "./application-agent-refill"
 import { previewSelectionList, type SelectionListRow } from "./application-selection-list"
+import {
+  authorizeBrowserSafetyContinue as authorizeBrowserSafetyContinueState,
+  browserSafetyStopSummary,
+  type BrowserSafetyStopSummary,
+} from "./application-agent-browser-safety"
 
 export { buildApplicationAgentRefillPrompt, buildApplicationAgentStartPrompt } from "./application-agent-opencode"
 export { applicationRefillSessionTitle } from "./application-agent-refill"
 export { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
 export type { ApplicationRefillAttempt } from "./application-agent-refill"
+export type { BrowserSafetyStopSummary } from "./application-agent-browser-safety"
 
 export type ApplicationTaskInput = {
   studentName: string
@@ -65,6 +71,7 @@ export type ApplicationTask = {
   progress: ProgressEntry[]
   reusedExisting?: boolean
   sharedDossierStatus?: "preparing" | "prepared" | "ready"
+  browserSafetyStop?: BrowserSafetyStopSummary
 }
 
 export type ApplicationMaterialReviewInput = {
@@ -494,6 +501,8 @@ export async function getApplicationTask(workspacePath: string): Promise<Applica
       normalized.sharedDossierStatus = sharedState.status as ApplicationTask["sharedDossierStatus"]
     }
   }
+  const safety = browserSafetyStopSummary(progress)
+  if (safety) normalized.browserSafetyStop = safety
   if (!control.paused || normalized.status === "已暂停") return normalized
   const updatedAt = stringValue(control.updatedAt) ?? normalized.updatedAt
   return {
@@ -686,6 +695,16 @@ export async function resumeApplicationTask(workspacePath: string): Promise<Appl
     )
   }
   await appendLog(workspacePath, "agent", "顾问已继续任务。Agent 将从已保存的任务状态和审计记录重新观察后开始下一步；如浏览器仍由顾问控制，不会自动夺回控制权。")
+  return getApplicationTask(workspacePath)
+}
+
+export async function authorizeBrowserSafetyContinue(
+  workspacePath: string,
+  input: { decisionId: string; taskSpaceId: string },
+): Promise<ApplicationTask> {
+  await authorizeBrowserSafetyContinueState(workspacePath, input)
+  const task = await getApplicationTask(workspacePath)
+  await appendProgress(task, "正在填写申请平台")
   return getApplicationTask(workspacePath)
 }
 

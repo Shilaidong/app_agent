@@ -1,26 +1,35 @@
+import { createHash } from "node:crypto"
 import { existsSync, readFileSync } from "node:fs"
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
 import type { ApplicationRefillAttempt, ApplicationTask } from "./application-agent"
+import egoRuntimeLock from "../../resources/ego-runtime.lock.json"
 
 const root = dirname(fileURLToPath(import.meta.url))
-const EGO_BROWSER_SKILL_PIN = "terra-pinned-2026-07-17"
-const EGO_LITE_VENDOR_VERSION = "0.4.4.15"
+const EGO_BROWSER_SKILL_PIN = egoRuntimeLock.terraPolicyRevision + ":" + egoRuntimeLock.officialSkill.sha256
+const EGO_LITE_VENDOR_VERSION = egoRuntimeLock.version
+const EGO_BROWSER_HELPER_SHA256 = egoRuntimeLock.egoBrowserHelperSha256
+const EGO_LITE_CDHASH = egoRuntimeLock.cdHash
 const EGO_BROWSER_PROTOCOL = `## ego-browser 通用观察协议
 
 - 每个 heredoc 只完成一个短回合：先观察、执行一个逻辑动作组、再验证并结束本回合。普通连续文本可作为短批次；选择、添加/删除、自动完成、上传、保存和导航必须各自单独复查，不要把它们和下一项页面动作串在同一批次。
-- 首次使用 task space 时记录返回的数值 task.id，并把它作为唯一可恢复的 taskSpaceId（调用 application-agent_cua 时传该 ID 的字符串形式）。已有保存 ID 的正常连续回合先用 listTaskSpaces 确认该空间仍为 agent ownership，再以该数值 ID 调用 useOrCreateTaskSpace(taskSpaceId)；不得再按名称匹配。已经交给顾问、listTaskSpaces 显示 user/inactive、或收到“user is controlling / inactive”后，立即停止浏览器命令，并以真实 taskSpaceId、URL、标题和证据调用 handoff_to_consultant。只有顾问明确回复继续后，才可用保存的 taskSpaceId 调用 takeOverTaskSpace(taskSpaceId) 恢复，绝不自动抢回控制。
-- 选定 task space 后，每个回合先调用 pageInfo()。首次新建且没有可用页面时，只有 pageInfo 已明确没有 dialog 后才可建立申请页；openOrReuseTab/gotoAndWait 也必须作为 observePageAction 的 action，不能直接 await。只有 pageInfo() 没有 dialog 时，才可调用 snapshotText、captureScreenshot、js、click、fillInput、导航或其他页面操作。普通表单优先用 snapshotText 的语义 workflow；语义信息不足时由你根据现场截图改用 visual workflow；DOM/CDP 仅用于有明确观察证据的窄范围操作，不得用它伪造填写结果或直接绕过正常提交。
+- 首次使用 task space 时记录返回的数值 task.id，并把它作为唯一可恢复的 taskSpaceId（调用 application-agent_cua 时传该 ID 的字符串形式）。已有保存 ID 的正常连续回合先用 listTaskSpaces 确认该空间仍为 agent ownership，再以该数值 ID 调用 useOrCreateTaskSpace(taskSpaceId)；不得再按名称匹配。若 listTaskSpaces 中已没有这个数值 ID，立即停止，用 retire_and_rebind_ego_task 记录缺失证据并让顾问明确选择“复用指定现有空间”或“新建替代空间”；确认前不得废弃、替换、新建或按名称猜测。主动调用 handOffTaskSpace 且确认 done:true 后，只有顾问明确回复继续，才可执行 \`await takeOverTaskSpace(taskSpaceId)\`；不要读取它的返回值，紧接着先调用 pageInfo()。若未主动交接却意外出现 user ownership、inactive、not assigned 或 user is controlling，立即停止浏览器命令并记录交接；顾问明确确认继续后按官方 API 执行 \`await claimTaskSpace(taskSpaceId)\`，紧接着也只调用 pageInfo()。绝不自动抢回控制。
+- 选定 task space 后，每个回合先调用 pageInfo()。首次新建的 task space 已选中一个可观察的空白标签页时，初次申请网址导航必须在这个相同 target 内调用 navigateInitialPageCapturingAlerts；不得用 openOrReuseTab 新建第二个 target。锁定版 Ego 的 Page.navigate 会被同步 load-time alert 阻塞，并在 helper 回合退出时自动消掉仍未处理的弹窗，所以绝不能假设下一回合还能读取该弹窗。navigateInitialPageCapturingAlerts 只在初次导航期间临时替换无选择分支的 window.alert，通过 Ego CDP binding 记录完整 message、URL 和 frameId，并以等价“确定”语义让导航继续；它绝不替换 confirm、prompt 或 beforeunload。返回 kind:alerts 时记录全部文案后立即结束本 heredoc，下一独立回合只复用同一 taskSpaceId 并调用 pageInfo；不得重试导航或刷新。返回 kind:cleanup_failed（contaminated:true）时，临时注入无法确认已移除，该 task space 视为污染：立即硬停止一切导航、填写和保存，不得重试清理；调用 application-agent_cua record_browser_safety_stop（safetyKind:cleanup_failed）结构化写入 progress.egoBrowser.safetyStop，并原样保留 cleanupError、infoError、capturedAlerts、最后 pageInfo 和 taskSpaceId；也可用 TERRA_EGO_TASKSPACE_CONTAMINATED: 前缀的 record_failure 兼容写入同一字段。污染空间不可恢复：顾问只能点击“重新填写”创建全新 taskSpaceId，不得 resume/takeOver/rebind existing，也不得把这次情况记为 record_blocker resolved。返回 kind:alert_evidence_lost 时，注入已清理、空间未被污染，但 iframe load-time alert 可能已被自动确认且文字丢失：同样立即硬停止，不得 snapshot、填写、保存、导航或重试；调用 record_browser_safety_stop（safetyKind:alert_evidence_lost）结构化写入 safetyStop（或 TERRA_EGO_ALERT_EVIDENCE_LOST: 前缀的 record_failure 兼容写入），并用 question 工具明确告知顾问本回合 iframe 弹窗文字可能丢失。顾问只能通过桌面“查看后继续当前空间”按钮授权同空间恢复，或点击“重新填写”；模型传入 consultantConfirmed:true 不能解除。授权后第一回合只能 record_observation，观察成功前禁止填写/保存/complete。这两种硬停止都由 CUA 与 ego-browser wrapper 读取同一 safetyStop 字段强制阻断，不得记为 record_blocker resolved。只有 pageInfo() 没有 dialog 时，才可调用 snapshotText、captureScreenshot、js、click、fillInput、导航或其他页面操作。普通表单优先用 snapshotText 的语义 workflow；语义信息不足时由你根据现场截图改用 visual workflow；DOM/CDP 仅用于有明确观察证据的窄范围操作，不得用它伪造填写结果或直接绕过正常提交。
 - 如果 pageInfo() 返回 dialog，先记录完整 dialog 信息和最近一次顶层页面证据；此时不得调用 snapshotText、captureScreenshot、js、点击/输入/上传/导航等任何页面操作，或任何 CDP 命令，唯一例外是 Page.handleJavaScriptDialog。type 为 alert 时使用 accept:true 关闭、调用 application-agent_cua record_blocker（blockerDisposition: resolved）后立刻结束本 heredoc；type 为 beforeunload 时一律 accept:false、记录 resolved 后结束本 heredoc，下一回合先确认 URL 未变化；所有 confirm 或 prompt 都必须 handOffTaskSpace，确认返回 done:true 后以真实 taskSpaceId、顶层 URL、标题和证据记录 blockerDisposition: handoff 并等待顾问，不得由 Agent 猜测选项或 prompt 文本。
 - iframe 原生 alert 会阻塞触发它的 click/save Promise，但 Ego 仍能通过 pageInfo() 返回完整 dialog。任何保存、继续、选择、导航、上传等可能改变页面的动作，都必须按 ego-browser skill 的 observePageAction 模式执行：先启动动作但不 await，同时轮询 pageInfo；不得写成“await click 后再检查”。
 - observePageAction 返回 dialog 时，保存完整 type、message、url、frameId。调用 record_blocker 时 currentUrl 始终传最近一次 pageInfo 的顶层 URL，dialog.url 和 frameId 分别传 dialogUrl、dialogFrameId，绝不能用 iframe URL 覆盖全局 currentUrl。alert 用 Page.handleJavaScriptDialog accept:true 关闭并立刻结束 heredoc；beforeunload 使用 accept:false；所有 confirm/prompt 都交接顾问。
-- observePageAction 返回 unknown、click 拒绝或 Runtime.evaluate 超时时，不能据此判断网页冻结、服务器错误或登录失效。记录精确动作、最后 pageInfo 和错误后结束回合；不得刷新、重开链接、进入 iframe URL、用 JS 直接 submit 或重复动作。只有新的页面观察明确显示登录页或认证失败时才请求登录。
+- observePageAction 返回 unknown、click 拒绝或 Runtime.evaluate 超时时，结果只是“未决”，不是已经失败。记录精确动作、最后 pageInfo 和错误后立即结束本 heredoc；此时不得调用 application-agent_cua record_failure、不得交接顾问、不得刷新、重开链接、进入 iframe URL、用 JS 直接 submit 或重复动作。下一独立 heredoc 只能复用同一 taskSpaceId 并调用 pageInfo。只有这个新观察明确证明动作失败或仍无法观察时，才可记录失败或交接；只有新观察明确显示登录页或认证失败时才请求登录。
+- Qwen 的每张视觉证据都必须写入当前工作区的显式 PNG 路径 \`05_screenshots/<有意义且唯一的名称>.png\`，并调用 \`await captureScreenshot('05_screenshots/<同一名称>.png')\`；禁止无参数 captureScreenshot。脚本返回后必须立即用 OpenCode 内置 read 读取这个完全相同的 PNG，等待图片真正作为附件出现在模型上下文后才可根据它继续；不得仅凭路径、cliLog 文本或旧截图判断页面。
+- 普通文本输入必须使用 fillInput，随后发送真实 Tab，再从新的 snapshot/pageInfo/视觉证据读取回显；只有遮罩输入、日期组件或 fillInput 无法产生真实按键语义时，才可逐键发送 CDP Input.dispatchKeyEvent，随后同样 Tab 并读取回显。下拉选择必须先 click 打开、重新 snapshot、click 当前可见选项，再重新观察；任何重渲染都会使旧 ref 立即失效。
+- 页面写操作禁止读取或调用 Vue internals、\`$router\`、store，禁止直接 DOM value setter、element.click()、form.submit()/requestSubmit() 或注入脚本提交。js/cdp 只可观察，唯一写入例外是真实键盘/CDP key events、Page.handleJavaScriptDialog 和用于保存审计的 network event 观察；页面交互仍必须走 click/fillInput/uploadFile 等真实交互 helper。
 - 任何选择、添加/删除、自动完成、切换或导航都可能改变可见内容。动作后用新的 pageInfo 加 snapshotText 或截图复查页面差异；DOM required 扫描只是辅助证据。每次改变页面后都必须重新进行带 taskSpaceId、URL、标题和证据的动态表单验证，才能保存。
-- 遇到校验、超时、服务端错误或结果不明确时，保留当前页面和观察证据，记录失败或交接；不得自动刷新、重开链接、重复同一动作或要求重新登录。只有新观察明确显示认证失败或登录页时，才可请求顾问重新登录。
-- 若 Terra 包装器返回 TERRA_EGO_BROWSER_VERSION_CONFLICT、TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE 或 TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE，立即停止，不得重试、调用系统 ego-browser、关闭其他 Ego Lite 或猜测 task space。用 application-agent_cua record_failure 原样记录标识，按提示处理后从新回合观察恢复。
-- 保存前后都必须有新观察证据。保存动作后先调用 record_observation 写入晚于动态表单复查的页面证据；只有页面明确显示已保存、已回显或状态已改变，才能调用 record_save_verified。`
+- 遇到校验、超时、服务端错误或结果不明确时，先保留当前页面和观察证据，不得自动刷新、重开链接、重复同一动作或要求重新登录。若属于 observePageAction unknown，必须严格按上一条立即结束，并在下一独立 heredoc 只调用 pageInfo；只有该新观察明确证明动作失败或需要人工处理后，才可记录失败或交接。只有新观察明确显示认证失败或登录页时，才可请求顾问重新登录。
+- 若 Terra 包装器返回 TERRA_EGO_BROWSER_VERSION_CONFLICT、TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE 或 TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE，立即停止，不得重试、调用系统 ego-browser、关闭其他 Ego Lite 或猜测 task space。原样调用 application-agent_cua record_failure，并让顾问按提示处理后从新的观察回合继续。
+- 保存前后都必须有新观察证据。每次 record_observation 都同时记录真正承载表单的 frameId、loaderId 和 frameUrl（非 iframe 页面就是主 frame）。动态复查通过后先调用 begin_save_attempt 得到 saveAttemptId 并固化源页面/frame/loader，再以 observePageAction 执行一次真实保存动作，记录 actionStartedAt 和 eventsDrainedAt，并收集 drainEvents/CDP Network 的结构化响应证据。把 requestWillBeSent 与 responseReceived 精简为 request/response 两部分并由 record_save_verified 以同一非空 requestId 关联；request 的 frameId/loaderId 是上下文身份，response 的 frameId/loaderId 若事件实际提供则必须与同 requestId 的 request 一致，未提供时不得伪造。不得传 headers、body、postData、cookies 或带 query/hash 的证据 URL。保存后调用 record_observation 写入新的顶层页面与表单 frame 证据。只有与源 frame/loader 和该次点击时间窗口一致的 POST/PUT/PATCH 2xx XHR/fetch，或同一 frame 中的普通 2xx document POST/重定向 document POST，并且目标 frame URL/loader 与最终响应匹配时，才能调用 record_save_verified。这同时支持顶层保存和 iframe 内保存；GET、非 2xx、后台 POST、旧事件、frame/loader 不匹配、无网络证据或仅有“Saved”文字都不能算服务器确认。
+- complete_ego_task 是独立且终态的最终门。它必须使用最新页面观察的完整 taskSpaceId、顶层 URL/标题、frame/loader 和原样 evidence，显式传 confirmed:true、completionDisposition 以及 remainingRequiredFields:[]。任何 pending save attempt、顾问交接/接管、task-space rebind、空必填项，或没有晚于最新服务器确认保存的完成页观察，都不得记录阶段完成。complete_ego_task 成功后，所有 application-agent_cua 动作都会返回 BROWSER_TASK_ALREADY_COMPLETED；需要继续改动必须由顾问点击“重新填写”，不能污染已完成的会话。随后只能在独立 heredoc 调用 completeTaskSpace(taskSpaceId, { keep: true })。若这个唯一的最终 helper 回合失败，立即停止，不得再观察或重试；只可调用 record_failure，传相同 taskSpaceId，并把 detail 写为 TERRA_EGO_COMPLETION_HELPER_FAILED: 后紧跟原始错误，工具会归档并撤销这次假完成。
+- 当前锁定的 Ego Lite 0.4.4.15 在程序化关闭经历过原生弹窗的窗口时可能崩溃。只有整所学校的浏览器任务真正结束后，才可在独立最终回合调用 \`completeTaskSpace(taskSpaceId, { keep: true })\`；一律不得使用 keep:false、关闭全部标签页或由 Agent 销毁该窗口，留给顾问正常查看和关闭。`
 
 const EGO_OBSERVE_PAGE_ACTION_SOURCE = `async function observePageAction(action, { actionTimeoutMs = 8000, settleMs = 2000, pollMs = 100, pageInfoTimeoutMs = 1500 } = {}) {
   let settled
@@ -68,6 +77,114 @@ const EGO_OBSERVE_PAGE_ACTION_SOURCE = `async function observePageAction(action,
   }
 }`
 
+export const EGO_INITIAL_NAVIGATION_SOURCE = `async function navigateInitialPageCapturingAlerts(url, { timeout = 30, settle = 1 } = {}) {
+  const suffix = Date.now().toString(36) + Math.random().toString(36).slice(2)
+  const bindingName = '__terraInitialAlert_' + suffix
+  const stateKey = '__terraInitialAlertState_' + suffix
+  await cdp('Runtime.enable')
+  await drainEvents()
+  await cdp('Runtime.addBinding', { name: bindingName })
+  let installed
+  try {
+    installed = await cdp('Page.addScriptToEvaluateOnNewDocument', {
+      source: "(() => {" +
+      "const bindingName=" + JSON.stringify(bindingName) + ";" +
+      "const stateKey=" + JSON.stringify(stateKey) + ";" +
+      "const original=globalThis.alert;" +
+      "const state={alerts:[],restored:false};" +
+      // After restore, aliases of the wrapped function captured by page scripts
+      // must fall through to the native alert instead of silently swallowing it.
+      "const wrapped=(message)=>{if(state.restored)return typeof original==='function'?original(message):undefined;const item={type:'alert',message:String(message),url:String(location.href),observedAt:new Date().toISOString()};state.alerts.push(item);try{globalThis[bindingName](JSON.stringify(item))}catch{}};" +
+      "const restore=()=>{if(globalThis.alert===wrapped)globalThis.alert=original;state.restored=true};" +
+      "state.restore=restore;" +
+      "Object.defineProperty(globalThis,stateKey,{value:state,configurable:true});" +
+      "globalThis.alert=wrapped;" +
+      "globalThis.addEventListener('load',()=>setTimeout(restore,0),{once:true});" +
+      "})()",
+    })
+  } catch (error) {
+    // Compensate for the partially installed capture before failing the round.
+    await cdp('Runtime.removeBinding', { name: bindingName }).catch(() => {})
+    throw error
+  }
+  const actionStartedAt = new Date().toISOString()
+  let action
+  let actionError
+  try {
+    action = await gotoAndWait(url, { timeout, settle })
+  } catch (error) {
+    actionError = String(error)
+  }
+  // Cleanup must always be attempted. A removeScript/removeBinding failure means
+  // the injected alert wrapper may survive into later documents, so it is a hard
+  // contamination failure, never a successful action/alerts result.
+  const cleanupFailures = []
+  const cleanupIssues = []
+  await cdp('Page.removeScriptToEvaluateOnNewDocument', { identifier: installed.identifier }).catch((error) => cleanupFailures.push('removeScript: ' + String(error)))
+  const events = await drainEvents().catch((error) => {
+    cleanupIssues.push('drainEvents: ' + String(error))
+    return []
+  })
+  await cdp('Runtime.removeBinding', { name: bindingName }).catch((error) => cleanupFailures.push('removeBinding: ' + String(error)))
+  const contexts = new Map(events
+    .filter((event) => event?.method === 'Runtime.executionContextCreated' && event.params?.context)
+    .map((event) => [event.params.context.id, event.params.context.auxData?.frameId || '']))
+  const bindingAlerts = events.flatMap((event) => {
+    if (event?.method !== 'Runtime.bindingCalled' || event.params?.name !== bindingName) return []
+    try {
+      const item = JSON.parse(event.params.payload)
+      return [{ ...item, frameId: contexts.get(event.params.executionContextId) || '' }]
+    } catch {
+      return []
+    }
+  })
+  const cleanupError = cleanupFailures.concat(cleanupIssues).join('; ') || undefined
+  // pageInfo is observed with a bounded catch so a broken or hung observation
+  // can never mask a contamination or evidence-loss hard stop.
+  let info
+  let infoError
+  {
+    let timeoutId
+    const observation = await Promise.race([
+      Promise.resolve().then(() => pageInfo()).then(
+        (value) => ({ kind: 'info', value }),
+        (error) => ({ kind: 'error', error: String(error) }),
+      ),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve({ kind: 'timeout' }), 5000)
+      }),
+    ])
+    clearTimeout(timeoutId)
+    if (observation.kind === 'info') info = observation.value
+    else infoError = observation.kind === 'timeout' ? 'pageInfo timed out after 5000ms' : observation.error
+  }
+  const dialogOpen = Boolean(info && typeof info === 'object' && 'dialog' in info)
+  if (cleanupFailures.length > 0) return { kind: 'cleanup_failed', contaminated: true, cleanupError, capturedAlerts: bindingAlerts, info, infoError, action, actionError, actionStartedAt }
+  if (cleanupIssues.length > 0) {
+    // The injection was removed, but the drained binding evidence is gone: an
+    // iframe load-time alert may have been auto-accepted with its text lost.
+    // Only the top-level fallback can still be read; a dialog blocks js().
+    const topLevelAlerts = dialogOpen || infoError
+      ? []
+      : await js("(() => {const state=globalThis[" + JSON.stringify(stateKey) + "];if(state?.restore)state.restore();return state?.alerts||[]})()").catch(() => [])
+    return { kind: 'alert_evidence_lost', cleanupError, capturedAlerts: bindingAlerts, topLevelAlerts: Array.isArray(topLevelAlerts) ? topLevelAlerts : [], info, infoError, action, actionError, actionStartedAt }
+  }
+  // A still-open native dialog (confirm/prompt, or an alert this capture does
+  // not cover) blocks Runtime.evaluate, so the dialog check must come before
+  // the top-level js() fallback; captured alert text is preserved either way.
+  if (dialogOpen) return { kind: 'dialog', info, capturedAlerts: bindingAlerts, action, actionError, actionStartedAt, cleanupError, infoError }
+  if (infoError) return { kind: 'unknown', info, capturedAlerts: bindingAlerts, error: actionError || infoError, actionStartedAt, cleanupError, infoError }
+  const topLevelAlerts = await js("(() => {const state=globalThis[" + JSON.stringify(stateKey) + "];if(state?.restore)state.restore();return state?.alerts||[]})()").catch(() => [])
+  const frameTree = await cdp('Page.getFrameTree')
+  const topFrameId = frameTree?.frameTree?.frame?.id || ''
+  const alerts = bindingAlerts.concat(Array.isArray(topLevelAlerts) ? topLevelAlerts.map((item) => ({ ...item, frameId: topFrameId })) : [])
+    .map((item) => ({ ...item, frameId: item.frameId || (item.url === info?.url ? topFrameId : '') }))
+    .filter((item, index, items) => items.findIndex((candidate) => candidate.message === item.message && candidate.url === item.url && candidate.frameId === item.frameId && candidate.observedAt === item.observedAt) === index)
+  if (alerts.length > 0) return { kind: 'alerts', alerts, info, frameTree, action, actionStartedAt, cleanupError, infoError }
+  if (actionError) return { kind: 'unknown', info, frameTree, error: actionError, actionStartedAt, cleanupError, infoError }
+  return { kind: 'action', info, frameTree, action, actionStartedAt, cleanupError, infoError }
+}`
+
 async function writeJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, JSON.stringify(value, null, 2) + "\n", "utf8")
@@ -87,20 +204,6 @@ async function writeGeneratedFile(path: string, contents: string, mode?: number)
 
 async function writeGeneratedJson(path: string, value: unknown) {
   await writeGeneratedFile(path, JSON.stringify(value, null, 2) + "\n")
-}
-
-function readBundledEgoBrowserResource(relativePath: string) {
-  const candidates = [
-    join(root, "../../resources/ego-browser", relativePath),
-    join(process.resourcesPath ?? "", "ego-browser", relativePath),
-  ]
-  for (const candidate of candidates) {
-    try {
-      if (!candidate || !existsSync(candidate)) continue
-      return readFileSync(candidate, "utf8")
-    } catch {}
-  }
-  throw new Error("Missing bundled ego-browser resource: " + relativePath)
 }
 
 function bundledEgoLiteAppPath() {
@@ -132,23 +235,41 @@ function shellQuote(value: string) {
 export type OpenCodeResourceOverrides = {
   egoLiteAppPath?: string
   egoRuntimeRoot?: string
+  egoBrowserTestHelperPath?: string
+  egoBrowserReadinessAttempts?: number
+  egoBrowserSingleLaunchSentinel?: string
   sharedWorkspacePath?: string
 }
 
 function renderEgoBrowserWrapper(overrides?: OpenCodeResourceOverrides) {
   const appPath = overrides?.egoLiteAppPath || bundledEgoLiteAppPath()
   const runtimeRoot = overrides?.egoRuntimeRoot ? shellQuote(overrides.egoRuntimeRoot) : '"$HOME/Library/Application Support/edu.terra.application-agent/ego-lite-runtime"'
+  const testHelperAssignment = overrides?.egoBrowserTestHelperPath
+    ? "TEST_HELPER_PATH=" + shellQuote(overrides.egoBrowserTestHelperPath)
+    : "TEST_HELPER_PATH=''"
+  const singleLaunchAssignment = overrides?.egoBrowserSingleLaunchSentinel
+    ? "SINGLE_LAUNCH_SENTINEL=" + shellQuote(overrides.egoBrowserSingleLaunchSentinel)
+    : "SINGLE_LAUNCH_SENTINEL=''"
+  const readinessAttempts = overrides?.egoBrowserReadinessAttempts ?? 15
+  if (!Number.isInteger(readinessAttempts) || readinessAttempts < 1) throw new Error("egoBrowserReadinessAttempts must be a positive integer")
   return `#!/bin/sh
 set -eu
 
 APP_PATH=${shellQuote(appPath)}
 EXPECTED_VERSION=${shellQuote(EGO_LITE_VENDOR_VERSION)}
+EXPECTED_CDHASH=${shellQuote(EGO_LITE_CDHASH)}
+EXPECTED_HELPER_SHA256=${shellQuote(EGO_BROWSER_HELPER_SHA256)}
 EXPECTED_BUNDLE_ID='com.citrolabs.ego.lite'
 EXPECTED_TEAM_ID='JGQLC6YQYJ'
 INFO_PLIST="$APP_PATH/Contents/Info.plist"
 RUNTIME_ROOT=${runtimeRoot}
 RUNTIME_APP="$RUNTIME_ROOT/ego lite.app"
 RUNTIME_INFO_PLIST="$RUNTIME_APP/Contents/Info.plist"
+EGO_USER_DATA_ROOT="$HOME/Library/Application Support/Citro Labs/ego lite"
+EGO_CONFIG="$EGO_USER_DATA_ROOT/ego_config.json"
+READINESS_ATTEMPTS=${readinessAttempts}
+${testHelperAssignment}
+${singleLaunchAssignment}
 
 die() {
   printf '%s\\n' "$*" >&2
@@ -164,25 +285,89 @@ ego_identity_valid() {
   identity=$(/usr/bin/codesign -dv --verbose=4 "$1" 2>&1 || true)
   printf '%s\\n' "$identity" | /usr/bin/grep -Fxq "Identifier=$EXPECTED_BUNDLE_ID" &&
     printf '%s\\n' "$identity" | /usr/bin/grep -Fxq "TeamIdentifier=$EXPECTED_TEAM_ID" &&
+    printf '%s\\n' "$identity" | /usr/bin/grep -Fxq "CDHash=$EXPECTED_CDHASH" &&
     printf '%s\\n' "$identity" | /usr/bin/grep -Fq 'Authority=Developer ID Application: CITRO LABS PTE. LIMITED (JGQLC6YQYJ)'
+}
+
+helper_integrity_valid() {
+  helper="$1/Contents/Frameworks/ego Framework.framework/Versions/$EXPECTED_VERSION/Helpers/ego-browser"
+  [ -x "$helper" ] && [ "$(/usr/bin/shasum -a 256 "$helper" | /usr/bin/awk '{ print $1 }')" = "$EXPECTED_HELPER_SHA256" ]
 }
 
 enabled_updater() {
   find "$1/Contents" -type f \\( -path '*/EgoUpdater.app/*' -o -path '*/EgoSoftwareUpdate.bundle/*' -o -path '*/com.citrolabs.ego.UpdaterPrivilegedHelper' \\) -exec sh -c 'for candidate do [ ! -x "$candidate" ] || printf "%s\\n" "$candidate"; done' sh {} + 2>/dev/null | head -n 1 || true
 }
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-WORKSPACE=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+WORKSPACE=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)
+EGO_NODE_STDIN=""
+EGO_NODE_STDIN_COMPACT=""
+HELPER_STDOUT=""
+HELPER_STDERR=""
+READINESS_STDERR=""
+cleanup_wrapper_files() {
+  [ -z "$EGO_NODE_STDIN" ] || /bin/rm -f "$EGO_NODE_STDIN"
+  [ -z "$EGO_NODE_STDIN_COMPACT" ] || /bin/rm -f "$EGO_NODE_STDIN_COMPACT"
+  [ -z "$HELPER_STDOUT" ] || /bin/rm -f "$HELPER_STDOUT"
+  [ -z "$HELPER_STDERR" ] || /bin/rm -f "$HELPER_STDERR"
+  [ -z "$READINESS_STDERR" ] || /bin/rm -f "$READINESS_STDERR"
+}
+trap 'cleanup_wrapper_files' EXIT
 if [ -f "$WORKSPACE/03_state/task_control.json" ] && /usr/bin/grep -Eq '"paused"[[:space:]]*:[[:space:]]*true' "$WORKSPACE/03_state/task_control.json"; then
   printf '%s\\n' 'TERRA_EGO_TASK_PAUSED' >&2
   exit 75
+fi
+SAFETY_KIND=""
+if [ -f "$WORKSPACE/03_state/application_progress.json" ]; then
+  SAFETY_KIND=$(/usr/bin/python3 -c 'import json,sys
+try:
+  progress=json.load(open(sys.argv[1], encoding="utf-8"))
+  stop=((progress.get("egoBrowser") or {}).get("safetyStop") or {})
+  if stop.get("active") is True and stop.get("kind") in ("cleanup_failed", "alert_evidence_lost"):
+    print(stop.get("kind") or "")
+  elif stop.get("observationRequired") is True and stop.get("kind") == "alert_evidence_lost":
+    print("observation_required")
+except Exception:
+  pass
+' "$WORKSPACE/03_state/application_progress.json" 2>/dev/null || true)
+  if [ "$SAFETY_KIND" = "cleanup_failed" ]; then
+    printf '%s\\n' 'TERRA_EGO_TASKSPACE_CONTAMINATED: active browser safety stop blocks all ego-browser commands for this contaminated task space. Only consultant refill may create a replacement space.' >&2
+    exit 82
+  fi
+  if [ "$SAFETY_KIND" = "alert_evidence_lost" ]; then
+    printf '%s\\n' 'TERRA_EGO_ALERT_EVIDENCE_LOST: active browser safety stop blocks all ego-browser commands until the consultant authorizes continue on the desktop or starts refill.' >&2
+    exit 83
+  fi
+fi
+if [ "\${1:-}" = "nodejs" ]; then
+  EGO_NODE_STDIN=$(/usr/bin/mktemp "$WORKSPACE/03_state/.ego-node-stdin.XXXXXX")
+  EGO_NODE_STDIN_COMPACT=$(/usr/bin/mktemp "$WORKSPACE/03_state/.ego-node-stdin-compact.XXXXXX")
+  /bin/cat > "$EGO_NODE_STDIN"
+  /usr/bin/tr '\\r\\n\\t' '   ' < "$EGO_NODE_STDIN" > "$EGO_NODE_STDIN_COMPACT"
+  if /usr/bin/sed -E 's/completeTaskSpace[[:space:]]*\\([[:space:]]*[[:alnum:]_$]+[[:space:]]*,[[:space:]]*\\{[[:space:]]*keep[[:space:]]*:[[:space:]]*true[[:space:]]*\\}[[:space:]]*\\)//g' "$EGO_NODE_STDIN_COMPACT" | /usr/bin/grep -Eiq 'complete([^[:alnum:]]|[[:space:]])*TaskSpace'; then
+    printf '%s\\n' 'TERRA_EGO_UNSAFE_TASKSPACE_CLOSE: completeTaskSpace 只能使用可验证的字面量 completeTaskSpace(taskSpaceId, { keep: true })。省略参数、空参数、变量 keep、别名或 keep:false 都会在启动 Ego 前被拒绝。' >&2
+    exit 81
+  fi
+  if /usr/bin/grep -Eiq 'closeTab' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_UNSAFE_TASKSPACE_CLOSE: 申请任务禁止由 Agent 程序化关闭标签页或窗口。请保留当前 Ego 窗口给顾问查看和正常关闭。' >&2
+    exit 81
+  fi
+  if /usr/bin/grep -Eiq 'reload' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_UNSAFE_PAGE_RELOAD: 申请页面异常时禁止自动刷新；请结束本回合，下一回合只重新观察，仍异常则交接顾问。' >&2
+    exit 81
+  fi
+  if [ "$SAFETY_KIND" = "observation_required" ] && /usr/bin/grep -Eiq 'fillInput|uploadFile|observePageAction|dispatchKeyEvent|navigateInitialPageCapturingAlerts|handOffTaskSpace|takeOverTaskSpace|claimTaskSpace|completeTaskSpace|openOrReuseTab' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'BROWSER_SAFETY_OBSERVATION_REQUIRED: after alert_evidence_lost recovery, only a pageInfo/list/snapshot observation round is allowed before any write, navigation, or control-change command.' >&2
+    exit 84
+  fi
 fi
 if [ -f "$WORKSPACE/03_state/material_review.json" ] && /usr/bin/grep -Eq '"status"[[:space:]]*:[[:space:]]*"pending"' "$WORKSPACE/03_state/material_review.json"; then
   die "Terra-Edu material review is pending. Ask the advisor to confirm materials in the desktop app before starting ego-browser."
 fi
 
-[ -d "$APP_PATH" ] || die "Terra-Edu bundled ego lite is missing: $APP_PATH"
-[ -f "$INFO_PLIST" ] || die "Terra-Edu bundled ego lite Info.plist is missing: $INFO_PLIST"
+if [ -z "$TEST_HELPER_PATH" ]; then
+  [ -d "$APP_PATH" ] || die "Terra-Edu bundled ego lite is missing: $APP_PATH"
+  [ -f "$INFO_PLIST" ] || die "Terra-Edu bundled ego lite Info.plist is missing: $INFO_PLIST"
 
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST" 2>/dev/null || true)
 [ "$VERSION" = "$EXPECTED_VERSION" ] || die "Terra-Edu bundled ego lite version mismatch: expected $EXPECTED_VERSION, got \${VERSION:-unknown}"
@@ -190,6 +375,7 @@ VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_
 if ! /usr/bin/codesign --verify --deep --strict "$APP_PATH" >/dev/null 2>&1 || ! ego_identity_valid "$APP_PATH"; then
   unavailable "Terra-Edu 内置 Ego Lite 母版的官方签名已失效；为保护登录态和页面，没有启动浏览器。请重新安装 Terra-Edu 后再继续。"
 fi
+helper_integrity_valid "$APP_PATH" || unavailable "Terra-Edu 内置 Ego Lite helper 与运行锁不匹配；没有启动或复制浏览器。"
 UPDATER_EXECUTABLE=$(enabled_updater "$APP_PATH")
 if [ -n "$UPDATER_EXECUTABLE" ]; then
   unavailable "内置 Ego Lite 母版包含意外启用的更新器组件；没有执行浏览器操作。"
@@ -202,6 +388,7 @@ prepare_runtime() {
     if [ "$RUNTIME_VERSION" = "$EXPECTED_VERSION" ] &&
       /usr/bin/codesign --verify --deep --strict "$RUNTIME_APP" >/dev/null 2>&1 &&
       ego_identity_valid "$RUNTIME_APP" &&
+      helper_integrity_valid "$RUNTIME_APP" &&
       [ -z "$RUNTIME_UPDATER_EXECUTABLE" ]; then
       return
     fi
@@ -218,6 +405,7 @@ prepare_runtime() {
   fi
   if ! /usr/bin/codesign --verify --deep --strict "$STAGED_APP" >/dev/null 2>&1 ||
     ! ego_identity_valid "$STAGED_APP" ||
+    ! helper_integrity_valid "$STAGED_APP" ||
     [ -n "$(enabled_updater "$STAGED_APP")" ]; then
     /bin/rm -rf "$STAGED_APP"
     unavailable "Ego Lite 运行副本的官方签名验证失败；没有执行浏览器操作。"
@@ -232,6 +420,36 @@ prepare_runtime() {
   fi
 }
 
+prepare_ego_first_run() {
+  if [ -f "$EGO_CONFIG" ]; then
+    if [ "$(/usr/bin/plutil -extract not_first_run raw -o - "$EGO_CONFIG" 2>/dev/null || true)" = "true" ]; then
+      return
+    fi
+    unavailable "检测到已有但未完成首次运行的 Ego Lite 配置；Terra-Edu 没有覆盖它。请完成 Ego Lite 首次设置后点击“继续任务”。"
+  fi
+  if [ -e "$EGO_CONFIG" ]; then
+    unavailable "Ego Lite 首次运行配置路径不是普通文件；Terra-Edu 没有修改或启动浏览器。"
+  fi
+  if ! /bin/mkdir -p "$EGO_USER_DATA_ROOT"; then
+    unavailable "无法创建 Ego Lite 用户数据目录；没有启动浏览器。"
+  fi
+  if ! EGO_CONFIG_STAGED=$(umask 077 && /usr/bin/mktemp "$EGO_USER_DATA_ROOT/.ego_config.terra.XXXXXX"); then
+    unavailable "无法准备 Ego Lite 首次运行配置；没有启动浏览器。"
+  fi
+  if ! printf '%s\\n' '{"not_first_run":true}' > "$EGO_CONFIG_STAGED"; then
+    /bin/rm -f "$EGO_CONFIG_STAGED"
+    unavailable "无法准备 Ego Lite 首次运行配置；没有启动浏览器。"
+  fi
+  if ! /bin/ln "$EGO_CONFIG_STAGED" "$EGO_CONFIG" 2>/dev/null; then
+    /bin/rm -f "$EGO_CONFIG_STAGED"
+    if [ -f "$EGO_CONFIG" ] && [ "$(/usr/bin/plutil -extract not_first_run raw -o - "$EGO_CONFIG" 2>/dev/null || true)" = "true" ]; then
+      return
+    fi
+    unavailable "Ego Lite 首次运行配置在启动时发生变化；Terra-Edu 没有覆盖或启动浏览器。"
+  fi
+  /bin/rm -f "$EGO_CONFIG_STAGED"
+}
+
 # Do not ever launch the immutable source app inside Terra. Its updater payload
 # is disabled, and any legacy vendor updater can only alter the managed runtime
 # copy — never the signed Terra application itself.
@@ -242,7 +460,29 @@ if ! /usr/bin/pgrep -f "$RUNTIME_APP/Contents/MacOS/" >/dev/null 2>&1; then
     exit 76
   fi
   prepare_runtime
-  open -n -gj "$RUNTIME_APP" --args --no-default-browser-check --no-first-run >/dev/null 2>&1 || true
+  if /usr/bin/pgrep -f 'ego lite.app/Contents/' >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_ID" 2>/dev/null | /usr/bin/grep -Fq 'com.citrolabs.ego.lite.ego-browser'; then
+    printf '%s\\n' 'TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE: Ego Lite 在准备运行副本期间被另一进程启动。为保护其登录态和页面，Terra-Edu 未修改首次运行配置或启动竞争浏览器；请关闭另一 Ego Lite 后点击“继续任务”。' >&2
+    exit 76
+  fi
+  prepare_ego_first_run
+  if [ -n "$SINGLE_LAUNCH_SENTINEL" ]; then
+    if [ -e "$SINGLE_LAUNCH_SENTINEL" ] || ! /bin/mkdir "$SINGLE_LAUNCH_SENTINEL" 2>/dev/null; then
+      printf '%s\\n' 'TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: 隔离验收中的 Ego Lite 已经启动过但当前进程不存在；为避免反复启动和掩盖异常，本次验收不会重新打开浏览器。' >&2
+      exit 76
+    fi
+  fi
+  # Managed application filling never stores school-platform passwords in Terra.
+  # Pass Chromium basic/mock keychain flags so a missing or reset macOS "ego"
+  # keychain dialog cannot block CDP readiness or freeze GUI smoke.
+  if [ -n "\${HOME:-}" ] && [ -n "\${CFFIXED_USER_HOME:-}" ]; then
+    /usr/bin/open --env "HOME=$HOME" --env "CFFIXED_USER_HOME=$CFFIXED_USER_HOME" -n -gj "$RUNTIME_APP" --args --no-default-browser-check --no-first-run --password-store=basic --use-mock-keychain >/dev/null 2>&1 || true
+  elif [ -n "\${HOME:-}" ]; then
+    /usr/bin/open --env "HOME=$HOME" -n -gj "$RUNTIME_APP" --args --no-default-browser-check --no-first-run --password-store=basic --use-mock-keychain >/dev/null 2>&1 || true
+  elif [ -n "\${CFFIXED_USER_HOME:-}" ]; then
+    /usr/bin/open --env "CFFIXED_USER_HOME=$CFFIXED_USER_HOME" -n -gj "$RUNTIME_APP" --args --no-default-browser-check --no-first-run --password-store=basic --use-mock-keychain >/dev/null 2>&1 || true
+  else
+    /usr/bin/open -n -gj "$RUNTIME_APP" --args --no-default-browser-check --no-first-run --password-store=basic --use-mock-keychain >/dev/null 2>&1 || true
+  fi
   attempt=1
   started=0
   while [ "$attempt" -le 15 ]; do
@@ -262,22 +502,29 @@ RUNTIME_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString'
 if [ "$RUNTIME_VERSION" != "$EXPECTED_VERSION" ] ||
   ! /usr/bin/codesign --verify --deep --strict "$RUNTIME_APP" >/dev/null 2>&1 ||
   ! ego_identity_valid "$RUNTIME_APP" ||
+  ! helper_integrity_valid "$RUNTIME_APP" ||
   [ -n "$(enabled_updater "$RUNTIME_APP")" ]; then
   printf '%s\\n' 'TERRA_EGO_BROWSER_VERSION_CONFLICT: Terra-Edu 管理的 Ego Lite 运行副本已在当前浏览器会话中改变。为保护登录态和页面，没有调用它；请关闭该 Ego Lite 后点击“继续任务”。' >&2
   exit 76
 fi
-HELPER="$RUNTIME_APP/Contents/Frameworks/ego Framework.framework/Versions/$EXPECTED_VERSION/Helpers/ego-browser"
-[ -x "$HELPER" ] || unavailable "已验证的 Ego Lite 运行副本缺少匹配版本的 ego-browser helper；没有执行浏览器操作。"
+  HELPER="$RUNTIME_APP/Contents/Frameworks/ego Framework.framework/Versions/$EXPECTED_VERSION/Helpers/ego-browser"
+  helper_integrity_valid "$RUNTIME_APP" || unavailable "已验证的 Ego Lite 运行副本缺少与运行锁匹配的 ego-browser helper；没有执行浏览器操作。"
+else
+  HELPER="$TEST_HELPER_PATH"
+  [ -x "$HELPER" ] || die "Terra-Edu test ego-browser helper is not executable: $HELPER"
+fi
 
 export TERRA_EGO_LITE_APP="$RUNTIME_APP"
 export TERRA_EGO_BROWSER_HELPER="$HELPER"
 # Wait only for our pinned helper to answer a read-only task-space query; never
 # fall back to a system helper.
+READINESS_STDERR=$(/usr/bin/mktemp "$WORKSPACE/03_state/.ego-readiness-stderr.XXXXXX")
 attempt=1
 ready=0
-while [ "$attempt" -le 15 ]; do
+readiness_status=252
+while [ "$attempt" -le "$READINESS_ATTEMPTS" ]; do
   set +e
-  "$HELPER" taskspace list >/dev/null 2>&1
+  "$HELPER" taskspace list >/dev/null 2>"$READINESS_STDERR"
   readiness_status=$?
   set -e
   if [ "$readiness_status" -eq 0 ]; then
@@ -288,22 +535,27 @@ while [ "$attempt" -le 15 ]; do
     printf '%s\\n' 'TERRA_EGO_BROWSER_VERSION_CONFLICT: 检测到另一版本 Ego Lite 浏览器服务正在运行。为保护其登录态和页面，Terra-Edu 未使用或关闭它；请关闭另一版本 Ego Lite 后点击“继续任务”。' >&2
     exit 76
   fi
-  if [ "$readiness_status" -ne 252 ]; then
-    printf '%s\\n' "TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: 随包 Ego Lite 服务启动失败（taskspace list 退出码 $readiness_status）；没有执行浏览器操作。请由顾问确认后再继续。" >&2
-    exit 76
-  fi
   attempt=$((attempt + 1))
-  sleep 1
+  [ "$attempt" -gt "$READINESS_ATTEMPTS" ] || sleep 1
 done
 if [ "$ready" -ne 1 ]; then
-  printf '%s\\n' 'TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: 随包 Ego Lite 未在 15 秒内就绪；没有执行浏览器操作。请由顾问确认后再继续。' >&2
+  /bin/cat "$READINESS_STDERR" >&2
+  printf '%s\\n' "TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: 随包 Ego Lite 未在限定时间内就绪（最后一次 taskspace list 退出码 \${readiness_status}）；没有执行浏览器操作。请由顾问确认后再继续。" >&2
   exit 76
 fi
 
 set +e
-"$HELPER" "$@"
+HELPER_STDOUT=$(/usr/bin/mktemp "$WORKSPACE/03_state/.ego-helper-stdout.XXXXXX")
+HELPER_STDERR=$(/usr/bin/mktemp "$WORKSPACE/03_state/.ego-helper-stderr.XXXXXX")
+if [ -n "$EGO_NODE_STDIN" ]; then
+  "$HELPER" "$@" <"$EGO_NODE_STDIN" >"$HELPER_STDOUT" 2>"$HELPER_STDERR"
+else
+  "$HELPER" "$@" >"$HELPER_STDOUT" 2>"$HELPER_STDERR"
+fi
 helper_status=$?
 set -e
+/bin/cat "$HELPER_STDOUT"
+/bin/cat "$HELPER_STDERR" >&2
 
 if [ "$helper_status" -eq 255 ]; then
   printf '%s\\n' 'TERRA_EGO_BROWSER_VERSION_CONFLICT: Ego Lite 服务在浏览器回合期间发生协议冲突，页面动作是否已经执行无法确认。Terra-Edu 未使用或关闭其他浏览器；不得重试或刷新，请顾问检查当前页面并关闭另一版本 Ego Lite 后点击“继续任务”。' >&2
@@ -313,17 +565,169 @@ if [ "$helper_status" -eq 252 ]; then
   printf '%s\\n' 'TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: 随包 Ego Lite 服务在浏览器回合期间不可用，页面动作是否已经执行无法确认。不得重试或刷新，请由顾问检查当前页面后再继续。' >&2
   exit 76
 fi
+# Helper stdout is also the browser script's cliLog channel and can contain
+# arbitrary page text. Only the helper's diagnostic stderr may establish that
+# Ego actually rejected the operation because control was lost.
+if /usr/bin/grep -Eiq '^Error: (user is controlling( this task space)?|task[ -]?space( [^:]+)? (is )?inactive|task[ -]?space( [^:]+)? (is )?not assigned to an agent|no longer assigned to an agent)[.!]?$' "$HELPER_STDERR"; then
+  printf '%s\n' 'TERRA_EGO_TASKSPACE_CONTROL_LOST: Ego 报告当前 task space 已由用户控制、inactive 或不再分配给 Agent。不得重试或自动接管；请记录交接并等待顾问明确确认。' >&2
+  exit 80
+fi
+SCRIPT_FAILURE_CODE=$(/usr/bin/sed -n "s/.*ego's nodejs process exited with code \\([0-9][0-9]*\\)\\..*/\\1/p" "$HELPER_STDOUT" "$HELPER_STDERR" | /usr/bin/tail -n 1)
+if [ "$helper_status" -eq 0 ] && [ -n "$SCRIPT_FAILURE_CODE" ] && [ "$SCRIPT_FAILURE_CODE" -ne 0 ]; then
+  printf '%s\n' "TERRA_EGO_SCRIPT_FAILED: ego-browser helper 返回 0，但其 nodejs 子进程退出码为 \${SCRIPT_FAILURE_CODE}。原始输出已完整保留；不得重试或刷新。下一回合只重新调用 pageInfo；若仍无法观察，交接顾问并保留当前页面。" >&2
+  exit 79
+fi
 exit "$helper_status"
 `
 }
 
-async function writeEgoBrowserSkill(base: string) {
+function readAuthoritativeEgoBrowserResource(relativePath: string, overrides?: OpenCodeResourceOverrides) {
+  const path = join(
+    overrides?.egoLiteAppPath || bundledEgoLiteAppPath(),
+    dirname(egoRuntimeLock.officialSkill.relativePath),
+    relativePath,
+  )
+  if (existsSync(path)) {
+    const contents = readFileSync(path, "utf8")
+    if (relativePath === "SKILL.md" && createHash("sha256").update(contents).digest("hex") !== egoRuntimeLock.officialSkill.sha256) {
+      throw new Error("Authoritative Ego Lite skill hash does not match ego-runtime.lock.json")
+    }
+    return contents
+  }
+  throw new Error("Missing authoritative Ego Lite " + EGO_LITE_VENDOR_VERSION + " ego-browser resource: " + relativePath)
+}
+
+function managedEgoBrowserSkill(upstream: string) {
+  const replacements = [
+    [
+      "await openOrReuseTab('https://example.com', { wait: true, timeout: 20 })",
+      "// Managed Terra-Edu application tasks create and observe the blank task space in this first round. The next round uses navigateInitialPageCapturingAlerts from TERRA_POLICY.md on this same target.",
+    ],
+    [
+      "cliLog(await snapshotText())",
+      "const first = await pageInfo()\ncliLog(JSON.stringify({ taskSpaceId: task.id, first }, null, 2))\n// End this first round after persisting task.id. Navigate only in the next independent round under TERRA_POLICY.md.",
+    ],
+    [
+      "- Navigation / state: `listTabs`, `openOrReuseTab`, `closeTab`, `gotoAndWait`, `currentTab`, `switchTab`, `gotoUrl`, `pageInfo`, `ensureRealTab`",
+      "- Navigation / state: `listTabs`, `openOrReuseTab`, `gotoAndWait`, `currentTab`, `switchTab`, `gotoUrl`, `pageInfo`, `ensureRealTab`",
+    ],
+    [
+      "- `await closeTab(target?)` — closes the given target id / tab object, or the current tab when omitted.",
+      "- Managed Terra-Edu application tasks must not call `closeTab`; leave every tab and window open for the advisor to inspect and close normally.",
+    ],
+    [
+      "   - Open or switch pages with `await openOrReuseTab(url, { wait: true })`; use `await gotoAndWait(url, { timeout, settle })` only when navigating inside the current tab.",
+      "   - For a fresh managed task space whose first `pageInfo()` observes the selected blank tab, keep that same target and navigate with `navigateInitialPageCapturingAlerts(url, { timeout, settle })` from TERRA_POLICY.md; do not create a second target with `openOrReuseTab`. It records and accepts only information-only load-time alerts through direct Ego CDP, then the next round is pageInfo-only; it never intercepts confirm, prompt, or beforeunload.",
+    ],
+    [
+      "Closing all tabs in a task space is equivalent to closing that task space.",
+      "Closing all tabs in a task space is equivalent to closing that task space. Managed Terra-Edu application tasks therefore never close tabs programmatically.",
+    ],
+    [
+      "For any follow-up on the same user goal — including continue, corrections, retries, validation, user-reported problems, or work after `completeTaskSpace(..., { keep: true })` — resume the original task space first if it still exists. Do not create a new task space for the same goal unless the user asks for a fresh space, starts an unrelated goal, or the original space is unavailable after checking. If a new space is necessary, state why.",
+      "Before final completion, follow-up rounds for the same managed application goal reuse the saved numeric taskSpaceId. After `completeTaskSpace(taskSpaceId, { keep: true })`, the browser session is terminal: do not resume or modify that task space. Further filling requires the advisor to choose 重新填写, which starts a fresh Agent conversation and a fresh task space while reusing the prepared dossier.",
+    ],
+    [
+      "| `completeTaskSpace(…, { keep: false })` | claims it, then closes it |",
+      "| `completeTaskSpace(…, { keep: false })` | blocked by the managed Terra-Edu wrapper before Ego starts |",
+    ],
+    [
+      "**`completeTaskSpace(nameOrId, { keep })` must occupy its own dedicated final heredoc, and run only after a prior heredoc's output has confirmed the task is genuinely done.** `keep` is required and defaults by policy to `false`: close the task space after completion unless there is a concrete reason to leave the live page visible.",
+      "**`completeTaskSpace(taskSpaceId, { keep: true })` must occupy its own dedicated final heredoc, and run only after a prior heredoc's output has confirmed the task is genuinely done.** In a managed Terra-Edu application task, the literal `{ keep: true }` is mandatory; omitted options, variables, aliases, or any other completion form are rejected before Ego starts.",
+    ],
+    [
+      "Use `{ keep: true }` only when the user explicitly asks to keep the page open, the task needs manual user action in that exact page, or the result cannot be delivered well as a URL, file, artifact, or summary. Do not keep a task space open merely because a page was visited, a document was created, or a screenshot was used for verification.",
+      "Managed Terra-Edu application tasks always use `{ keep: true }` so the advisor can inspect and normally close the live application page.",
+    ],
+    [
+      "**If the task space needs to be preserved after the task ends, keep only the tabs that need to be shown to the user.** Keep loose awareness of how many tabs are open — a quick `(await listTabs()).length` is enough; there's no need to spend a dedicated round just to check. When scratch tabs (search-result pages, cross-check pages, and other one-off pages) pile up, close them as you go rather than letting them all accumulate for the end. When finishing with `{ keep: true }` to leave pages for the user, clear out the remaining scratch tabs so only the pages worth showing stay open. Close a single tab with `await closeTab(targetId)` (`targetId` comes from `listTabs()` or an `openOrReuseTab` return value).",
+      "**Preserve the whole managed task space after the task ends.** Do not close scratch tabs or the application window programmatically; switch to the application tab that should remain visible and leave normal closing to the advisor.",
+    ],
+    [
+      "**Regaining control**: Take control back *only* after the user explicitly confirms — through an Ask (your harness's button/option prompt, e.g. \"Continue\" vs \"Finish task\") or a \"continue\" message in chat. Then start a new heredoc with `await takeOverTaskSpace([nameOrId])` and resume; if the user chooses to finish, close out with `await completeTaskSpace(nameOrId, { keep })`. Never call `takeOverTaskSpace` on your own to grab control back — it has no ownership check and will seize the browser away from the user.",
+      "**Regaining control**: Take control back *only* after the user explicitly confirms — through an Ask (your harness's button/option prompt, e.g. \"Continue\" vs \"Finish task\") or a \"continue\" message in chat. Then start a new heredoc with `await takeOverTaskSpace([nameOrId])` and resume; if the user chooses to finish, preserve the page with `await completeTaskSpace(taskSpaceId, { keep: true })`. Never call `takeOverTaskSpace` on your own to grab control back — it has no ownership check and will seize the browser away from the user.",
+    ],
+    [
+      "- If `await pageInfo()` reports `w: 0` or `h: 0`, do not continue coordinate actions or screenshots until the viewport is fixed. Try switching to the real tab, reloading, or using CDP viewport metrics, then verify with `await pageInfo()` and `await captureScreenshot()`.",
+      "- If `await pageInfo()` reports `w: 0` or `h: 0`, switch once to the exact observed real tab and call `pageInfo()` again. Never reload an application page; if the viewport is still unavailable, stop the round and hand control to the advisor without changing the page.",
+    ],
+    [
+      "- Always call `completeTaskSpace(name, { keep })` when the task is done — do not leave the space hanging. Default to `{ keep: false }`; use `{ keep: true }` only for the concrete live-page cases described in Task spaces.",
+      "- When the managed application task is genuinely done, call exactly `completeTaskSpace(taskSpaceId, { keep: true })` in its own final heredoc. Never omit options, use a variable for `keep`, close tabs, or reload the page.",
+    ],
+  ] as const
+  return replacements.reduce((contents, replacement) => {
+    if (!contents.includes(replacement[0])) throw new Error("Locked Ego Skill no longer contains an expected managed-policy source passage: " + replacement[0])
+    return contents.replace(replacement[0], replacement[1])
+  }, upstream)
+}
+
+async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOverrides) {
   const skillBase = join(base, "skills", "ego-browser")
   await mkdir(join(skillBase, "references"), { recursive: true })
   await mkdir(join(skillBase, "scripts"), { recursive: true })
-  await writeGeneratedFile(join(skillBase, "SKILL.md"), readBundledEgoBrowserResource("SKILL.md"))
-  await writeGeneratedFile(join(skillBase, "references/install.md"), readBundledEgoBrowserResource("references/install.md"))
-  await writeGeneratedFile(join(skillBase, "scripts/install.sh"), readBundledEgoBrowserResource("scripts/install.sh"))
+  await writeGeneratedFile(
+    join(skillBase, "SKILL.md"),
+    managedEgoBrowserSkill(readAuthoritativeEgoBrowserResource("SKILL.md", overrides).trimEnd()) + [
+      "",
+      "",
+      "## Terra-Edu workspace policy",
+      "",
+      "Before the first browser command, read `TERRA_POLICY.md` in this skill directory and follow it together with this upstream skill. The Terra policy narrows invocation, task-space recovery, screenshot attachment, real interactions, dialogs, and server-confirmed save evidence for this managed workspace.",
+      "",
+      "The managed wrapper uses this canonical bounded observer for actions that may open a dialog:",
+      "",
+      "```js",
+      EGO_OBSERVE_PAGE_ACTION_SOURCE,
+      "",
+      "const result = await observePageAction(() => click('@save', { label: 'save current page' }))",
+      "cliLog(JSON.stringify(result.kind === 'dialog' ? result.info : result, null, 2))",
+      "```",
+      "",
+      "Fresh managed navigation uses this direct-Ego alert capture because Chromium discards a still-blocked load-time alert when the helper round detaches:",
+      "",
+      "```js",
+      EGO_INITIAL_NAVIGATION_SOURCE,
+      "```",
+      "",
+    ].join("\n"),
+  )
+  await writeGeneratedFile(join(skillBase, "references/install.md"), readAuthoritativeEgoBrowserResource("references/install.md", overrides))
+  await writeGeneratedFile(join(skillBase, "scripts/install.sh"), readAuthoritativeEgoBrowserResource("scripts/install.sh", overrides))
+  await writeGeneratedFile(
+    join(skillBase, "TERRA_POLICY.md"),
+    [
+      "# Terra-Edu ego-browser policy",
+      "",
+      `This policy accompanies the authoritative Ego Lite ${EGO_LITE_VENDOR_VERSION} skill above; it does not replace or redefine the upstream API.`,
+      "",
+      "Always invoke the managed wrapper as `PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'`. Never call an unprefixed or system ego-browser and never install or update Ego Lite from this workspace.",
+      "",
+      "For every screenshot, call `await captureScreenshot('05_screenshots/<unique-name>.png')`. After the heredoc returns, the next action must be OpenCode `read` on that exact `05_screenshots/<unique-name>.png`; continue visual reasoning only after the PNG is attached as `image/png`. Never call `captureScreenshot()` without a path.",
+      "",
+      "Allowed write chains are `fillInput+Tab+readback` for ordinary text, `cdp-key-events+Tab+readback` only for masked/date controls, and `click+snapshot+click-option+reobserve` for selects. Vue internals, $router/store access, direct DOM value setters, and scripted submit are forbidden.",
+      "",
+      "For save evidence: first record_observation with the top-level page plus the active form frame's frameId, loaderId, and frameUrl from Page.getFrameTree. Call `Network.enable`, drain old events, record actionStartedAt immediately before one real save click through observePageAction, settle briefly, then drain new events and record eventsDrainedAt. Join `Network.requestWillBeSent` and `Network.responseReceived` by the same non-empty requestId. Pass only compact evidence to record_save_verified: source page/title/frame/loader, the action window, request={requestId,method,url,observedAt,frameId,loaderId}, and response={requestId,status,url,resourceType,observedAt,frameId?,loaderId?,redirected?}. The request event supplies the authoritative frame/loader context; retain response frameId/loaderId only when the drained response event actually provides them, and never invent missing fields. Any provided response IDs must match that same request. XHR/fetch must stay on the frozen source frame+loader. A same-frame document POST may acquire a new request loader; the freshly observed destination frame URL/loader must match that request loader and final 2xx response. This covers ordinary document POST and iframe redirects without comparing an iframe URL to the top-level URL. Strip query/hash from every evidence URL. Never retain or pass headers, postData, body, cookies, or payloads.",
+      "",
+      "## Canonical action observer",
+      "",
+      "```js",
+      EGO_OBSERVE_PAGE_ACTION_SOURCE,
+      "",
+      "const result = await observePageAction(() => click('@save', { label: 'save current page' }))",
+      "cliLog(JSON.stringify(result.kind === 'dialog' ? result.info : result, null, 2))",
+      "```",
+      "",
+      "## Canonical initial navigation",
+      "",
+      "```js",
+      EGO_INITIAL_NAVIGATION_SOURCE,
+      "```",
+      "",
+      EGO_BROWSER_PROTOCOL,
+      "",
+    ].join("\n"),
+  )
   await writeGeneratedFile(
     join(skillBase, "TERRA_PINNED.md"),
     [
@@ -497,7 +901,7 @@ ${EGO_BROWSER_PROTOCOL}
 - 原生 alert/beforeunload/confirm/prompt 按通用观察协议处理；不得刷新页面或要求无证据的重新登录。
 - 上传只能使用 ego-browser uploadFile，并在新观察中验证。
 - 最终提交、付款、不可逆推荐信邀请、保存账号密码和猜填始终禁止。
-- 只有整个当前学校申请的可自动填写阶段真正完成时，才可 completeTaskSpace；不能每页完成就结束空间。
+- 只有整个当前学校申请的可自动填写阶段真正完成时，才可调用 completeTaskSpace(taskSpaceId, { keep: true })；不能每页完成就结束空间，也不得由 Agent 关闭窗口。
 
 请现在开始第一轮：先简短告诉顾问“正在复用已整理内容并创建全新填表空间”，只读载入结构化档案，然后准备本次独立 Ego task space。`
 }
@@ -688,10 +1092,10 @@ const SKILL_DEFINITIONS = [
 3. 首轮先得到 task.id 和无 dialog 的页面观察，再以 taskSpaceId、当前 URL、标题和证据调用 record_observation。后续只依据 student_profile.md 中可确认的信息填写；不确定信息记录为缺失，不猜填。
 4. 使用最新语义树、截图或窄范围 DOM/CDP 选择合适的操作方式。动作后的页面差异必须重新观察；任意可改变可见内容的动作都会使动态表单复查失效。
 5. alert、离页确认、未知确认或顾问接管均按通用观察协议处理。交接前确认 handOffTaskSpace 返回 done:true；登录交接调用 handoff_to_consultant 时标记 handoffType: login，其他浏览器接管标记 handoffType: browser_takeover。
-6. 保存前完成动态表单复查；保存后只在新观察明确显示结果时，以 confirmed:true、taskSpaceId、当前 URL、标题和证据调用 record_save_verified。
+6. 保存前完成动态表单复查并调用 begin_save_attempt 取得 saveAttemptId 与源页面上下文；以 observePageAction 执行真实保存，将同一 requestId 的 request/response 精简证据交给 record_save_verified 校验。保存后记录目标页面的新观察与 readbackValue；Save & Continue 跳页是允许的，但源页面上下文和目标页面观察不可混用。GET、非 2xx、旧事件或只有页面文字都不得算保存成功。
 7. 上传材料用 ego-browser uploadFile；上传后在新的无 dialog 观察中确认文件名或状态，再调用 record_upload。
 8. 每次准备执行最终提交、付款、推荐信邀请或其他不可逆确认前，必须先调用 application-agent_risk；命中 BLOCKED 就停止。
-9. 只有整个浏览器阶段确实结束时才可 completeTaskSpace；不得因为当前页面完成而关闭或完成 task space。
+9. 只有整个浏览器阶段确实结束时才可 completeTaskSpace(taskSpaceId, { keep: true })；不得因为当前页面完成而关闭或完成 task space，也不得使用 keep:false。
 
 输出要求：
 - 持续告诉顾问正在填写哪个页面、保存了什么、缺了什么。
@@ -784,7 +1188,7 @@ function renderCommand(command: string[]) {
   return `---
 description: ${command[1]}
 agent: application-agent
-model: opencode-go/deepseek-v4-pro
+model: ${APPLICATION_AGENT_MODEL}
 ---
 
 ${command[2]}
@@ -792,7 +1196,7 @@ ${command[2]}
 }
 
 function renderApplicationAgentTools() {
-  return String.raw`import { createHash } from "node:crypto"
+  return String.raw`import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { cp, mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, extname, join, relative, resolve } from "node:path"
@@ -801,6 +1205,7 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 const EGO_OBSERVE_PAGE_ACTION_SOURCE = ${JSON.stringify(EGO_OBSERVE_PAGE_ACTION_SOURCE)}
+const EGO_INITIAL_NAVIGATION_SOURCE = ${JSON.stringify(EGO_INITIAL_NAVIGATION_SOURCE)}
 
 type ToolContext = { directory?: string; sessionID?: string; messageID?: string; threadID?: string; agent?: string; root?: string; worktree?: string }
 type JsonSchema = Record<string, unknown>
@@ -1172,6 +1577,9 @@ function numericTaskSpaceId(value: unknown) {
 }
 
 function browserTaskSpaceMismatch(progress: any, taskSpaceId: string) {
+  if (progress?.egoBrowser?.rebindPending) {
+    return "BROWSER_TASK_SPACE_REBIND_PENDING: the missing task space is awaiting the consultant-authorized retire-and-rebind flow."
+  }
   const persistedTaskSpaceId = String(progress?.egoBrowser?.taskSpaceId || "").trim()
   if (persistedTaskSpaceId && !numericTaskSpaceId(persistedTaskSpaceId)) {
     return "BROWSER_LEGACY_TASK_SPACE_CONFIRMATION_REQUIRED: saved taskSpaceId is not a numeric ego-browser id. Use prepare_ego_task to list spaces and ask the consultant to confirm one."
@@ -1194,7 +1602,155 @@ function requiresLegacyTaskSpaceConfirmation(progress: any) {
 }
 
 function hasVerifiedBrowserSave(progress: any) {
-  return Array.isArray(progress?.savedPages) && progress.savedPages.length > 0
+  return Array.isArray(progress?.savedPages) && progress.savedPages.some((page: any) => page?.serverConfirmed === true)
+}
+
+function browserSafetyStop(progress: any) {
+  const stop = progress?.egoBrowser?.safetyStop
+  if (!stop || typeof stop !== "object") return null
+  if (stop.kind !== "cleanup_failed" && stop.kind !== "alert_evidence_lost") return null
+  if (!String(stop.taskSpaceId || "").trim()) return null
+  return stop
+}
+
+function activeBrowserSafetyStop(progress: any) {
+  const stop = browserSafetyStop(progress)
+  return stop && stop.active === true ? stop : null
+}
+
+function browserSafetyObservationRequired(progress: any) {
+  const stop = browserSafetyStop(progress)
+  return stop && stop.active !== true && stop.observationRequired === true ? stop : null
+}
+
+function browserSafetyMarker(kind: string) {
+  return kind === "cleanup_failed" ? "TERRA_EGO_TASKSPACE_CONTAMINATED" : "TERRA_EGO_ALERT_EVIDENCE_LOST"
+}
+
+function browserSafetyGateError(progress: any, options: { allowObservation?: boolean; allowSafetyRecord?: boolean; allowSafetyResolve?: boolean } = {}) {
+  const active = activeBrowserSafetyStop(progress)
+  if (active) {
+    if (options.allowSafetyRecord || options.allowSafetyResolve) return ""
+    const marker = browserSafetyMarker(active.kind)
+    return marker + ": browser safety stop is active for taskSpaceId " + String(active.taskSpaceId) + (active.decisionId ? " decisionId " + String(active.decisionId) : "") + ". " + (active.kind === "cleanup_failed"
+      ? "This task space is contaminated and cannot be resumed; only consultant refill may create a replacement space."
+      : "Consultant must authorize continue on the desktop or start refill before any browser action.")
+  }
+  const observation = browserSafetyObservationRequired(progress)
+  if (observation && !options.allowObservation && !options.allowSafetyRecord) {
+    return "BROWSER_SAFETY_OBSERVATION_REQUIRED: after alert_evidence_lost recovery, only record_observation is allowed until the first fresh observation for taskSpaceId " + String(observation.taskSpaceId) + "."
+  }
+  return ""
+}
+
+function safetyKindFromFailureDetail(detail: string) {
+  if (detail.startsWith("TERRA_EGO_TASKSPACE_CONTAMINATED:")) return "cleanup_failed"
+  if (detail.startsWith("TERRA_EGO_ALERT_EVIDENCE_LOST:")) return "alert_evidence_lost"
+  return ""
+}
+
+function applyBrowserSafetyStop(progress: any, input: { kind: "cleanup_failed" | "alert_evidence_lost"; taskSpaceId: string; evidence?: unknown; detail?: string }) {
+  const existing = browserSafetyStop(progress)
+  if (existing && existing.active === true && existing.kind === input.kind && String(existing.taskSpaceId) === input.taskSpaceId && existing.decisionId) {
+    progress.egoBrowser = {
+      ...(progress.egoBrowser || {}),
+      taskSpaceId: input.taskSpaceId,
+      safetyStop: {
+        ...existing,
+        evidence: input.evidence ?? existing.evidence,
+        detail: input.detail || existing.detail || "",
+      },
+    }
+    return progress.egoBrowser.safetyStop
+  }
+  const recordedAt = new Date().toISOString()
+  const safetyStop = {
+    kind: input.kind,
+    taskSpaceId: input.taskSpaceId,
+    active: true,
+    recordedAt,
+    decisionId: randomUUID(),
+    evidence: input.evidence ?? null,
+    detail: input.detail || "",
+    observationRequired: false,
+    retired: false,
+  }
+  if (!Array.isArray(progress.retiredTaskSpaces)) progress.retiredTaskSpaces = []
+  progress.egoBrowser = {
+    ...(progress.egoBrowser || {}),
+    taskSpaceId: input.taskSpaceId,
+    safetyStop,
+  }
+  delete progress.pendingSaveAttempt
+  progress.dynamicFormChecks = []
+  return safetyStop
+}
+
+function browserUrlWithoutQuery(value: unknown) {
+  const text = String(value || "").trim()
+  if (!URL.canParse(text)) return ""
+  const url = new URL(text)
+  return url.origin + url.pathname
+}
+
+function browserCompletionGateError(progress: any, input: any) {
+  const taskSpaceId = String(input.taskSpaceId || "").trim()
+  const currentUrl = String(input.currentUrl || "").trim()
+  const pageTitle = String(input.pageTitle || "").trim()
+  const frameId = String(input.frameId || "").trim()
+  const loaderId = String(input.loaderId || "").trim()
+  const frameUrl = String(input.frameUrl || "").trim()
+  const evidence = String(input.evidence || input.text || "").trim()
+  const auditError =
+    browserAuditError("complete_ego_task", { taskSpaceId, currentUrl, pageTitle, frameId, loaderId, frameUrl, evidence }) ||
+    requireNumericTaskSpaceId(taskSpaceId) ||
+    browserTaskSpaceMismatch(progress, taskSpaceId)
+  if (auditError) return auditError
+  if (input.confirmed !== true) return "BROWSER_COMPLETION_CONFIRMATION_REQUIRED: complete_ego_task requires confirmed:true."
+  if (!["automation_complete", "manual_boundary_reached"].includes(input.completionDisposition)) {
+    return "BROWSER_COMPLETION_DISPOSITION_REQUIRED: choose automation_complete or manual_boundary_reached."
+  }
+  if (!Array.isArray(input.remainingRequiredFields)) {
+    return "BROWSER_COMPLETION_REQUIRED_FIELDS_SCAN_REQUIRED: complete_ego_task requires remainingRequiredFields, including [] when none remain."
+  }
+  const remaining = input.remainingRequiredFields.map((field: unknown) => String(field).trim()).filter(Boolean)
+  if (remaining.length > 0 || (Array.isArray(progress.requiredEmptyFields) && progress.requiredEmptyFields.length > 0)) {
+    return "BROWSER_COMPLETION_REQUIRED_FIELDS_REMAIN: visible required fields still need attention."
+  }
+  if (progress.pendingSaveAttempt) return "BROWSER_COMPLETION_SAVE_PENDING: a save attempt is still pending."
+  if (hasPendingBrowserHandoff(progress) || progress.egoBrowser?.takeoverPending === true) {
+    return "BROWSER_COMPLETION_HANDOFF_PENDING: browser control has not returned to the Agent and been freshly observed."
+  }
+  if (progress.egoBrowser?.rebindPending || progress.egoBrowser?.rebindObservationPending === true) {
+    return "BROWSER_COMPLETION_REBIND_PENDING: the replacement task space has not been freshly observed."
+  }
+  const safetyError = browserSafetyGateError(progress)
+  if (safetyError) return safetyError
+  if (!hasVerifiedBrowserSave(progress)) return "UNVERIFIED_BROWSER_COMPLETION: no server-confirmed save exists."
+  const latestSave = Array.isArray(progress.savedPages)
+    ? progress.savedPages.findLast((page: any) => page?.serverConfirmed === true && page?.taskSpaceId === taskSpaceId)
+    : undefined
+  if (!latestSave) return "UNVERIFIED_BROWSER_COMPLETION: the active task space has no server-confirmed save."
+  const latestSaveAt = Date.parse(latestSave.at || "")
+  const observation = progress.lastBrowserObservation
+  const observedAt = Date.parse(observation?.at || "")
+  if (
+    !Number.isFinite(latestSaveAt) ||
+    !Number.isFinite(observedAt) ||
+    observedAt <= latestSaveAt ||
+    Date.now() - observedAt < 0 ||
+    Date.now() - observedAt > 5 * 60_000 ||
+    observation?.taskSpaceId !== taskSpaceId ||
+    observation?.currentUrl !== currentUrl ||
+    observation?.pageTitle !== pageTitle ||
+    observation?.frameId !== frameId ||
+    observation?.loaderId !== loaderId ||
+    observation?.frameUrl !== frameUrl ||
+    observation?.evidence !== evidence
+  ) {
+    return "BROWSER_COMPLETION_OBSERVATION_REQUIRED: record a fresh matching page/frame observation after the latest verified save and pass its evidence unchanged."
+  }
+  return ""
 }
 
 function appendLimited(progress: any, key: string, item: any, limit = 120) {
@@ -1929,9 +2485,9 @@ export const state = {
     const task = await loadTask(workspace)
     await appendAudit(workspace, "state", String(input.status || "update"), "started", input.message || "")
     const progress = ensureCuaProgress(await readJson(join(workspace, "03_state/application_progress.json"), {}))
-    if (input.status === "阶段性完成" && progress.egoBrowser?.preparedAt && !hasVerifiedBrowserSave(progress)) {
-      await appendAudit(workspace, "state", String(input.status), "failed", "browser completion without verified save", ctx)
-      throw new Error("ego-browser 尚未记录任何验证保存。不得把填表阶段标记为完成；请先保存并复查页面后调用 application-agent_cua record_save_verified，或记录明确阻塞原因。")
+    if (input.status === "阶段性完成" && progress.egoBrowser?.preparedAt && !progress.egoBrowser?.completedAt) {
+      await appendAudit(workspace, "state", String(input.status), "failed", "browser completion without successful complete_ego_task", ctx)
+      throw new Error("BROWSER_COMPLETION_GATE_REQUIRED: ego-browser 已启动，但 complete_ego_task 尚未通过最新保存、页面/frame 观察、必填项和控制权门槛。不得仅凭历史 record_save_verified 把阶段标记为完成。")
     }
     await saveTask(workspace, task, input.status, input.message)
     await appendLog(workspace, "agent", input.message)
@@ -2018,7 +2574,7 @@ export const documents = {
     await saveTask(
       workspace,
       task,
-      needsMaterialReview ? "等待顾问确认材料" : reviewAwaitingApplication ? "正在检查缺失内容" : !progress.egoBrowser?.preparedAt ? "可继续申请" : missing.some((item: any) => item.blocksProgress) ? "等待补充材料" : "阶段性完成",
+      needsMaterialReview ? "等待顾问确认材料" : reviewAwaitingApplication ? "正在检查缺失内容" : !progress.egoBrowser?.preparedAt ? "可继续申请" : missing.some((item: any) => item.blocksProgress) ? "等待补充材料" : progress.egoBrowser?.completedAt ? "阶段性完成" : "正在填写申请平台",
       needsMaterialReview
         ? "材料整理、缺失项和阶段总结已完成。请在申请 Agent 的材料确认面板决定是否补充，再进入浏览器。"
         : reviewAwaitingApplication
@@ -2266,45 +2822,91 @@ export const risk = {
 export const cua = {
   description: "Coordinate ego-browser / ego lite application-platform filling. This tool does not directly control Chrome or call cua-driver. Use the official ego-browser skill for browser actions, then call this tool to record task space, observations, verified fields, verified saves, uploads, blockers, failures, and audit state.",
   args: inputArg({
-    action: { type: "string", enum: ["prepare_ego_task", "resume_ego", "record_observation", "record_field_verified", "record_select_verified", "record_dynamic_form_verified", "record_save_verified", "record_blocker", "handoff_to_consultant", "complete_ego_task", "record_failure", "record_saved", "record_upload", "block_high_risk"], description: "ego-browser coordination action. Browser control itself must be done through the official ego-browser skill, not this tool." },
+    action: { type: "string", enum: ["prepare_ego_task", "resume_ego", "retire_and_rebind_ego_task", "record_observation", "record_field_verified", "record_select_verified", "record_dynamic_form_verified", "begin_save_attempt", "record_save_verified", "record_blocker", "handoff_to_consultant", "complete_ego_task", "record_browser_safety_stop", "resolve_browser_safety_stop", "record_failure", "record_saved", "record_upload", "block_high_risk"], description: "ego-browser coordination action. Browser control itself must be done through the official ego-browser skill, not this tool." },
     applicationUrl: { type: "string", description: "Application platform URL, defaults to task input." },
     taskSpaceName: { type: "string", description: "ego-browser task space name for this application task." },
     taskSpaceId: { type: "string", description: "String form of the numeric ego-browser task.id returned by useOrCreateTaskSpace." },
     taskSpaceObservedName: { type: "string", description: "Exact task-space name returned by listTaskSpaces after the fresh space was created." },
     taskSpaceOwnership: { type: "string", enum: ["agent", "agentDelegatedToUser", "user"], description: "Exact ownership returned by listTaskSpaces for taskSpaceId." },
+    replacementTaskSpaceId: { type: "string", description: "For retire_and_rebind_ego_task only: consultant-selected or newly created replacement numeric task-space ID." },
+    rebindMode: { type: "string", enum: ["existing", "new"], description: "For retire_and_rebind_ego_task only: reuse a consultant-selected existing space or create a new replacement after explicit confirmation." },
+    missingTaskSpaceConfirmed: { type: "boolean", description: "For retire_and_rebind_ego_task only: true only after listTaskSpaces proved the saved numeric ID no longer exists." },
     currentUrl: { type: "string", description: "Top-level current URL reported by the most recent unobstructed ego-browser pageInfo. Never pass an iframe dialog URL here." },
     dialogUrl: { type: "string", description: "For record_blocker only: the native dialog source URL from pageInfo().dialog.url, which may be an iframe URL." },
     dialogFrameId: { type: "string", description: "For record_blocker only: the native dialog frameId from pageInfo().dialog.frameId." },
     pageTitle: { type: "string", description: "Current page title reported by ego-browser pageInfo or snapshot." },
+    frameId: { type: "string", description: "CDP frameId of the frame that contains the active application form; use the main frame when the form is not in an iframe." },
+    loaderId: { type: "string", description: "Current CDP loaderId of frameId from Page.getFrameTree." },
+    frameUrl: { type: "string", description: "Current URL of frameId. This may differ from currentUrl when the form lives in an iframe." },
     fieldLabel: { type: "string", description: "Human-readable field label, such as State, Institution, Current Title." },
     text: { type: "string", description: "Field value, selected option, page summary, or observation text." },
     expectedText: { type: "string", description: "Expected visible value after ego-browser verification." },
     optionLabel: { type: "string", description: "Selected option label for record_select_verified." },
     optionValue: { type: "string", description: "Selected option value for record_select_verified." },
     evidence: { type: "string", description: "Short verification evidence from snapshotText/pageInfo/screenshot/readback." },
+    interactionMethod: { type: "string", description: "Real interaction chain used for field/select verification, such as fillInput+Tab+readback, cdp-key-events+Tab+readback, or click+snapshot+click-option+reobserve." },
+    readbackValue: { type: "string", description: "Fresh visible/accessibility readback after the interaction or save." },
     remainingRequiredFields: { type: "array", items: { type: "string" }, description: "Required for record_dynamic_form_verified, including [] when the dynamic-form rescan found no visible empty required fields." },
-    confirmed: { type: "boolean", description: "Required true for record_save_verified after ego-browser verified there are no required-field or validation errors." },
-    consultantConfirmed: { type: "boolean", description: "Required true after the consultant explicitly chose to resume a handed-off task space, or to resolve an old workspace that has no saved taskSpaceId." },
+    confirmed: { type: "boolean", description: "Required true for record_save_verified and complete_ego_task after their independent evidence gates pass." },
+    completionDisposition: { type: "string", enum: ["automation_complete", "manual_boundary_reached"], description: "Required for complete_ego_task: all automatable sections are complete, or the next step is an explicitly documented manual/high-risk boundary." },
+    saveAttemptId: { type: "string", description: "ID returned by begin_save_attempt and required by record_save_verified." },
+    networkEvidence: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        taskSpaceId: { type: "string", description: "Task-space ID used for both network events." },
+        sourceUrl: { type: "string", description: "Save attempt source page origin+pathname only; query and hash are forbidden." },
+        sourceTitle: { type: "string", description: "Save attempt source page title." },
+        sourceFrameId: { type: "string", description: "Source form frameId frozen by begin_save_attempt." },
+        sourceLoaderId: { type: "string", description: "Source form loaderId frozen by begin_save_attempt." },
+        sourceFrameUrl: { type: "string", description: "Source form-frame origin+pathname only; query and hash are forbidden." },
+        actionStartedAt: { type: "string", description: "ISO timestamp recorded immediately before the one real save action." },
+        eventsDrainedAt: { type: "string", description: "ISO timestamp recorded after the bounded post-action event drain." },
+        request: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            requestId: { type: "string", description: "CDP requestId from Network.requestWillBeSent." },
+            method: { type: "string", description: "HTTP method from Network.requestWillBeSent." },
+            url: { type: "string", description: "Request origin+pathname only; query and hash are forbidden." },
+            observedAt: { type: "string", description: "ISO timestamp when the request event was observed." },
+            frameId: { type: "string", description: "CDP frameId from Network.requestWillBeSent." },
+            loaderId: { type: "string", description: "CDP loaderId from Network.requestWillBeSent." },
+          },
+          required: ["requestId", "method", "url", "observedAt", "frameId", "loaderId"],
+        },
+        response: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            requestId: { type: "string", description: "CDP requestId from Network.responseReceived; must equal request.requestId." },
+            status: { type: "number", description: "Observed final response status." },
+            url: { type: "string", description: "Response or final redirect origin+pathname only; query and hash are forbidden." },
+            resourceType: { type: "string", enum: ["xhr", "fetch", "document"], description: "Normalized Network.responseReceived resource type." },
+            observedAt: { type: "string", description: "ISO timestamp when the response event was observed." },
+            frameId: { type: "string", description: "Optional CDP frameId from Network.responseReceived. Omit when the event does not provide it; when present it must match the same requestId's request frameId." },
+            loaderId: { type: "string", description: "Optional CDP loaderId from Network.responseReceived. Omit when the compact event does not provide it; when present it must match the same requestId's request loaderId." },
+            redirected: { type: "boolean", description: "Required true when an intervening requestWillBeSent carried redirectResponse for this same document requestId before the final 2xx response." },
+          },
+          required: ["requestId", "status", "url", "resourceType", "observedAt"],
+        },
+      },
+      required: ["taskSpaceId", "sourceUrl", "sourceTitle", "sourceFrameId", "sourceLoaderId", "sourceFrameUrl", "actionStartedAt", "eventsDrainedAt", "request", "response"],
+      description: "Compact source page/frame/loader, save-action window, and request/response evidence for record_save_verified. Headers, body, postData, cookies, query, and hash are not accepted.",
+    },
+    safetyKind: { type: "string", enum: ["cleanup_failed", "alert_evidence_lost"], description: "For record_browser_safety_stop / resolve_browser_safety_stop: structured hard-stop kind bound to taskSpaceId." },
+    decisionId: { type: "string", description: "For resolve_browser_safety_stop: the decisionId returned when the safety stop was recorded." },
+    safetyEvidence: { type: "object", description: "Optional structured evidence for record_browser_safety_stop (cleanupError, capturedAlerts, topLevelAlerts, info)." },
+    safetyResolution: { type: "string", enum: ["consultant_continue_same_space", "consultant_refill"], description: "For resolve_browser_safety_stop only. consultant_continue_same_space requires a prior desktop authorization; cleanup_failed cannot continue the same space." },
+    consultantConfirmed: { type: "boolean", description: "Required true after the consultant explicitly chose to resume a handed-off task space, or to resolve an old workspace that has no saved taskSpaceId. Alone it never clears browser safetyStop." },
     blockerDisposition: { type: "string", enum: ["resolved", "handoff"], description: "Required for record_blocker: resolved after a safe dialog response, or handoff after control was given to the consultant." },
     handoffType: { type: "string", enum: ["login", "browser_takeover"], description: "For handoff_to_consultant: login only for an observed login/authentication need; browser_takeover for dialogs, user takeover, or other manual intervention." },
+    controlLossKind: { type: "string", enum: ["deliberate_handoff", "unexpected_control_loss"], description: "Whether the Agent deliberately completed handOffTaskSpace(done:true), or Ego unexpectedly reported user/inactive/not-assigned control loss." },
     detail: { type: "string", description: "Operation detail, failure reason, saved page, upload material, or high-risk action" },
   }, ["action"]),
   async execute(args, ctx) {
     const input = args.input || {}
     const workspace = root(ctx)
-    if (![
-      "record_observation",
-      "record_field_verified",
-      "record_select_verified",
-      "record_dynamic_form_verified",
-      "record_save_verified",
-      "record_blocker",
-      "handoff_to_consultant",
-      "record_failure",
-      "record_saved",
-      "record_upload",
-      "block_high_risk",
-    ].includes(input.action)) await ensureTaskIsActive(workspace)
     const task = await loadTask(workspace)
     const progress = await readJson(join(workspace, "03_state/application_progress.json"), { currentPage: "", completedPages: [], savedPages: [], uploadedMaterials: [], failedActions: [], highRiskBlocks: [] })
     const auditAction = String(input.action || "unknown")
@@ -2315,14 +2917,207 @@ export const cua = {
       throw new Error(error)
     }
     await appendAudit(workspace, "cua", auditAction, "started", input.detail || "")
+    if (progress.egoBrowser?.completionHelperFailedAt) {
+      const error = "BROWSER_TASK_FINALIZATION_FAILED: 最终 completeTaskSpace helper 回合已经失败，当前会话的浏览器任务已终态锁定，禁止继续观察、填写、保存、接管、重绑或完成。请顾问点击“重新填写”创建全新对话和 task space。"
+      await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+      return error
+    }
+    if (progress.egoBrowser?.completedAt) {
+      const taskSpaceId = String(input.taskSpaceId || "").trim()
+      const savedTaskSpaceId = numericTaskSpaceId(progress.egoBrowser.taskSpaceId)
+      const detail = String(input.detail || "").trim()
+      const finalHelperFailure =
+        input.action === "record_failure" &&
+        taskSpaceId === savedTaskSpaceId &&
+        detail.startsWith("TERRA_EGO_COMPLETION_HELPER_FAILED:")
+      if (!finalHelperFailure) {
+        const error = "BROWSER_TASK_ALREADY_COMPLETED: 当前浏览器任务已完成，禁止继续观察、填写、保存、阻塞、接管或重绑。需要再次填写时，请顾问点击“重新填写”创建全新对话和 task space。只有紧随 complete_ego_task 的独立 completeTaskSpace(..., { keep: true }) helper 回合真实失败时，才可用相同 taskSpaceId 调用 record_failure，并以 TERRA_EGO_COMPLETION_HELPER_FAILED: 开头原样记录错误。"
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      const failedAt = new Date().toISOString()
+      appendLimited(progress, "completionFailures", {
+        failedAt,
+        taskSpaceId: savedTaskSpaceId,
+        detail,
+        archivedCompletion: {
+          completedAt: progress.egoBrowser.completedAt,
+          completionDetail: progress.egoBrowser.completionDetail || "",
+          completionDisposition: progress.egoBrowser.completionDisposition || "",
+          completionObservation: progress.egoBrowser.completionObservation || null,
+        },
+      })
+      appendLimited(progress, "failedActions", { at: failedAt, action: auditAction, reason: detail, page: progress.currentPage || "" })
+      progress.egoBrowser.completionHelperFailedAt = failedAt
+      progress.egoBrowser.completionHelperFailureDetail = detail
+      delete progress.egoBrowser.completedAt
+      delete progress.egoBrowser.completionDetail
+      delete progress.egoBrowser.completionDisposition
+      delete progress.egoBrowser.completionObservation
+      await writeAtomicJson(join(workspace, "03_state/application_progress.json"), progress)
+      await appendLog(workspace, "cua", "已归档并撤销未完成的 Ego task-space 终态：" + detail)
+      await saveTask(workspace, task, "异常中断", "最终 completeTaskSpace helper 回合失败；已原子归档并撤销阶段完成状态。需要继续时请由顾问点击“重新填写”。")
+      await appendAudit(workspace, "cua", auditAction, "failed", detail, ctx)
+      return "BROWSER_COMPLETION_FINALIZATION_FAILED_RECORDED: 已归档并撤销假完成状态。不得在当前会话重试或继续浏览器动作；请顾问点击“重新填写”。"
+    }
+    if (![
+      "record_observation",
+      "record_field_verified",
+      "record_select_verified",
+      "record_dynamic_form_verified",
+      "record_save_verified",
+      "record_blocker",
+      "handoff_to_consultant",
+      "record_browser_safety_stop",
+      "resolve_browser_safety_stop",
+      "record_failure",
+      "record_saved",
+      "record_upload",
+      "block_high_risk",
+    ].includes(input.action)) await ensureTaskIsActive(workspace)
+    const safetyRecordAction = input.action === "record_browser_safety_stop" || (input.action === "record_failure" && safetyKindFromFailureDetail(String(input.detail || "").trim()))
+    const safetyResolveAction = input.action === "resolve_browser_safety_stop"
+    const safetyGate = browserSafetyGateError(progress, {
+      allowObservation: input.action === "record_observation",
+      allowSafetyRecord: Boolean(safetyRecordAction),
+      allowSafetyResolve: safetyResolveAction,
+    })
+    if (safetyGate && !safetyRecordAction && !safetyResolveAction) {
+      await appendAudit(workspace, "cua", auditAction, "failed", safetyGate, ctx)
+      return safetyGate
+    }
     if (input.action === "block_high_risk") {
       return await risk.execute({ input: { action: input.detail || "high risk application action", page: progress.currentPage || "" } }, ctx as any)
+    }
+    if (input.action === "record_browser_safety_stop") {
+      ensureCuaProgress(progress)
+      const kind = input.safetyKind === "cleanup_failed" || input.safetyKind === "alert_evidence_lost" ? input.safetyKind : ""
+      const taskSpaceId = String(input.taskSpaceId || "").trim()
+      const evidence = input.safetyEvidence && typeof input.safetyEvidence === "object" ? input.safetyEvidence : (input.evidence || input.text || input.detail || null)
+      const detail = String(input.detail || "").trim()
+      const auditError =
+        (!kind ? "BROWSER_SAFETY_KIND_REQUIRED: safetyKind must be cleanup_failed or alert_evidence_lost." : "") ||
+        browserAuditError(auditAction, { taskSpaceId }) ||
+        requireNumericTaskSpaceId(taskSpaceId) ||
+        (numericTaskSpaceId(progress.egoBrowser?.taskSpaceId) && numericTaskSpaceId(progress.egoBrowser?.taskSpaceId) !== taskSpaceId
+          ? "BROWSER_TASK_SPACE_MISMATCH: safety stop taskSpaceId does not match the saved ego-browser task space."
+          : "")
+      if (auditError) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: auditError, page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendAudit(workspace, "cua", auditAction, "failed", auditError, ctx)
+        return auditError
+      }
+      const safetyStop = applyBrowserSafetyStop(progress, { kind, taskSpaceId, evidence, detail })
+      appendLimited(progress, "failedActions", {
+        at: safetyStop.recordedAt,
+        action: auditAction,
+        reason: browserSafetyMarker(kind) + ": " + (detail || kind),
+        page: progress.currentPage || "",
+        taskSpaceId,
+        decisionId: safetyStop.decisionId,
+      })
+      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      const message = kind === "cleanup_failed"
+        ? "浏览器 task space 已标记为污染（cleanup_failed）。所有浏览器动作已被 CUA 与 wrapper 阻断；只能由顾问点击“重新填写”创建新空间。"
+        : "浏览器已进入 alert 证据丢失硬停止。所有浏览器动作已被阻断；顾问可在桌面选择“查看后继续当前空间”或“重新填写”。"
+      await appendLog(workspace, "cua", message + " decisionId=" + safetyStop.decisionId)
+      await saveTask(workspace, task, "异常中断", message)
+      await appendAudit(workspace, "cua", auditAction, "completed", kind + " " + taskSpaceId + " " + safetyStop.decisionId, ctx)
+      return JSON.stringify({
+        recorded: true,
+        marker: browserSafetyMarker(kind),
+        safetyStop,
+        next: kind === "cleanup_failed"
+          ? "Do not resume, takeOver, rebind existing, fill, save, or complete this taskSpaceId. Ask the consultant to click 重新填写."
+          : "Do not continue browser actions. The consultant must authorize continue on the desktop (decisionId must match) or click 重新填写. consultantConfirmed alone is rejected.",
+      }, null, 2)
+    }
+    if (input.action === "resolve_browser_safety_stop") {
+      ensureCuaProgress(progress)
+      const stop = browserSafetyStop(progress)
+      const taskSpaceId = String(input.taskSpaceId || "").trim()
+      const decisionId = String(input.decisionId || "").trim()
+      const resolution = String(input.safetyResolution || "").trim()
+      if (!stop) {
+        const error = "BROWSER_SAFETY_STOP_REQUIRED: no browser safetyStop is recorded for this school workspace."
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      if (stop.kind === "cleanup_failed" || resolution === "consultant_refill") {
+        const error = stop.kind === "cleanup_failed"
+          ? "TERRA_EGO_TASKSPACE_CONTAMINATED: cleanup_failed cannot be resolved for the same task space. Only consultant refill can archive it and bind a new taskSpaceId."
+          : "BROWSER_SAFETY_REFILL_REQUIRED: choose the desktop 重新填写 action; resolve_browser_safety_stop does not create a replacement space."
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      if (stop.kind !== "alert_evidence_lost") {
+        const error = "BROWSER_SAFETY_KIND_UNSUPPORTED: only alert_evidence_lost can continue the same task space."
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      if (String(stop.taskSpaceId) !== taskSpaceId) {
+        const error = "BROWSER_TASK_SPACE_MISMATCH: resolve taskSpaceId does not match the active safetyStop."
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      if (!decisionId || String(stop.decisionId || "") !== decisionId) {
+        const error = "BROWSER_SAFETY_DECISION_MISMATCH: decisionId does not match the recorded safetyStop decision."
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      if (resolution !== "consultant_continue_same_space") {
+        const error = "BROWSER_SAFETY_RESOLUTION_REQUIRED: safetyResolution must be consultant_continue_same_space after desktop authorization, or use refill."
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      const desktop = stop.desktopAuthorization
+      if (!desktop || desktop.authorizedBy !== "consultant_desktop_continue" || String(desktop.decisionId || "") !== decisionId || String(desktop.taskSpaceId || "") !== taskSpaceId || !desktop.authorizedAt) {
+        const error = "BROWSER_SAFETY_DESKTOP_AUTHORIZATION_REQUIRED: alert_evidence_lost continue requires a one-time desktop authorization matching taskSpaceId and decisionId. consultantConfirmed:true is not accepted."
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      if (stop.active !== true && stop.observationRequired === true && stop.resolution === "consultant_continue_same_space") {
+        await appendAudit(workspace, "cua", auditAction, "completed", "already authorized observation-required", ctx)
+        return "BROWSER_SAFETY_OBSERVATION_REQUIRED: desktop already authorized continue. Next heredoc may only observe with pageInfo/list/snapshot, then record_observation for taskSpaceId " + taskSpaceId + "."
+      }
+      if (stop.active !== true) {
+        const error = "BROWSER_SAFETY_STOP_INACTIVE: this safetyStop is no longer active."
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      if (stop.decisionConsumedAt) {
+        const error = "BROWSER_SAFETY_DECISION_ALREADY_CONSUMED: this decisionId was already used."
+        await appendAudit(workspace, "cua", auditAction, "failed", error, ctx)
+        return error
+      }
+      const resolvedAt = new Date().toISOString()
+      progress.egoBrowser = {
+        ...(progress.egoBrowser || {}),
+        taskSpaceId,
+        safetyStop: {
+          ...stop,
+          active: false,
+          observationRequired: true,
+          resolution: "consultant_continue_same_space",
+          resolvedAt,
+          resumeAuthorizedAt: desktop.authorizedAt,
+          resumeAuthorizedBy: "consultant_desktop_continue",
+          decisionConsumedAt: resolvedAt,
+        },
+      }
+      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      await appendLog(workspace, "cua", "顾问桌面已授权 alert_evidence_lost 同空间继续，等待首次观察：" + taskSpaceId)
+      await saveTask(workspace, task, "正在填写申请平台", "顾问已授权在当前 task space 继续；下一回合只能观察，不得填写或保存。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "authorized continue same space " + decisionId, ctx)
+      return "BROWSER_SAFETY_OBSERVATION_REQUIRED: consultant desktop authorization accepted. Next heredoc may only observe with pageInfo/list/snapshot for taskSpaceId " + taskSpaceId + ", then call record_observation. Filling, saving, complete, and takeOver remain blocked until that observation succeeds."
     }
     if (input.action === "resume_ego") {
       ensureCuaProgress(progress)
       const taskSpaceId = String(input.taskSpaceId || "").trim()
       const savedTaskSpaceId = numericTaskSpaceId(progress.egoBrowser?.taskSpaceId)
       const auditError =
+        browserSafetyGateError(progress) ||
         browserAuditError(auditAction, { taskSpaceId }) ||
         requireNumericTaskSpaceId(taskSpaceId) ||
         browserTaskSpaceMismatch(progress, taskSpaceId) ||
@@ -2349,7 +3144,172 @@ export const cua = {
       await appendLog(workspace, "cua", "顾问已授权恢复 ego-browser，等待实际接管并观察：" + savedTaskSpaceId)
       await saveTask(workspace, task, "等待顾问接管浏览器", "顾问已授权 Agent 恢复；只有 takeOverTaskSpace 成功且首个 pageInfo 观察被记录后，才算真正恢复。")
       await appendAudit(workspace, "cua", auditAction, "completed", "consultant authorized ego-browser takeover")
-      return "顾问已授权恢复，但 task space 尚未标记为已接管。下一轮 Bash heredoc 必须使用 takeOverTaskSpace(" + JSON.stringify(savedTaskSpaceId) + ")，第一步只调用 pageInfo()；成功后以真实顶层 URL、标题和证据调用 record_observation，届时才会清除 handoffPending。不得改用 useOrCreateTaskSpace。"
+      const recoveryCall = progress.egoBrowser?.controlLossKind === "unexpected_control_loss"
+        ? "await claimTaskSpace(" + JSON.stringify(savedTaskSpaceId) + ")"
+        : "await takeOverTaskSpace(" + JSON.stringify(savedTaskSpaceId) + ")"
+      return "顾问已授权恢复，但 task space 尚未标记为已接管。下一轮 Bash heredoc先执行 " + recoveryCall + "；不要读取返回值，紧接着第一步只调用 pageInfo()。无 dialog 后用 Page.getFrameTree 记录实际表单 frame，再以真实顶层 URL/标题、frameId/loaderId/frameUrl 和证据调用 record_observation，届时才会清除 handoffPending。不得改用 useOrCreateTaskSpace。"
+    }
+    if (input.action === "retire_and_rebind_ego_task") {
+      ensureCuaProgress(progress)
+      const taskSpaceId = String(input.taskSpaceId || "").trim()
+      const replacementTaskSpaceId = String(input.replacementTaskSpaceId || "").trim()
+      const evidence = String(input.evidence || input.text || "").trim()
+      const rebindMode = String(input.rebindMode || "").trim()
+      const savedTaskSpaceId = numericTaskSpaceId(progress.egoBrowser?.taskSpaceId)
+      const pendingRebind = progress.egoBrowser?.rebindPending
+      const contaminated = activeBrowserSafetyStop(progress)?.kind === "cleanup_failed" || browserSafetyStop(progress)?.kind === "cleanup_failed"
+      const auditError =
+        browserSafetyGateError(progress) ||
+        browserAuditError(auditAction, { taskSpaceId, evidence }) ||
+        requireNumericTaskSpaceId(taskSpaceId) ||
+        (!savedTaskSpaceId || savedTaskSpaceId !== taskSpaceId
+          ? "BROWSER_TASK_SPACE_MISMATCH: only the currently saved numeric task space can be retired."
+          : "") ||
+        (contaminated
+          ? "TERRA_EGO_TASKSPACE_CONTAMINATED: contaminated task spaces cannot be rebound; only consultant refill may create a replacement space."
+          : "") ||
+        (input.missingTaskSpaceConfirmed === true
+          ? ""
+          : "BROWSER_TASK_SPACE_MISSING_EVIDENCE_REQUIRED: listTaskSpaces must prove the saved numeric ID is absent.")
+      if (auditError) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: auditError, page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendAudit(workspace, "cua", auditAction, "failed", auditError)
+        return auditError
+      }
+      if (input.consultantConfirmed !== true) {
+        progress.egoBrowser = {
+          ...(progress.egoBrowser || {}),
+          rebindPending: {
+            phase: "consultant_confirmation",
+            oldTaskSpaceId: taskSpaceId,
+            detectedAt: new Date().toISOString(),
+            evidence,
+          },
+        }
+        progress.dynamicFormChecks = []
+        delete progress.pendingSaveAttempt
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await saveTask(workspace, task, "等待顾问接管浏览器", "已确认保存的 Ego task-space ID 消失。原 ID 仍保留，等待顾问明确选择复用现有空间或新建替代空间。")
+        await appendAudit(workspace, "cua", auditAction, "completed", "missing task space awaits consultant retire-and-rebind choice")
+        return "TASK_SPACE_RETIRE_CONFIRMATION_REQUIRED: 原 taskSpaceId 尚未替换。请用 OpenCode question 向顾问展示 listTaskSpaces 结果，并让其明确选择“复用指定现有空间”或“新建替代空间”。收到选择后再调用本 action，传 consultantConfirmed:true 和 rebindMode。"
+      }
+      if (!pendingRebind || pendingRebind.oldTaskSpaceId !== taskSpaceId) {
+        const error = "TASK_SPACE_RETIRE_DETECTION_REQUIRED: first record the missing saved ID and ask the consultant; one call cannot both discover and replace it."
+        await appendAudit(workspace, "cua", auditAction, "failed", error)
+        return error
+      }
+      if (!["existing", "new"].includes(rebindMode)) {
+        const error = "TASK_SPACE_REBIND_MODE_REQUIRED: the consultant must choose existing or new."
+        await appendAudit(workspace, "cua", auditAction, "failed", error)
+        return error
+      }
+      if (rebindMode === "existing" && browserSafetyStop(progress)?.kind === "cleanup_failed") {
+        const error = "TERRA_EGO_TASKSPACE_CONTAMINATED: cannot rebind an existing contaminated task space; use consultant refill only."
+        await appendAudit(workspace, "cua", auditAction, "failed", error)
+        return error
+      }
+      if (rebindMode === "new" && !replacementTaskSpaceId) {
+        const replacementTaskSpaceName = String(pendingRebind.replacementTaskSpaceName || [
+          progress.egoBrowser?.taskSpaceName || "Terra-Edu application",
+          "replacement=" + randomUUID(),
+        ].join(" / "))
+        progress.egoBrowser = {
+          ...(progress.egoBrowser || {}),
+          rebindPending: {
+            ...pendingRebind,
+            phase: "replacement_creation_authorized",
+            mode: "new",
+            authorizedAt: new Date().toISOString(),
+            authorizedSessionID: ctx?.sessionID || "",
+            replacementTaskSpaceName,
+          },
+        }
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendAudit(workspace, "cua", auditAction, "completed", "consultant authorized a new replacement task space")
+        return [
+          "顾问已明确授权废弃消失的 ID 并新建替代空间。本回合只创建空间并返回身份，不得导航或填写。",
+          "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
+          "const task = await useOrCreateTaskSpace(" + JSON.stringify(replacementTaskSpaceName) + ")",
+          "const spaces = await listTaskSpaces()",
+          "const created = spaces.find((item) => String(item.id ?? item.taskId) === String(task.id))",
+          "cliLog(JSON.stringify({ replacementTaskSpaceId: String(task.id), taskSpaceObservedName: created?.name ?? task.name, taskSpaceOwnership: created?.ownership ?? task.ownership }, null, 2))",
+          "EOF",
+          "将这三个字段原样传回 retire_and_rebind_ego_task，同时保留 consultantConfirmed:true、missingTaskSpaceConfirmed:true 和 rebindMode:new。",
+        ].join("\\n")
+      }
+      const observedTaskSpaceName = String(input.taskSpaceObservedName || "").trim()
+      const observedTaskSpaceOwnership = String(input.taskSpaceOwnership || "").trim()
+      const replacementError =
+        requireNumericTaskSpaceId(replacementTaskSpaceId) ||
+        (replacementTaskSpaceId === taskSpaceId ? "TASK_SPACE_REBIND_REQUIRES_DIFFERENT_ID: the missing ID cannot replace itself." : "") ||
+        (!observedTaskSpaceName ? "TASK_SPACE_REBIND_OBSERVED_NAME_REQUIRED: listTaskSpaces must identify the replacement name." : "") ||
+        (!["agent", "agentDelegatedToUser", "user"].includes(observedTaskSpaceOwnership)
+          ? "TASK_SPACE_REBIND_OWNERSHIP_REQUIRED: listTaskSpaces must identify replacement ownership."
+          : "") ||
+        (rebindMode === "new" && (
+          pendingRebind.phase !== "replacement_creation_authorized" ||
+          pendingRebind.authorizedSessionID !== (ctx?.sessionID || "") ||
+          pendingRebind.replacementTaskSpaceName !== observedTaskSpaceName ||
+          observedTaskSpaceOwnership !== "agent"
+        )
+          ? "TASK_SPACE_REBIND_NEW_SPACE_MISMATCH: only the replacement created by the authorized session and exact generated name may be bound."
+          : "")
+      if (replacementError) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: replacementError, page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendAudit(workspace, "cua", auditAction, "failed", replacementError)
+        return replacementError
+      }
+      const reboundAt = new Date().toISOString()
+      appendLimited(progress, "retiredTaskSpaces", {
+        taskSpaceId,
+        retiredAt: reboundAt,
+        reason: "saved numeric task-space ID disappeared from listTaskSpaces",
+        evidence,
+        replacementTaskSpaceId,
+        rebindMode,
+      })
+      progress.dynamicFormChecks = []
+      progress.requiredEmptyFields = []
+      progress.lastObservedAt = ""
+      delete progress.lastBrowserObservation
+      delete progress.pendingSaveAttempt
+      progress.egoBrowser = {
+        ...(progress.egoBrowser || {}),
+        taskSpaceId: replacementTaskSpaceId,
+        taskSpaceName: observedTaskSpaceName,
+        rebindPending: undefined,
+        rebindObservationPending: true,
+        reboundAt,
+        reboundFromTaskSpaceId: taskSpaceId,
+        rebindMode,
+        handoffPending: false,
+        takeoverPending: true,
+        resumeAuthorizedAt: reboundAt,
+        resumedAt: undefined,
+      }
+      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      await appendLog(workspace, "cua", "顾问已确认 retire-and-rebind：" + taskSpaceId + " -> " + replacementTaskSpaceId)
+      await saveTask(workspace, task, "等待顾问接管浏览器", "替代 Ego task space 已绑定；必须先恢复控制并记录第一个 page/frame 观察。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "retired " + taskSpaceId + " and rebound " + replacementTaskSpaceId)
+      const recoveryCall = observedTaskSpaceOwnership === "agent"
+        ? "await useOrCreateTaskSpace(taskSpaceId)"
+        : observedTaskSpaceOwnership === "agentDelegatedToUser"
+          ? "await takeOverTaskSpace(taskSpaceId)"
+          : "await claimTaskSpace(taskSpaceId)"
+      return [
+        "原数值 taskSpaceId 已按顾问明确选择写入废弃审计，替代 ID 已绑定。本回合只恢复并观察，不得导航、填写或保存。",
+        "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
+        "const taskSpaceId = " + JSON.stringify(replacementTaskSpaceId),
+        recoveryCall,
+        "const info = await pageInfo()",
+        "const frameTree = info && typeof info === 'object' && !('dialog' in info) ? await cdp('Page.getFrameTree') : undefined",
+        "const snapshot = info && typeof info === 'object' && !('dialog' in info) ? await snapshotText() : undefined",
+        "cliLog(JSON.stringify({ taskSpaceId, info, frameTree, snapshot }, null, 2))",
+        "EOF",
+        "从 frameTree 选择真正承载表单的 frame，然后带替代 taskSpaceId、顶层 URL/标题、frameId、loaderId、frameUrl 和证据调用 record_observation；只有该观察成功才算 rebind 完成。",
+      ].join("\\n")
     }
     if (input.action === "prepare_ego_task") {
       const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
@@ -2358,6 +3318,17 @@ export const cua = {
         throw new Error("材料确认或补充内容同步尚未完成。请停止，不要启动 ego-browser；等待 material_review.json 记录 preparationCompleteAt。")
       }
       ensureCuaProgress(progress)
+      const prepareSafetyError = browserSafetyGateError(progress)
+      if (prepareSafetyError) {
+        await saveTask(workspace, task, "异常中断", prepareSafetyError)
+        await appendAudit(workspace, "cua", auditAction, "failed", prepareSafetyError, ctx)
+        return prepareSafetyError
+      }
+      if (progress.egoBrowser?.rebindPending) {
+        await saveTask(workspace, task, "等待顾问接管浏览器", "原 Ego task space 已消失，retire-and-rebind 尚未完成。不得重新准备或静默创建空间。")
+        await appendAudit(workspace, "cua", auditAction, "failed", "task-space retire-and-rebind is pending")
+        return "BROWSER_TASK_SPACE_REBIND_PENDING: 只能继续 retire_and_rebind_ego_task 的顾问确认/绑定流程，不得调用 prepare_ego_task 替换空间。"
+      }
       const refillAttemptId = String(progress.refillAttempt?.id || "").trim()
       const refillTaskSpaceName = String(progress.egoBrowser?.taskSpaceName || "").trim()
       const refillApplicationUrl = String(progress.egoBrowser?.applicationUrl || task.input?.applicationUrl || "").trim()
@@ -2480,45 +3451,63 @@ export const cua = {
           "  const beforeNavigation = await pageInfo()",
           ...(selectedFreshTaskSpaceId
             ? [
-                ...EGO_OBSERVE_PAGE_ACTION_SOURCE.split("\n").map((line) => "  " + line),
+                ...EGO_INITIAL_NAVIGATION_SOURCE.split("\n").map((line) => "  " + line),
                 "  const navigation = beforeNavigation && typeof beforeNavigation === 'object' && 'dialog' in beforeNavigation",
                 "    ? { kind: 'dialog', info: beforeNavigation }",
-                "    : await observePageAction(() => openOrReuseTab(" + JSON.stringify(url) + ", { wait: true, timeout: 30 }), { actionTimeoutMs: 30000 })",
-                "  if (navigation.kind === 'dialog') {",
+                "    : await navigateInitialPageCapturingAlerts(" + JSON.stringify(url) + ", { timeout: 30, settle: 1 })",
+                "  if (navigation.kind === 'cleanup_failed') {",
+                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: 'cleanup_failed', contaminated: true, cleanupError: navigation.cleanupError, infoError: navigation.infoError, capturedAlerts: navigation.capturedAlerts, info: navigation.info, actionError: navigation.actionError, nextRound: 'hard stop; no navigation, filling, saving, or retry in this task space' }, null, 2))",
+                "  } else if (navigation.kind === 'alert_evidence_lost') {",
+                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: 'alert_evidence_lost', cleanupError: navigation.cleanupError, infoError: navigation.infoError, capturedAlerts: navigation.capturedAlerts, topLevelAlerts: navigation.topLevelAlerts, info: navigation.info, actionError: navigation.actionError, nextRound: 'hard stop; iframe load-time alert text may be lost; the consultant decides how to recover' }, null, 2))",
+                "  } else if (navigation.kind === 'dialog') {",
                 "    const dialog = navigation.info.dialog",
                 "    if (dialog.type === 'alert') await cdp('Page.handleJavaScriptDialog', { accept: true })",
                 "    if (dialog.type === 'beforeunload') await cdp('Page.handleJavaScriptDialog', { accept: false })",
                 "    if ((dialog.type === 'alert' || dialog.type === 'beforeunload') && navigation.actionPromise) await Promise.race([navigation.actionPromise, new Promise((resolve) => setTimeout(resolve, 2000))])",
                 "    const handoff = dialog.type === 'confirm' || dialog.type === 'prompt' ? await handOffTaskSpace(task.id) : undefined",
-                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: 'dialog', dialog, handoff }, null, 2))",
-                "  } else if (navigation.kind === 'action' && navigation.action.status === 'resolved') {",
+                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: 'dialog', dialog, capturedAlerts: navigation.capturedAlerts, cleanupError: navigation.cleanupError, infoError: navigation.infoError, handoff }, null, 2))",
+                "  } else if (navigation.kind === 'alerts') {",
+                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: 'alerts', alerts: navigation.alerts, info: navigation.info, frameTree: navigation.frameTree, cleanupError: navigation.cleanupError, infoError: navigation.infoError }, null, 2))",
+                "  } else if (navigation.kind === 'action') {",
                 "    const info = navigation.info",
+                "    const frameTree = navigation.frameTree",
                 "    const snapshot = info && typeof info === 'object' && 'dialog' in info ? undefined : await snapshotText()",
-                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: 'action', info, snapshot }, null, 2))",
+                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: 'action', info, frameTree, snapshot, cleanupError: navigation.cleanupError, infoError: navigation.infoError }, null, 2))",
                 "  } else {",
-                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: navigation.kind, info: navigation.info, action: navigation.action, error: navigation.error }, null, 2))",
+                "    cliLog(JSON.stringify({ taskSpaceId: task.id, kind: navigation.kind, info: navigation.info, action: navigation.action, error: navigation.error, capturedAlerts: navigation.capturedAlerts, cleanupError: navigation.cleanupError, infoError: navigation.infoError, nextRound: 'pageInfo-only; do not retry navigation' }, null, 2))",
                 "  }",
               ]
-            : [
+              : [
                 "  const info = beforeNavigation",
+                "  const frameTree = info && typeof info === 'object' && !('dialog' in info) ? await cdp('Page.getFrameTree') : undefined",
                 "  const snapshot = info && typeof info === 'object' && 'dialog' in info ? undefined : await snapshotText()",
-                "  cliLog(JSON.stringify({ taskSpaceId: task.id, info, snapshot }, null, 2))",
+                "  cliLog(JSON.stringify({ taskSpaceId: task.id, info, frameTree, snapshot }, null, 2))",
               ]),
           "}",
           "EOF",
-          "若空间不是 agent ownership、显示 inactive，或命令报告 user is controlling，立即停止浏览器命令，并以保存的 taskSpaceId、当前 URL、标题和 listTaskSpaces/错误证据调用 handoff_to_consultant（handoffType: browser_takeover）。",
+          ...(selectedFreshTaskSpaceId
+            ? [
+                "如果输出 kind:alerts，完整弹窗文字已经由直接 Ego CDP 记录并以等价“确定”语义关闭；本回合立即结束，不再 snapshot、填写或导航。调用 record_blocker（blockerDisposition: resolved）保存 alerts 证据，下一独立 heredoc 只复用同一 taskSpaceId 并调用 pageInfo。",
+                "如果输出 kind:cleanup_failed（contaminated:true），临时注入的 alert 捕获无法确认已移除，该 task space 视为污染：立即硬停止，此后不得在该空间执行任何导航、填写、保存或重试清理，也不得把这次情况记为 record_blocker resolved。调用 application-agent_cua record_browser_safety_stop（safetyKind:cleanup_failed，taskSpaceId、evidence 原样保留 cleanupError/infoError/capturedAlerts/最后 info）；也可用 TERRA_EGO_TASKSPACE_CONTAMINATED: 前缀的 record_failure 兼容写入。污染空间只能由顾问点击“重新填写”换新 taskSpaceId，不得 resume/takeOver/rebind existing。",
+                "如果输出 kind:alert_evidence_lost，注入已确认清理、空间本身未被污染，但事件队列失败使 iframe load-time alert 可能已被自动确认而文字丢失：同样立即硬停止，不得 snapshot、填写、保存或导航，不得记为 record_blocker resolved，也不得重试导航。调用 application-agent_cua record_browser_safety_stop（safetyKind:alert_evidence_lost，taskSpaceId、evidence 原样保留 topLevelAlerts/capturedAlerts/cleanupError/infoError/最后 info）；也可用 TERRA_EGO_ALERT_EVIDENCE_LOST: 前缀的 record_failure 兼容写入。顾问只能通过桌面“查看后继续当前空间”或“重新填写”决策；consultantConfirmed:true 不能解除；授权后第一回合只能观察。",
+                "如果输出 kind:unknown 或 nextRound:pageInfo-only，本回合立即结束：这是结果未决，不是失败；不得调用 record_failure、不得交接、不得重试导航或刷新。下一独立 heredoc 只复用同一 taskSpaceId 并调用 pageInfo；只有该新观察明确证明动作失败或仍无法观察时，才记录失败或交接。",
+              ]
+            : []),
+          "若空间仍存在但不是 agent ownership、显示 inactive，或命令报告 user is controlling，立即停止浏览器命令，并以保存的 taskSpaceId、当前 URL、标题和 helper stderr/listTaskSpaces 证据调用 handoff_to_consultant（handoffType: browser_takeover）。若 space 为 missing，不得当作普通交接；以 missingTaskSpaceConfirmed:true 和完整 listTaskSpaces 证据调用 retire_and_rebind_ego_task（consultantConfirmed:false），等待顾问明确选择后才可替换。",
         ].join("\\n")
       }
       if (selectedLegacyTaskSpaceId) {
         return [
           "顾问已明确选择旧空间。此回合只恢复控制并观察；不得导航、填写或保存。",
           "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
-          "const task = await takeOverTaskSpace(" + JSON.stringify(selectedLegacyTaskSpaceId) + ")",
+          "const taskSpaceId = " + JSON.stringify(selectedLegacyTaskSpaceId),
+          "await claimTaskSpace(taskSpaceId)",
           "const info = await pageInfo()",
+          "const frameTree = info && typeof info === 'object' && !('dialog' in info) ? await cdp('Page.getFrameTree') : undefined",
           "const snapshot = info && typeof info === 'object' && 'dialog' in info ? undefined : await snapshotText()",
-          "cliLog(JSON.stringify({ taskSpaceId: task.id, info, snapshot }, null, 2))",
+          "cliLog(JSON.stringify({ taskSpaceId, info, frameTree, snapshot }, null, 2))",
           "EOF",
-          "只在无 dialog 的观察完成后，带真实 taskSpaceId、URL、标题和证据调用 record_observation。",
+          "只在无 dialog 的观察完成后，带真实 taskSpaceId、顶层 URL/标题、表单 frameId/loaderId/frameUrl 和证据调用 record_observation。",
         ].join("\\n")
       }
       return [
@@ -2541,11 +3530,15 @@ export const cua = {
       const taskSpaceId = String(input.taskSpaceId || "").trim()
       const currentUrl = String(input.currentUrl || "").trim()
       const pageTitle = String(input.pageTitle || "").trim()
+      const frameId = String(input.frameId || "").trim()
+      const loaderId = String(input.loaderId || "").trim()
+      const frameUrl = String(input.frameUrl || "").trim()
       const evidence = String(input.evidence || input.text || "").trim()
       const auditError =
-        browserAuditError(auditAction, { taskSpaceId, currentUrl, pageTitle, evidence }) ||
+        browserAuditError(auditAction, { taskSpaceId, currentUrl, pageTitle, frameId, loaderId, frameUrl, evidence }) ||
         requireNumericTaskSpaceId(taskSpaceId) ||
-        browserTaskSpaceMismatch(progress, taskSpaceId)
+        browserTaskSpaceMismatch(progress, taskSpaceId) ||
+        (!URL.canParse(currentUrl) || !URL.canParse(frameUrl) ? "BROWSER_OBSERVATION_URL_REQUIRED: currentUrl and frameUrl must be valid observed URLs." : "")
       if (auditError) {
         appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: auditError, page: progress.currentPage || "" })
         await writeJson(join(workspace, "03_state/application_progress.json"), progress)
@@ -2561,41 +3554,94 @@ export const cua = {
         progress.egoBrowser?.takeoverPending === true &&
         progress.egoBrowser?.handoffPending === true &&
         Boolean(progress.egoBrowser?.resumeAuthorizedAt)
+      const rebindCompleted =
+        progress.egoBrowser?.takeoverPending === true &&
+        progress.egoBrowser?.rebindObservationPending === true &&
+        Boolean(progress.egoBrowser?.resumeAuthorizedAt)
       progress.lastBrowserObservation = {
         at: progress.lastObservedAt,
         taskSpaceId,
         currentUrl,
         pageTitle,
+        frameId,
+        loaderId,
+        frameUrl,
         evidence,
       }
+      const safetyObservation = browserSafetyObservationRequired(progress)
+      const safetyObservationCompleted = Boolean(safetyObservation && String(safetyObservation.taskSpaceId) === taskSpaceId)
       progress.egoBrowser = {
         ...(progress.egoBrowser || {}),
         taskSpaceId,
         taskSpaceName: input.taskSpaceName || progress.egoBrowser?.taskSpaceName || "",
         lastSnapshotSummary: evidence,
         lastObservedAt: progress.lastObservedAt,
-        ...(takeoverCompleted
+        ...(takeoverCompleted || rebindCompleted
           ? {
               handoffPending: false,
               takeoverPending: false,
               resumedAt: progress.lastObservedAt,
+              ...(rebindCompleted ? { rebindObservationPending: false } : {}),
+            }
+          : {}),
+        ...(safetyObservationCompleted
+          ? {
+              safetyStop: {
+                ...safetyObservation,
+                active: false,
+                observationRequired: false,
+                observationClearedAt: progress.lastObservedAt,
+              },
             }
           : {}),
       }
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", (takeoverCompleted ? "ego-browser 已实际恢复并记录首个页面观察：" : "ego-browser 页面观察已记录：") + (progress.currentPage || "申请平台页面"))
-      await saveTask(workspace, task, "正在填写申请平台", takeoverCompleted ? "已成功接管 task space 并记录首个 pageInfo 观察。" : "已通过 ego-browser snapshot/pageInfo 观察当前页面，准备继续小步填写。")
-      await appendAudit(workspace, "cua", auditAction, "completed", takeoverCompleted ? "completed authorized ego-browser takeover" : "recorded ego-browser observation")
+      await appendLog(workspace, "cua", (takeoverCompleted || rebindCompleted ? "ego-browser 已实际恢复并记录首个页面/frame 观察：" : safetyObservationCompleted ? "alert_evidence_lost 恢复后的首次观察已记录，安全门已解除：" : "ego-browser 页面/frame 观察已记录：") + (progress.currentPage || "申请平台页面"))
+      await saveTask(workspace, task, "正在填写申请平台", takeoverCompleted || rebindCompleted ? "已成功恢复 task space 并记录首个 page/frame 观察。" : safetyObservationCompleted ? "已完成恢复后的首次观察，可继续小步填写。" : "已通过 ego-browser snapshot/pageInfo/frameTree 观察当前页面，准备继续小步填写。")
+      await appendAudit(workspace, "cua", auditAction, "completed", takeoverCompleted ? "completed authorized ego-browser takeover" : rebindCompleted ? "completed consultant-authorized task-space rebind" : safetyObservationCompleted ? "cleared safety observation gate" : "recorded ego-browser observation")
       return "ego-browser 页面观察已记录。基于这次观察完成一个逻辑动作组后必须再次 pageInfo()；无 dialog 时再 snapshotText 或截图验证并结束本回合。"
     }
     if (input.action === "record_field_verified" || input.action === "record_select_verified") {
       ensureCuaProgress(progress)
       const kind = input.action === "record_select_verified" ? "select" : "field"
-      const label = String(input.fieldLabel || input.detail || (kind === "select" ? "下拉字段" : "普通字段"))
-      const value = String(input.optionLabel || input.optionValue || input.text || input.expectedText || "")
+      const taskSpaceId = String(input.taskSpaceId || "").trim()
+      const currentUrl = String(input.currentUrl || "").trim()
+      const pageTitle = String(input.pageTitle || "").trim()
+      const label = String(input.fieldLabel || input.detail || "").trim()
+      const value = String(input.optionLabel || input.optionValue || input.text || input.expectedText || "").trim()
+      const expected = String(input.expectedText || input.optionLabel || input.text || input.optionValue || "").trim()
+      const evidence = String(input.evidence || "").trim()
+      const interactionMethod = String(input.interactionMethod || "").trim()
+      const readbackValue = String(input.readbackValue || "").trim()
+      const permittedMethod = kind === "select"
+        ? interactionMethod === "click+snapshot+click-option+reobserve"
+        : interactionMethod === "fillInput+Tab+readback" || interactionMethod === "cdp-key-events+Tab+readback"
+      const latestObservationMatches =
+        progress.lastBrowserObservation?.taskSpaceId === taskSpaceId &&
+        progress.lastBrowserObservation?.currentUrl === currentUrl &&
+        progress.lastBrowserObservation?.pageTitle === pageTitle &&
+        Number.isFinite(Date.parse(progress.lastBrowserObservation?.at || ""))
+      const auditError =
+        browserAuditError(auditAction, { taskSpaceId, currentUrl, pageTitle, fieldLabel: label, evidence, interactionMethod, readbackValue }) ||
+        requireNumericTaskSpaceId(taskSpaceId) ||
+        browserTaskSpaceMismatch(progress, taskSpaceId) ||
+        (!latestObservationMatches ? "FIELD_OBSERVATION_REQUIRED: verification must match the latest page observation for taskSpaceId, URL, and title." : "") ||
+        (!permittedMethod ? "REAL_INTERACTION_REQUIRED: fields require fillInput+Tab+readback or per-key CDP+Tab+readback; selects require click+snapshot+click-option+reobserve." : "") ||
+        (/vue|\$router|store|dom|setter|submit|requestsubmit/i.test(interactionMethod) ? "DIRECT_PAGE_WRITE_FORBIDDEN: framework internals, DOM setters, and scripted submit are not verification methods." : "") ||
+        (expected && expected.replace(/\s+/g, " ").trim() !== readbackValue.replace(/\s+/g, " ").trim()
+          ? "FIELD_READBACK_MISMATCH: fresh readbackValue does not equal the expected visible value."
+          : "")
+      if (auditError) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: auditError, page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendLog(workspace, "cua", "拒绝记录未完成真实交互读回的字段：" + auditError)
+        await appendAudit(workspace, "cua", auditAction, "failed", auditError)
+        return auditError
+      }
       progress.dynamicFormChecks = []
-      appendLimited(progress, "filledFields", { at: new Date().toISOString(), kind, label, value, backend: "ego-browser", taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "" })
-      appendLimited(progress, "verifiedFields", { at: new Date().toISOString(), kind, label, value, expected: input.expectedText || value, evidence: input.evidence || "", backend: "ego-browser" })
+      delete progress.pendingSaveAttempt
+      appendLimited(progress, "filledFields", { at: new Date().toISOString(), kind, label, value, backend: "ego-browser", taskSpaceId, currentUrl, pageTitle, interactionMethod })
+      appendLimited(progress, "verifiedFields", { at: new Date().toISOString(), kind, label, value, expected, readbackValue, evidence, interactionMethod, backend: "ego-browser", taskSpaceId, currentUrl, pageTitle, observedAt: progress.lastBrowserObservation.at })
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       await appendLog(workspace, "cua", "ego-browser 已填写并复查：" + label + " -> " + value)
       await saveTask(workspace, task, "正在填写申请平台", "已填写并复查字段：" + label)
@@ -2641,6 +3687,7 @@ export const cua = {
         return "DYNAMIC_FORM_INCOMPLETE: 当前仍有可见必填项：" + remaining.join("、") + "。不得保存；请在新的无 dialog 观察中补齐并重新验证页面。"
       }
       progress.requiredEmptyFields = []
+      delete progress.pendingSaveAttempt
       appendLimited(progress, "dynamicFormChecks", {
         at: new Date().toISOString(),
         taskSpaceId,
@@ -2653,7 +3700,68 @@ export const cua = {
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       await appendLog(workspace, "cua", "已完成动态表单复查：当前无新增空必填项。")
       await appendAudit(workspace, "cua", auditAction, "completed", "dynamic form verified")
-      return "动态表单已复查通过。现在可以执行保存前最终检查；任何后续页面动作都会使本次复查失效。"
+      return "动态表单已复查通过。现在先调用 begin_save_attempt 获取 saveAttemptId；任何其他页面动作都会使本次复查失效。"
+    }
+    if (input.action === "begin_save_attempt") {
+      ensureCuaProgress(progress)
+      const taskSpaceId = String(input.taskSpaceId || "").trim()
+      const currentUrl = String(input.currentUrl || "").trim()
+      const pageTitle = String(input.pageTitle || "").trim()
+      const evidence = String(input.evidence || input.text || "").trim()
+      const sourceFrameId = String(progress.lastBrowserObservation?.frameId || "").trim()
+      const sourceLoaderId = String(progress.lastBrowserObservation?.loaderId || "").trim()
+      const sourceFrameUrl = String(progress.lastBrowserObservation?.frameUrl || "").trim()
+      const dynamicCheck = progress.dynamicFormChecks.findLast((check: { taskSpaceId?: string; url?: string; page?: string }) =>
+        check.taskSpaceId === taskSpaceId && check.url === currentUrl && check.page === pageTitle,
+      )
+      const dynamicCheckedAt = Date.parse(dynamicCheck?.at || "")
+      const latestObservationMatches =
+        progress.lastBrowserObservation?.taskSpaceId === taskSpaceId &&
+        progress.lastBrowserObservation?.currentUrl === currentUrl &&
+        progress.lastBrowserObservation?.pageTitle === pageTitle &&
+        progress.lastBrowserObservation?.at === dynamicCheck?.observedAt
+      const auditError =
+        browserAuditError(auditAction, { taskSpaceId, currentUrl, pageTitle, evidence }) ||
+        requireNumericTaskSpaceId(taskSpaceId) ||
+        browserTaskSpaceMismatch(progress, taskSpaceId) ||
+        (!dynamicCheck ? "UNVERIFIED_DYNAMIC_FORM: begin_save_attempt requires the latest matching dynamic-form check." : "") ||
+        (!latestObservationMatches ? "SAVE_ATTEMPT_OBSERVATION_REQUIRED: the dynamic check must match the latest observation for this task space, URL, and title." : "") ||
+        (!sourceFrameId || !sourceLoaderId || !URL.canParse(sourceFrameUrl)
+          ? "SAVE_ATTEMPT_FRAME_CONTEXT_REQUIRED: record_observation must include the active form frameId, loaderId, and frameUrl."
+          : "") ||
+        (!Number.isFinite(dynamicCheckedAt) || Date.now() - dynamicCheckedAt < 0 || Date.now() - dynamicCheckedAt > 5 * 60_000
+          ? "STALE_DYNAMIC_FORM: the save attempt must begin within five minutes of the matching dynamic check."
+          : "") ||
+        (progress.pendingSaveAttempt ? "SAVE_ATTEMPT_ALREADY_PENDING: finish or record failure for the current save attempt before beginning another." : "")
+      if (auditError) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: auditError, page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendAudit(workspace, "cua", auditAction, "failed", auditError)
+        return auditError
+      }
+      const saveAttemptId = randomUUID()
+      progress.pendingSaveAttempt = {
+        id: saveAttemptId,
+        beganAt: new Date().toISOString(),
+        taskSpaceId,
+        currentUrl,
+        pageTitle,
+        evidence,
+        dynamicCheckedAt: dynamicCheck.at,
+        dynamicFormEvidence: dynamicCheck.evidence || "",
+        observedAt: progress.lastBrowserObservation.at,
+        sourceFrameId,
+        sourceLoaderId,
+        sourceFrameUrl,
+      }
+      await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      await appendLog(workspace, "cua", "已开始可审计保存尝试：" + saveAttemptId)
+      await appendAudit(workspace, "cua", auditAction, "completed", "save attempt " + saveAttemptId)
+      return JSON.stringify({
+        saveAttemptId,
+        beganAt: progress.pendingSaveAttempt.beganAt,
+        nextAction: "Network.enable; drain old events; record actionStartedAt immediately before one real observePageAction save interaction; settle briefly; drain new events and record eventsDrainedAt. Join requestWillBeSent and responseReceived by the same requestId/frameId/loaderId into compact request/response parts without headers/postData/body/query/hash. XHR/fetch must retain the source frame+loader. A document POST may use the new navigation loader but must stay in the source frame; retain the original write request, final 2xx response, and redirected:true only for a real same-ID redirect chain. Then record a fresh top-level and form-frame destination observation/readback before record_save_verified.",
+      }, null, 2)
     }
     if (input.action === "record_blocker") {
       ensureCuaProgress(progress)
@@ -2705,6 +3813,7 @@ export const cua = {
               handoffAt: new Date().toISOString(),
               handoffReason: input.detail || input.text || "浏览器阻塞需要顾问处理。",
               handoffType: "browser_takeover",
+              controlLossKind: "deliberate_handoff",
             }
           : {}),
       }
@@ -2714,6 +3823,7 @@ export const cua = {
       delete progress.lastBrowserObservation
       progress.lastObservedAt = ""
       progress.dynamicFormChecks = []
+      delete progress.pendingSaveAttempt
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       if (disposition === "resolved") {
         await appendLog(workspace, "cua", "ego-browser 已安全处理阻塞：" + (input.detail || "未命名浏览器阻塞"))
@@ -2744,6 +3854,9 @@ export const cua = {
         return auditError
       }
       const handoffType = input.handoffType === "login" ? "login" : "browser_takeover"
+      const controlLossKind = input.controlLossKind === "unexpected_control_loss" || /TERRA_EGO_TASKSPACE_CONTROL_LOST/.test(evidence + " " + String(input.detail || ""))
+        ? "unexpected_control_loss"
+        : "deliberate_handoff"
       progress.currentUrl = currentUrl
       progress.currentPage = pageTitle
       progress.egoBrowser = {
@@ -2755,7 +3868,9 @@ export const cua = {
         resumeAuthorizedAt: undefined,
         handoffReason: input.detail || "需要顾问接管 ego-browser Space。",
         handoffType,
+        controlLossKind,
       }
+      delete progress.pendingSaveAttempt
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       await appendLog(workspace, "cua", "已交接 ego-browser task space 给顾问：" + (input.detail || "需要人工登录/验证。"))
       await saveTask(
@@ -2765,7 +3880,9 @@ export const cua = {
         input.detail || (handoffType === "login" ? "请顾问在 ego lite Space 中完成登录后回复继续。" : "请顾问在 ego lite Space 中处理当前浏览器状态后回复继续。"),
       )
       await appendAudit(workspace, "cua", auditAction, "completed", "handoff to consultant")
-      return "已记录顾问接管。确认 ego-browser 脚本中的 handOffTaskSpace(task.id) 已返回 done:true；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true），再用 takeOverTaskSpace 恢复。"
+      return controlLossKind === "unexpected_control_loss"
+        ? "已记录意外控制丢失。不得调用 handOffTaskSpace 或自动接管；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true），再按官方 API 用 claimTaskSpace 恢复并先 pageInfo。"
+        : "已记录顾问接管。确认 ego-browser 脚本中的 handOffTaskSpace(task.id) 已返回 done:true；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true），再 await takeOverTaskSpace(savedID)（不读取返回）并先 pageInfo。"
     }
     if (input.action === "record_save_verified") {
       ensureCuaProgress(progress)
@@ -2773,8 +3890,11 @@ export const cua = {
       const currentUrl = String(input.currentUrl || "").trim()
       const pageTitle = String(input.pageTitle || "").trim()
       const evidence = String(input.evidence || input.text || "").trim()
+      const saveAttemptId = String(input.saveAttemptId || "").trim()
+      const readbackValue = String(input.readbackValue || "").trim()
+      const networkEvidence = input.networkEvidence && typeof input.networkEvidence === "object" ? input.networkEvidence : undefined
       const auditError =
-        browserAuditError(auditAction, { taskSpaceId, currentUrl, pageTitle, evidence }) ||
+        browserAuditError(auditAction, { taskSpaceId, currentUrl, pageTitle, evidence, saveAttemptId, readbackValue }) ||
         requireNumericTaskSpaceId(taskSpaceId) ||
         browserTaskSpaceMismatch(progress, taskSpaceId)
       if (auditError) {
@@ -2790,41 +3910,177 @@ export const cua = {
         await appendLog(workspace, "cua", "收到未确认保存记录，未写入 savedPages：" + (input.detail || progress.currentPage || "申请页面"))
         await saveTask(workspace, task, "正在保存申请进度", "保存记录需要 ego-browser 保存前检查和保存后复查，未确认前不算成功。")
         await appendAudit(workspace, "cua", auditAction, "failed", "unverified save record")
-        return "UNVERIFIED_SAVE_RECORDED: 必须在 ego-browser 脚本里完成保存前 required/validation 检查、点击 SAVE、保存后 snapshot/pageInfo 复查，并以 confirmed:true 调用 record_save_verified。"
+        return "UNVERIFIED_SAVE_RECORDED: record_save_verified requires confirmed:true plus a matching saveAttemptId, structured 2xx server response, and fresh post-save readback."
       }
-      const saveUrl = currentUrl
-      const dynamicCheck = progress.dynamicFormChecks.findLast((check: { taskSpaceId?: string; url?: string; page?: string }) =>
-        check.taskSpaceId === taskSpaceId && check.url === saveUrl && check.page === pageTitle,
-      )
-      if (!dynamicCheck) {
-        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "record_save_verified", reason: "missing dynamic form verification", page: progress.currentPage || "" })
+      const attempt = progress.pendingSaveAttempt
+      const attemptBeganAt = Date.parse(attempt?.beganAt || "")
+      if (
+        !attempt ||
+        attempt.id !== saveAttemptId ||
+        attempt.taskSpaceId !== taskSpaceId ||
+        !Number.isFinite(attemptBeganAt) ||
+        Date.now() - attemptBeganAt < 0 ||
+        Date.now() - attemptBeganAt > 5 * 60_000
+      ) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "record_save_verified", reason: "missing, stale, or mismatched save attempt", page: progress.currentPage || "" })
         await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-        await appendLog(workspace, "cua", "拒绝记录保存：本页没有最新的动态表单复查。")
-        await appendAudit(workspace, "cua", auditAction, "failed", "missing dynamic form verification")
-        return "UNVERIFIED_DYNAMIC_FORM: 任何选择或填写后都必须重新 snapshotText/pageInfo，并以 remainingRequiredFields:[] 调用 record_dynamic_form_verified；完成后才能记录保存。"
+        await appendAudit(workspace, "cua", auditAction, "failed", "missing, stale, or mismatched save attempt")
+        return "SAVE_ATTEMPT_REQUIRED: call begin_save_attempt after a fresh dynamic check, then use its exact ID for this same task space. The attempt keeps the source URL/title; record_save_verified currentUrl/pageTitle describe the freshly observed destination after saving."
       }
-      const postSaveObservedAt = Date.parse(progress.lastBrowserObservation?.at || "")
-      const dynamicCheckedAt = Date.parse(dynamicCheck.at || "")
+      const requestEvidence = networkEvidence?.request && typeof networkEvidence.request === "object" ? networkEvidence.request : undefined
+      const responseEvidence = networkEvidence?.response && typeof networkEvidence.response === "object" ? networkEvidence.response : undefined
+      const requestObservedAt = Date.parse(requestEvidence?.observedAt || "")
+      const responseObservedAt = Date.parse(responseEvidence?.observedAt || "")
+      const requestId = String(requestEvidence?.requestId || "").trim()
+      const responseRequestId = String(responseEvidence?.requestId || "").trim()
+      const method = String(requestEvidence?.method || "").toUpperCase()
+      const status = Number(responseEvidence?.status)
+      const resourceType = String(responseEvidence?.resourceType || "").toLowerCase()
+      const sourceUrl = String(networkEvidence?.sourceUrl || "").trim()
+      const sourceFrameId = String(networkEvidence?.sourceFrameId || "").trim()
+      const sourceLoaderId = String(networkEvidence?.sourceLoaderId || "").trim()
+      const sourceFrameUrl = String(networkEvidence?.sourceFrameUrl || "").trim()
+      const actionStartedAt = Date.parse(networkEvidence?.actionStartedAt || "")
+      const eventsDrainedAt = Date.parse(networkEvidence?.eventsDrainedAt || "")
+      const requestUrl = String(requestEvidence?.url || "").trim()
+      const responseUrl = String(responseEvidence?.url || "").trim()
+      const requestFrameId = String(requestEvidence?.frameId || "").trim()
+      const requestLoaderId = String(requestEvidence?.loaderId || "").trim()
+      const responseFrameId = String(responseEvidence?.frameId || "").trim()
+      const responseLoaderId = String(responseEvidence?.loaderId || "").trim()
+      const compactEvidenceOnly =
+        Boolean(networkEvidence) &&
+        Object.keys(networkEvidence).every((key) => ["taskSpaceId", "sourceUrl", "sourceTitle", "sourceFrameId", "sourceLoaderId", "sourceFrameUrl", "actionStartedAt", "eventsDrainedAt", "request", "response"].includes(key)) &&
+        Boolean(requestEvidence) &&
+        Object.keys(requestEvidence).every((key) => ["requestId", "method", "url", "observedAt", "frameId", "loaderId"].includes(key)) &&
+        Boolean(responseEvidence) &&
+        Object.keys(responseEvidence).every((key) => ["requestId", "status", "url", "resourceType", "observedAt", "frameId", "loaderId", "redirected"].includes(key))
+      const networkUrlsSafe = [sourceUrl, sourceFrameUrl, requestUrl, responseUrl].every((url) =>
+        URL.canParse(url) && !new URL(url).search && !new URL(url).hash,
+      )
+      const attemptSourceUrl = browserUrlWithoutQuery(attempt.currentUrl)
+      const attemptSourceFrameUrl = browserUrlWithoutQuery(attempt.sourceFrameUrl)
+      const postSaveObservation = progress.lastBrowserObservation
+      const postSaveFrameUrl = browserUrlWithoutQuery(postSaveObservation?.frameUrl)
+      const actionWindowMatches =
+        Number.isFinite(actionStartedAt) &&
+        Number.isFinite(eventsDrainedAt) &&
+        actionStartedAt >= attemptBeganAt &&
+        eventsDrainedAt >= actionStartedAt &&
+        eventsDrainedAt - actionStartedAt <= 2 * 60_000 &&
+        requestObservedAt >= actionStartedAt &&
+        responseObservedAt >= requestObservedAt &&
+        responseObservedAt <= eventsDrainedAt &&
+        Date.now() - eventsDrainedAt >= 0 &&
+        Date.now() - eventsDrainedAt <= 5 * 60_000
+      const responseIdentityMatchesRequest =
+        (!responseFrameId || responseFrameId === requestFrameId) &&
+        (!responseLoaderId || responseLoaderId === requestLoaderId)
+      const xhrOrFetchContextMatches =
+        networkUrlsSafe &&
+        ["xhr", "fetch"].includes(resourceType) &&
+        requestFrameId === attempt.sourceFrameId &&
+        requestLoaderId === attempt.sourceLoaderId &&
+        responseIdentityMatchesRequest &&
+        new URL(requestUrl).origin === new URL(responseUrl).origin &&
+        new URL(requestUrl).origin === new URL(sourceFrameUrl).origin
+      const documentContextMatches =
+        networkUrlsSafe &&
+        resourceType === "document" &&
+        requestFrameId === attempt.sourceFrameId &&
+        Boolean(requestLoaderId) &&
+        responseIdentityMatchesRequest &&
+        postSaveObservation?.frameId === attempt.sourceFrameId &&
+        postSaveObservation?.loaderId === requestLoaderId &&
+        responseUrl === postSaveFrameUrl
+      const serverConfirmed =
+        compactEvidenceOnly &&
+        Boolean(requestId) &&
+        requestId === responseRequestId &&
+        ["POST", "PUT", "PATCH"].includes(method) &&
+        Number.isInteger(status) && status >= 200 && status < 300 &&
+        (xhrOrFetchContextMatches || documentContextMatches) &&
+        networkUrlsSafe &&
+        networkEvidence?.taskSpaceId === taskSpaceId &&
+        sourceUrl === attemptSourceUrl &&
+        networkEvidence?.sourceTitle === attempt.pageTitle &&
+        sourceFrameId === attempt.sourceFrameId &&
+        sourceLoaderId === attempt.sourceLoaderId &&
+        sourceFrameUrl === attemptSourceFrameUrl &&
+        Number.isFinite(requestObservedAt) &&
+        Number.isFinite(responseObservedAt) &&
+        actionWindowMatches
+      if (!serverConfirmed) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "record_save_verified", reason: "missing or invalid server confirmation", page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendAudit(workspace, "cua", auditAction, "failed", "missing or invalid server confirmation")
+        return "SERVER_SAVE_CONFIRMATION_REQUIRED: accept only a POST/PUT/PATCH 2xx XHR/fetch bound to the source frame+loader and save-action window, or a same-frame ordinary/redirected document POST whose final frame URL+loader were freshly observed. GET, background/stale, frame/loader/time-mismatched, non-2xx, or absent evidence is rejected."
+      }
+      const postSaveObservedAt = Date.parse(postSaveObservation?.at || "")
       if (
         !Number.isFinite(postSaveObservedAt) ||
-        !Number.isFinite(dynamicCheckedAt) ||
-        postSaveObservedAt <= dynamicCheckedAt ||
-        progress.lastBrowserObservation?.taskSpaceId !== taskSpaceId ||
-        progress.lastBrowserObservation?.currentUrl !== saveUrl ||
-        progress.lastBrowserObservation?.pageTitle !== pageTitle
+        postSaveObservedAt <= responseObservedAt ||
+        postSaveObservation?.taskSpaceId !== taskSpaceId ||
+        postSaveObservation?.currentUrl !== currentUrl ||
+        postSaveObservation?.pageTitle !== pageTitle ||
+        postSaveObservation?.frameId !== attempt.sourceFrameId ||
+        (["xhr", "fetch"].includes(resourceType) && postSaveObservation?.loaderId !== attempt.sourceLoaderId)
       ) {
         appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: "record_save_verified", reason: "missing post-save observation", page: progress.currentPage || "" })
         await writeJson(join(workspace, "03_state/application_progress.json"), progress)
         await appendLog(workspace, "cua", "拒绝记录保存：动态表单复查后没有新的页面观察证据。")
         await appendAudit(workspace, "cua", auditAction, "failed", "missing post-save observation")
-        return "UNVERIFIED_POST_SAVE_OBSERVATION: 保存后必须再次调用 record_observation，提供新的 pageInfo/snapshot 或截图证据；该观察必须晚于本页动态表单复查。"
+        return "UNVERIFIED_POST_SAVE_OBSERVATION: record_observation and readbackValue must be newer than this attempt's matching server response."
       }
       const pageName = String(input.detail || pageTitle || progress.currentPage || "申请页面")
       progress.currentPage = pageTitle
-      progress.currentUrl = saveUrl
+      progress.currentUrl = currentUrl
       if (!Array.isArray(progress.savedPages)) progress.savedPages = []
-      progress.savedPages.push({ at: new Date().toISOString(), page: pageName, url: saveUrl, backend: "ego-browser", taskSpaceId, evidence, dynamicFormEvidence: dynamicCheck.evidence || "" })
+      progress.savedPages.push({
+        at: new Date().toISOString(),
+        page: pageName,
+        url: currentUrl,
+        frameId: postSaveObservation.frameId,
+        loaderId: postSaveObservation.loaderId,
+        frameUrl: postSaveObservation.frameUrl,
+        backend: "ego-browser",
+        taskSpaceId,
+        evidence,
+        readbackValue,
+        saveAttemptId,
+        networkEvidence: {
+          taskSpaceId,
+          sourceUrl,
+          sourceTitle: String(networkEvidence.sourceTitle),
+          sourceFrameId,
+          sourceLoaderId,
+          sourceFrameUrl,
+          actionStartedAt: String(networkEvidence.actionStartedAt),
+          eventsDrainedAt: String(networkEvidence.eventsDrainedAt),
+          request: {
+            requestId,
+            method,
+            url: requestUrl,
+            observedAt: String(requestEvidence.observedAt),
+            frameId: requestFrameId,
+            loaderId: requestLoaderId,
+          },
+          response: {
+            requestId: responseRequestId,
+            status,
+            resourceType,
+            url: responseUrl,
+            observedAt: String(responseEvidence.observedAt),
+            ...(responseFrameId ? { frameId: responseFrameId } : {}),
+            ...(responseLoaderId ? { loaderId: responseLoaderId } : {}),
+            ...(responseEvidence.redirected === true ? { redirected: true } : {}),
+          },
+        },
+        serverConfirmed: true,
+        dynamicFormEvidence: attempt.dynamicFormEvidence || "",
+      })
       progress.dynamicFormChecks = []
+      delete progress.pendingSaveAttempt
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       const syncedMissing = syncMissingItemsWithProgress(normalizeMissingItems(await readJson(join(workspace, "03_state/missing_items.json"), [])), progress)
       const activeMissing = activeMissingItems(syncedMissing)
@@ -2847,21 +4103,43 @@ export const cua = {
     }
     if (input.action === "complete_ego_task") {
       ensureCuaProgress(progress)
-      if (!hasVerifiedBrowserSave(progress)) {
-        await appendAudit(workspace, "cua", auditAction, "failed", "completion without verified save", ctx)
-        return "UNVERIFIED_BROWSER_COMPLETION: 当前没有 record_save_verified 证据，不能完成填表阶段。请保存并复查页面，或用 record_blocker 记录无法继续的具体原因。"
+      const completionError = browserCompletionGateError(progress, input)
+      if (completionError) {
+        appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: completionError, page: progress.currentPage || "" })
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendAudit(workspace, "cua", auditAction, "failed", completionError, ctx)
+        return completionError
       }
+      const completedAt = new Date().toISOString()
+      const taskSpaceId = String(input.taskSpaceId).trim()
       progress.egoBrowser = {
         ...(progress.egoBrowser || {}),
-        taskSpaceId: input.taskSpaceId || progress.egoBrowser?.taskSpaceId || "",
-        completedAt: new Date().toISOString(),
+        taskSpaceId,
+        completedAt,
         completionDetail: input.detail || "",
+        completionDisposition: input.completionDisposition,
+        completionObservation: {
+          ...progress.lastBrowserObservation,
+          confirmedAt: completedAt,
+        },
       }
+      appendLimited(progress, "completedPages", {
+        at: completedAt,
+        page: input.pageTitle,
+        url: input.currentUrl,
+        frameId: input.frameId,
+        loaderId: input.loaderId,
+        frameUrl: input.frameUrl,
+        evidence: input.evidence || input.text,
+        taskSpaceId,
+        completionDisposition: input.completionDisposition,
+        backend: "ego-browser",
+      })
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       await appendLog(workspace, "cua", "ego-browser task space 完成：" + (input.detail || "本轮填表阶段完成。"))
       await saveTask(workspace, task, "阶段性完成", input.detail || "本轮 ego-browser 填表阶段已完成。")
       await appendAudit(workspace, "cua", auditAction, "completed", "completed ego-browser task")
-      return "ego-browser 阶段完成状态已记录。只有整个浏览器任务确实结束时，才在独立最终 heredoc 调用 completeTaskSpace；不得在单个页面完成后调用。"
+      return "ego-browser 阶段完成状态已通过最新保存、页面/frame 观察、必填项和控制权门槛，并已进入终态。现在只可在独立最终 heredoc 调用 completeTaskSpace(taskSpaceId, { keep: true })；其他 CUA 动作会被拒绝。若该 helper 回合失败，只可按协议用 record_failure 归档并撤销假完成；不得在单个页面完成后调用，不得使用 keep:false 关闭窗口。"
     }
     if (input.action === "record_saved") {
       ensureCuaProgress(progress)
@@ -2875,6 +4153,7 @@ export const cua = {
     if (input.action === "record_upload") {
       if (!Array.isArray(progress.uploadedMaterials)) progress.uploadedMaterials = []
       progress.dynamicFormChecks = []
+      delete progress.pendingSaveAttempt
       progress.uploadedMaterials.push(input.detail || "未命名材料")
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       await appendLog(workspace, "cua", "已记录材料上传：" + (input.detail || "未命名材料"))
@@ -2885,9 +4164,29 @@ export const cua = {
     if (!Array.isArray(progress.failedActions)) progress.failedActions = []
     const detail = input.detail || "未提供原因"
     const browserServiceBlocked = /TERRA_EGO_BROWSER_(?:VERSION_CONFLICT|EXTERNAL_SERVICE_ACTIVE|SERVICE_UNAVAILABLE)/.test(detail)
-    progress.failedActions.push({ at: new Date().toISOString(), action: input.action, reason: detail, page: progress.currentPage || "" })
+    const safetyKind = safetyKindFromFailureDetail(String(detail).trim())
+    const failureTaskSpaceId = numericTaskSpaceId(input.taskSpaceId) || numericTaskSpaceId(progress.egoBrowser?.taskSpaceId)
+    let recordedSafetyStop = null as any
+    if (safetyKind && failureTaskSpaceId) {
+      recordedSafetyStop = applyBrowserSafetyStop(progress, {
+        kind: safetyKind,
+        taskSpaceId: failureTaskSpaceId,
+        evidence: input.safetyEvidence && typeof input.safetyEvidence === "object" ? input.safetyEvidence : { detail },
+        detail: String(detail),
+      })
+    }
+    progress.failedActions.push({ at: new Date().toISOString(), action: input.action, reason: detail, page: progress.currentPage || "", taskSpaceId: failureTaskSpaceId || undefined, decisionId: recordedSafetyStop?.decisionId })
+    delete progress.pendingSaveAttempt
     await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-    await appendLog(workspace, "cua", "已记录 CUA 失败：" + detail)
+    await appendLog(workspace, "cua", "已记录 CUA 失败：" + detail + (recordedSafetyStop ? "；已写入 browser safetyStop decisionId=" + recordedSafetyStop.decisionId : ""))
+    if (recordedSafetyStop) {
+      const message = recordedSafetyStop.kind === "cleanup_failed"
+        ? "浏览器 task space 已标记为污染。CUA 与 wrapper 已阻断后续浏览器动作；只能由顾问点击“重新填写”。"
+        : "浏览器已进入 alert 证据丢失硬停止。CUA 与 wrapper 已阻断后续动作；请顾问在桌面授权继续或重新填写。"
+      await saveTask(workspace, task, "异常中断", message)
+      await appendAudit(workspace, "cua", auditAction, "failed", detail + " safetyStop=" + recordedSafetyStop.decisionId)
+      return browserSafetyMarker(recordedSafetyStop.kind) + ": safety stop recorded for taskSpaceId " + recordedSafetyStop.taskSpaceId + " decisionId " + recordedSafetyStop.decisionId + ". " + message
+    }
     if (browserServiceBlocked) {
       const externalService = /TERRA_EGO_BROWSER_(?:VERSION_CONFLICT|EXTERNAL_SERVICE_ACTIVE)/.test(detail)
       const message = externalService
@@ -3017,6 +4316,17 @@ function crc32(buffer: Buffer) {
 
 export async function writeOpenCodeConfig(workspacePath: string, overrides?: OpenCodeResourceOverrides) {
   const base = join(workspacePath, ".opencode")
+  // OpenCode routes write/edit/patch through permission.edit. These files are
+  // authoritative tool/UI state, so the ordinary Agent may read but not forge them.
+  const authoritativeStateEditPermissions = {
+    ".opencode/**": "deny",
+    "03_state/application_progress.json": "deny",
+    "03_state/task_state.json": "deny",
+    "03_state/task_control.json": "deny",
+    "03_state/agent_execution_audit.json": "deny",
+    "03_state/material_review.json": "deny",
+    "03_state/task_input.json": "deny",
+  }
   const sharedReadPattern = overrides?.sharedWorkspacePath && existsSync(overrides.sharedWorkspacePath)
     ? relative(workspacePath, overrides.sharedWorkspacePath).replaceAll("\\", "/") + "/**"
     : ""
@@ -3047,6 +4357,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
       },
       edit: {
         "*": "allow",
+        ...authoritativeStateEditPermissions,
         "../*": "deny",
       },
       external_directory: {
@@ -3062,8 +4373,6 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
       bash: {
         "*": "deny",
         "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs*": "allow",
-        "ego-browser nodejs*": "allow",
-        "*>*": "deny",
       },
       "cua_final_submit": "deny",
       "cua_payment": "deny",
@@ -3085,6 +4394,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
         },
         edit: {
           "*": "allow",
+          ...authoritativeStateEditPermissions,
           "../*": "deny",
           ...(sharedReadPattern ? { [sharedReadPattern]: "deny" } : {}),
         },
@@ -3096,8 +4406,6 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
         bash: {
           "*": "deny",
           "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs*": "allow",
-          "ego-browser nodejs*": "allow",
-          "*>*": "deny",
         },
         question: "allow",
         skill: { "*": "allow" },
@@ -3128,6 +4436,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
               "03_state/missing_items.json": "allow",
               "03_state/material_review.json": "allow",
               "03_state/application_progress.json": "allow",
+              "05_screenshots/**": "allow",
               "06_new_materials/**": "allow",
               ...(sharedReadPattern ? { [sharedReadPattern]: "allow" } : {}),
               "*.env": "deny",
@@ -3156,8 +4465,6 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
           bash: {
             "*": "deny",
             "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs*": "allow",
-            "ego-browser nodejs*": "allow",
-            "*>*": "deny",
           },
           question: "allow",
           task: "deny",
@@ -3207,7 +4514,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
     `---
 description: Terra-Edu 留学申请 Agent，服务留学顾问完成申请资料整理、缺失项识别、Word 清单和 ego-browser 填表。
 mode: primary
-model: opencode-go/deepseek-v4-pro
+model: ${APPLICATION_AGENT_MODEL}
 permission:
   "*": allow
   read:
@@ -3217,6 +4524,13 @@ permission:
     "*.env.example": allow
 ${sharedReadPattern ? `    "${sharedReadPattern}": allow\n` : ""}  edit:
     "*": allow
+    ".opencode/**": deny
+    "03_state/application_progress.json": deny
+    "03_state/task_state.json": deny
+    "03_state/task_control.json": deny
+    "03_state/agent_execution_audit.json": deny
+    "03_state/material_review.json": deny
+    "03_state/task_input.json": deny
     "../*": deny
 ${sharedReadPattern ? `    "${sharedReadPattern}": deny\n` : ""}  external_directory:
     "*": deny
@@ -3225,8 +4539,6 @@ ${sharedExternalPattern ? `    "${sharedExternalPattern}": allow\n` : ""}  glob:
   bash:
     "*": deny
     'PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs*': allow
-    "ego-browser nodejs*": allow
-    "*>*": deny
   question: allow
   skill:
     "*": allow
@@ -3243,7 +4555,7 @@ ${DEFAULT_APPLICATION_PROMPT}
     `---
 description: Terra-Edu 重新填写 Agent，只读复用已确认材料与档案，在全新对话和独立 Ego task space 中重新填表。
 mode: primary
-model: opencode-go/deepseek-v4-pro
+model: ${APPLICATION_AGENT_MODEL}
 permission:
   "*": allow
   read:
@@ -3261,6 +4573,7 @@ permission:
     "03_state/missing_items.json": allow
     "03_state/material_review.json": allow
     "03_state/application_progress.json": allow
+    "05_screenshots/**": allow
     "06_new_materials/**": allow
 ${sharedReadPattern ? `    "${sharedReadPattern}": allow\n` : ""}    "*.env": deny
     "*.env.*": deny
@@ -3284,8 +4597,6 @@ ${sharedReadPattern ? `    "${sharedReadPattern}": deny\n` : ""}  external_direc
 ${sharedExternalPattern ? `    "${sharedExternalPattern}": allow\n` : ""}  bash:
     "*": deny
     'PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs*': allow
-    "ego-browser nodejs*": allow
-    "*>*": deny
   question: allow
   task: deny
   skill:
@@ -3321,7 +4632,7 @@ ${DEFAULT_APPLICATION_REFILL_PROMPT}
     await mkdir(dir, { recursive: true })
     await writeGeneratedFile(join(dir, "SKILL.md"), renderSkill(skill))
   }
-  await writeEgoBrowserSkill(base)
+  await writeEgoBrowserSkill(base, overrides)
   await writeEgoBrowserWrapper(base, overrides)
   await writeTerraPaddleOcrWrapper(base)
   for (const command of COMMAND_DEFINITIONS) {

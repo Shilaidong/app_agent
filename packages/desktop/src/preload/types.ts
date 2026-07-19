@@ -111,6 +111,17 @@ export type ApplicationTaskStatus =
   | "阶段性完成"
   | "异常中断"
 
+export type BrowserSafetyStopSummary = {
+  kind: "cleanup_failed" | "alert_evidence_lost"
+  taskSpaceId: string
+  active: boolean
+  decisionId: string
+  recordedAt: string
+  observationRequired?: boolean
+  resolution?: string
+  resumeAuthorizedAt?: string
+}
+
 export type ApplicationTask = {
   id: string
   slug: string
@@ -138,6 +149,7 @@ export type ApplicationTask = {
   }>
   reusedExisting?: boolean
   sharedDossierStatus?: "preparing" | "prepared" | "ready"
+  browserSafetyStop?: BrowserSafetyStopSummary
 }
 
 export type ApplicationMaterialReviewInput = {
@@ -293,6 +305,10 @@ export type ElectronAPI = {
   continueApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   pauseApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   resumeApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
+  authorizeBrowserSafetyContinue: (
+    workspacePath: string,
+    input: { decisionId: string; taskSpaceId: string },
+  ) => Promise<ApplicationTask>
   submitApplicationMaterialReview: (workspacePath: string, input: ApplicationMaterialReviewInput) => Promise<ApplicationTask>
   blockHighRiskAction: (workspacePath: string, action: string) => Promise<ApplicationTask>
   getApplicationPlatformAccount: (applicationUrl: string) => Promise<ApplicationPlatformAccount | null>

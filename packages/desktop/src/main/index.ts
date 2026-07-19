@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { existsSync, mkdirSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs"
 import * as http from "node:http"
 import { createServer } from "node:net"
 import { homedir, tmpdir } from "node:os"
@@ -90,7 +90,7 @@ async function runPackageSmokeConfigProbe() {
 
   const workspace = resolve(process.env.TERRA_EDU_PACKAGE_SMOKE_WORKSPACE || "")
   const runtimeRoot = resolve(process.env.TERRA_EDU_PACKAGE_SMOKE_RUNTIME_ROOT || "")
-  const temporaryRoot = resolve(tmpdir())
+  const temporaryRoot = realpathSync(tmpdir())
   if (
     !runtimeRoot.startsWith(join(temporaryRoot, "terra-edu-direct-dialog-runtime-")) ||
     dirname(workspace) !== runtimeRoot ||
@@ -99,7 +99,10 @@ async function runPackageSmokeConfigProbe() {
     throw new Error("The package smoke config probe accepts only its isolated temporary workspace.")
   }
 
-  await writeOpenCodeConfig(workspace, { egoRuntimeRoot: runtimeRoot })
+  await writeOpenCodeConfig(workspace, {
+    egoRuntimeRoot: runtimeRoot,
+    egoBrowserSingleLaunchSentinel: join(runtimeRoot, "single-launch.claim"),
+  })
   process.stdout.write("TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN\n")
 }
 

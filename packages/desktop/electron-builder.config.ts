@@ -53,6 +53,7 @@ async function signBundledTerraTools(app: string) {
   const resources = path.join(app, "Contents/Resources/vendor")
   const ripgrep = path.join(resources, "ripgrep/rg")
   if (!existsSync(ripgrep)) throw new Error(`Missing bundled Terra-Edu tool: ${ripgrep}`)
+  if ((statSync(ripgrep).mode & 0o111) === 0) throw new Error(`Bundled Terra-Edu tool is not executable: ${ripgrep}`)
   await adHocSign(ripgrep)
   const paddleOcr = path.join(resources, "terra-paddleocr")
   const files = walkFiles(paddleOcr)

@@ -21,6 +21,7 @@ import type {
   WslConfig,
 } from "../preload/types"
 import {
+  authorizeBrowserSafetyContinue,
   blockHighRiskAction,
   continueApplicationTask,
   createApplicationTask,
@@ -307,6 +308,14 @@ export function registerIpcHandlers(deps: Deps) {
   )
   ipcMain.handle("application-agent:resume-task", (_event: IpcMainInvokeEvent, workspacePath: string) =>
     resumeApplicationTask(workspacePath),
+  )
+  ipcMain.handle(
+    "application-agent:authorize-browser-safety-continue",
+    (
+      _event: IpcMainInvokeEvent,
+      workspacePath: string,
+      input: { decisionId: string; taskSpaceId: string },
+    ) => authorizeBrowserSafetyContinue(workspacePath, input),
   )
   ipcMain.handle(
     "application-agent:submit-material-review",

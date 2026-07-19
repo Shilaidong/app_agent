@@ -983,6 +983,40 @@ function ApplicationAgentShell(props: {
     setShowRefillConfirmation(false)
   }
 
+  const authorizeBrowserSafetyContinue = async () => {
+    const current = task()
+    const stop = current?.browserSafetyStop
+    if (!current || !stop || stop.kind !== "alert_evidence_lost" || !stop.active) return
+    setBusy(true)
+    setError(null)
+    try {
+      const updated = await window.api.authorizeBrowserSafetyContinue(current.workspacePath, {
+        decisionId: stop.decisionId,
+        taskSpaceId: stop.taskSpaceId,
+      })
+      setTask(updated)
+      setRestoreNotice("已授权在当前浏览器空间继续。Agent 下一回合只能先观察页面，不得直接填写或保存。")
+      if (opencodeSession()) {
+        await window.api.sendApplicationAgentPrompt(
+          opencodeSession()!,
+          [
+            "顾问已在桌面授权 alert_evidence_lost 同空间继续。",
+            "先读取 03_state/application_progress.json 中的 egoBrowser.safetyStop：应已 active=false 且 observationRequired=true，decisionId 与 taskSpaceId 保持不变。",
+            "不要调用 resolve_browser_safety_stop 伪造确认，也不要传 consultantConfirmed:true 试图解锁。",
+            "下一独立 heredoc 只能复用同一 taskSpaceId 做 pageInfo/list/snapshot 观察；然后调用 record_observation。",
+            "在首次 record_observation 成功前，禁止填写、保存、complete、takeOver 或导航。",
+            "若顾问选择重新填写，走桌面“重新填写”正式链路，不要静默新建空间。",
+          ].join("\n"),
+        )
+      }
+      await loadApplicationTasks()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const startRefillSession = async () => {
     const current = task()
     if (!current) return
@@ -1056,7 +1090,8 @@ function ApplicationAgentShell(props: {
             opencodeSession()!,
             [
               "顾问已明确点击继续任务。先读取 task_control.json、task_state.json、application_progress.json 和 agent_execution_audit.json；不要依据旧聊天内容猜测浏览器控制权。",
-              "仅当 application_progress.json 中 egoBrowser.handoffPending 为 true，或旧记录存在 handoffAt 且 handoffPending 未明确为 false、并且保存的是可信数值 taskSpaceId 时，才调用 application-agent_cua：action=resume_ego、taskSpaceId=保存的 ID、consultantConfirmed=true。不得在调用成功前运行 ego-browser。",
+              "继续任务只清除普通暂停 paused，绝不会清除 egoBrowser.safetyStop。若 safetyStop.active 为 true，或 observationRequired 为 true，必须遵守该硬停止，不得 resume/takeOver/填写/保存。",
+              "仅当 application_progress.json 中 egoBrowser.handoffPending 为 true，或旧记录存在 handoffAt 且 handoffPending 未明确为 false、并且保存的是可信数值 taskSpaceId，且没有 active safetyStop 时，才调用 application-agent_cua：action=resume_ego、taskSpaceId=保存的 ID、consultantConfirmed=true。不得在调用成功前运行 ego-browser。",
               "resume_ego 成功后，严格按其返回指令执行：新的 heredoc 只能 takeOverTaskSpace(保存的数值 ID) 后 pageInfo() 观察；这一观察回合不得填写、导航、保存、关闭或处理未知弹窗。",
               "若没有上述已审计的待恢复交接，绝不调用 resume_ego 或 takeOverTaskSpace。改为调用 prepare_ego_task：它会对缺失或非数值的旧 taskSpaceId 先列出 listTaskSpaces 并用 OpenCode question 请求顾问确认；正常 agent ownership 空间也必须先重新观察。遇到 user controlling、inactive 或不明确弹窗时继续交接，不得自动抢占。",
             ].join("\n"),
@@ -1716,6 +1751,41 @@ function ApplicationAgentShell(props: {
                         {busy() ? "正在创建干净会话..." : "确认重新填写"}
                       </button>
                       <button type="button" disabled={busy()} onClick={cancelRefillConfirmation}>取消</button>
+                    </div>
+                  </section>
+                </Show>
+                <Show when={currentTask().browserSafetyStop?.active || currentTask().browserSafetyStop?.observationRequired}>
+                  <section class="material-review-gate" aria-live="polite">
+                    <div class="material-review-heading">
+                      <p>浏览器安全停止</p>
+                      <h2>
+                        {currentTask().browserSafetyStop?.kind === "cleanup_failed"
+                          ? "当前 task space 已污染"
+                          : currentTask().browserSafetyStop?.observationRequired
+                            ? "请先观察当前页面"
+                            : "弹窗证据可能丢失"}
+                      </h2>
+                      <span>
+                        {currentTask().browserSafetyStop?.kind === "cleanup_failed"
+                          ? "注入清理失败，当前浏览器空间不可继续使用。只能点击“重新填写”创建全新空间；普通“继续任务”不能解除。"
+                          : currentTask().browserSafetyStop?.observationRequired
+                            ? "顾问已授权同空间继续。Agent 下一回合只能观察，首次观察成功前不能填写或保存。"
+                            : "iframe load-time alert 文字可能丢失。可在查看页面后继续当前空间，或重新填写；不能仅凭模型确认绕过。"}
+                      </span>
+                    </div>
+                    <div class="material-review-summary">
+                      <span>taskSpaceId {currentTask().browserSafetyStop?.taskSpaceId}</span>
+                      <span>decisionId {currentTask().browserSafetyStop?.decisionId}</span>
+                    </div>
+                    <div class="material-review-buttons">
+                      <Show when={currentTask().browserSafetyStop?.kind === "alert_evidence_lost" && currentTask().browserSafetyStop?.active}>
+                        <button type="button" class="primary-action" disabled={busy()} onClick={() => void authorizeBrowserSafetyContinue()}>
+                          查看后继续当前空间
+                        </button>
+                      </Show>
+                      <button type="button" class="refill-action" disabled={busy() || showRefillConfirmation()} onClick={openRefillConfirmation}>
+                        重新填写（新建浏览器空间）
+                      </button>
                     </div>
                   </section>
                 </Show>

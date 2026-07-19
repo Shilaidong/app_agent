@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
+import { readEgoRuntimeLock, verifyEgoRuntime } from "../packages/desktop/scripts/ego-runtime-lock"
 
 const root = process.cwd()
 const expectedBun = "1.3.14"
-const expectedEgoLite = "0.4.2.15"
 
 type Status = "ok" | "warn" | "fail"
 
@@ -38,16 +38,6 @@ function hasDir(path: string) {
 
 function read(path: string) {
   return hasFile(path) ? readFileSync(path, "utf8") : ""
-}
-
-function listFiles(path: string): string[] {
-  if (!hasDir(path)) return []
-  return readdirSync(path, { withFileTypes: true }).flatMap((entry) => {
-    const full = join(path, entry.name)
-    if (entry.isDirectory()) return listFiles(full)
-    if (entry.isFile()) return [full]
-    return []
-  })
 }
 
 function checkBun() {
@@ -133,53 +123,18 @@ function checkPrivateRuntimeConfig() {
   )
 }
 
-function checkEgoLiteRuntime() {
-  const app = join(root, "packages/desktop/resources/vendor/ego-lite/ego lite.app")
-  const info = join(app, "Contents/Info.plist")
-  const contents = join(app, "Contents")
-  const files = listFiles(contents)
-  const updaterPattern = /EgoUpdater\.app|EgoSoftwareUpdate\.bundle|\/ksadmin$|\/ksinstall$/
-
-  addCheck(
-    hasDir(app),
-    "bundled ego lite",
-    "Expected packages/desktop/resources/vendor/ego-lite/ego lite.app.",
-    "fail",
-    "ego lite.app present.",
-  )
-  addCheck(
-    read(info).includes(expectedEgoLite),
-    "ego lite version",
-    `Expected ${expectedEgoLite}.`,
-    "fail",
-    expectedEgoLite,
-  )
-  addCheck(
-    !read(info).includes("KSUpdateURL"),
-    "ego lite update feed",
-    "KSUpdateURL must not be present.",
-    "fail",
-    "No update feed found.",
-  )
-  addCheck(
-    !files.some((file) => updaterPattern.test(file)),
-    "ego lite updater components",
-    "Updater components must be removed.",
-    "fail",
-    "No updater components found.",
-  )
-  addCheck(
-    files.some((file) => file.endsWith("/ego-browser") && statSync(file).mode & 0o111),
-    "ego-browser helper",
-    "Executable helper must exist in the bundled app.",
-    "fail",
-    "Executable helper present.",
-  )
+async function checkEgoLiteRuntime() {
+  try {
+    const lock = await readEgoRuntimeLock()
+    await verifyEgoRuntime(undefined, lock)
+    add("ok", "bundled ego runtime lock", `ego-lite ${lock.version}; identity, Current, helper/Skill hashes, and disabled updater payload match the lock.`)
+  } catch (error) {
+    add("fail", "bundled ego runtime lock", error instanceof Error ? error.message : String(error))
+  }
 }
 
 function checkApplicationAgentContracts() {
   const source = read(join(root, "packages/desktop/src/main/application-agent-opencode.ts"))
-  const skill = read(join(root, "packages/desktop/resources/ego-browser/SKILL.md"))
   const builder = read(join(root, "packages/desktop/electron-builder.config.ts"))
 
   addCheck(
@@ -188,9 +143,9 @@ function checkApplicationAgentContracts() {
     "Workspaces must generate .opencode/bin/ego-browser.",
   )
   addCheck(
-    skill.includes('PATH="$PWD/.opencode/bin:$PATH" ego-browser'),
+    source.includes('PATH="$PWD/.opencode/bin:$PATH" ego-browser'),
     "ego-browser skill wrapper",
-    "Skill must use the Terra wrapper.",
+    "Generated Skill policy must use the Terra wrapper.",
   )
   addCheck(
     builder.includes("resources/vendor/ego-lite/"),
@@ -225,6 +180,6 @@ checkBun()
 checkPackageFiles()
 checkGit()
 checkPrivateRuntimeConfig()
-checkEgoLiteRuntime()
+await checkEgoLiteRuntime()
 checkApplicationAgentContracts()
 printResults()

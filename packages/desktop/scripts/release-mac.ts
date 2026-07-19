@@ -11,6 +11,7 @@ const electronBuilderCache = join(process.cwd(), ".cache", "electron-builder")
 const dmg = join(process.cwd(), "dist", "terra-edu-application-agent-mac-arm64.dmg")
 const dmgBlockmap = `${dmg}.blockmap`
 const zip = join(process.cwd(), "dist", "terra-edu-application-agent-mac-arm64.zip")
+const zipBlockmap = `${zip}.blockmap`
 
 console.log("Preparing Terra-Edu Application Agent macOS customer release...")
 console.log("Signing/notarization: free ad-hoc build. macOS may ask the customer to manually allow first launch.")
@@ -20,14 +21,16 @@ mkdirSync(electronBuilderCache, { recursive: true })
 const dmgAvailable = await canCreateDmg()
 
 await $`bun test`
-await $`bun test --timeout 30000 test/tool/read.test.ts`.cwd(opencodeDir)
+await $`bun test --timeout 30000 test/provider/bundled-qwen-catalog.test.ts test/tool/read.test.ts`.cwd(opencodeDir)
 await $`bun typecheck`.cwd(opencodeDir)
-await $`bun verify:application-agent`
-await $`bun verify:application-agent:e2e`
+await $`/usr/bin/env -u APPLICATION_AGENT_WORKSPACE bun verify:application-agent`
+await $`/usr/bin/env -u APPLICATION_AGENT_WORKSPACE bun verify:application-agent:e2e`
 await $`bun typecheck`
 await $`OPENCODE_CHANNEL=prod bun run build`
 if (existsSync(dmg)) unlinkSync(dmg)
 if (existsSync(dmgBlockmap)) unlinkSync(dmgBlockmap)
+if (existsSync(zip)) unlinkSync(zip)
+if (existsSync(zipBlockmap)) unlinkSync(zipBlockmap)
 await $`ELECTRON_BUILDER_CACHE=${electronBuilderCache} OPENCODE_CHANNEL=prod TERRA_EDU_MAC_TARGET=zip bun run package:mac`
 if (dmgAvailable) {
   await createDmgFromVerifiedApp()
@@ -57,7 +60,7 @@ writeFileSync(
     "- TypeScript typecheck passed.",
     "- Electron production build passed.",
     dmgAvailable ? "- macOS DMG and ZIP package build passed." : "- macOS ZIP package build passed; DMG build was skipped after hdiutil capability probing failed.",
-    "- Final ZIP resources, signatures, bundled ego lite/PaddleOCR, updater suppression, retired guard exclusion, and packaged Ego dialog smoke passed.",
+    "- Final ZIP resources, signatures, bundled ego lite/PaddleOCR, updater suppression, and packaged direct Ego dialog smoke passed.",
     dmgAvailable
       ? "- Final DMG bundle identity, version, critical resources, deep signatures, and app.asar parity passed after a read-only mount."
       : "- DMG verification was not required for this ZIP-only fallback release.",

@@ -1,12 +1,33 @@
-import { existsSync, realpathSync } from "node:fs"
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import egoRuntimeLock from "../resources/ego-runtime.lock.json"
 
 const app = process.argv[2] ? resolve(process.argv[2]) : undefined
 const marker = `terra-edu-direct-dialog-${process.pid}-${Date.now()}`
 const taskSpaceName = `Terra-Edu direct dialog smoke ${marker}`
+const diagnosticReports = join(process.env.HOME || "", "Library/Logs/DiagnosticReports")
+
+function egoCrashReports() {
+  if (!existsSync(diagnosticReports)) return new Map<string, string>()
+  return new Map(
+    [diagnosticReports, join(diagnosticReports, "Retired")]
+      .filter((directory) => existsSync(directory))
+      .flatMap((directory) =>
+        readdirSync(directory)
+          .filter((name) => /^ego (?:lite|helper).*\.ips$/i.test(name))
+          .map((name) => {
+            const report = statSync(join(directory, name))
+            const key = directory === diagnosticReports ? name : `Retired/${name}`
+            return [key, `${report.mtimeMs}:${report.size}`] as const
+          }),
+      ),
+  )
+}
+
+const crashReportsBefore = egoCrashReports()
 
 function fail(message: string): never {
   throw new Error(`GUI dialog smoke is required for distribution readiness: ${message}`)
@@ -25,18 +46,33 @@ if (appExecutableName.status !== 0 || !appExecutableName.stdout.trim()) {
 }
 const appExecutable = join(app, "Contents/MacOS", appExecutableName.stdout.trim())
 if (!existsSync(appExecutable)) fail("packaged CFBundleExecutable is missing")
+if (existsSync(join(app, "Contents/Resources/vendor/terra-dialog-guard"))) {
+  fail("stale packaged application still contains the retired terra-dialog-guard")
+}
+const packagedAsar = join(app, "Contents/Resources/app.asar")
+if (!existsSync(packagedAsar)) fail("packaged app.asar is missing")
+if (Buffer.from(await Bun.file(packagedAsar).arrayBuffer()).includes(Buffer.from("terra-dialog-guard"))) {
+  fail("stale packaged app.asar still references the retired terra-dialog-guard")
+}
 
 const sourceEgoLite = join(app, "Contents/Resources/vendor/ego-lite/ego lite.app")
-const expectedEgoVersion = "0.4.4.15"
-const runtimeRoot = await mkdtemp(join(tmpdir(), "terra-edu-direct-dialog-runtime-"))
+const expectedEgoVersion = egoRuntimeLock.version
+const suppliedRuntimeRoot = process.env.TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT ? resolve(process.env.TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT) : undefined
+if (suppliedRuntimeRoot && (!existsSync(suppliedRuntimeRoot) || !statSync(suppliedRuntimeRoot).isDirectory())) {
+  fail("TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT must name an existing directory")
+}
+const ownsRuntimeRoot = !suppliedRuntimeRoot
+const runtimeRoot = realpathSync(suppliedRuntimeRoot || await mkdtemp(join(tmpdir(), "terra-edu-direct-dialog-runtime-")))
+if (suppliedRuntimeRoot && suppliedRuntimeRoot !== runtimeRoot) fail("TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT must be a canonical path")
 const egoLite = join(runtimeRoot, "ego lite.app")
 const fixedEgoHome = join(runtimeRoot, "home")
 const fixedEgoConfigDirectory = join(fixedEgoHome, "Library/Application Support/Citro Labs/ego lite")
 const helper = join(egoLite, `Contents/Frameworks/ego Framework.framework/Versions/${expectedEgoVersion}/Helpers/ego-browser`)
 const directory = join(runtimeRoot, "workspace")
+const singleLaunchClaim = join(runtimeRoot, "single-launch.claim")
 
 async function failAfterRuntimeSetup(message: string): Promise<never> {
-  await rm(runtimeRoot, { recursive: true, force: true })
+  if (ownsRuntimeRoot) await rm(runtimeRoot, { recursive: true, force: true })
   fail(message)
 }
 
@@ -53,7 +89,11 @@ function pids(pattern: string) {
 }
 
 function bundledAppPids() {
-  return pids(`${egoLite}/Contents/MacOS/`)
+  return pids(`${egoLite.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/Contents/MacOS/`)
+}
+
+function bundledRuntimePids() {
+  return pids(`${egoLite.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/Contents/`)
 }
 
 function egoAppPids() {
@@ -69,7 +109,8 @@ function hasEgoBrowserService() {
 }
 
 const existingBundledAppPids = bundledAppPids()
-if (existingBundledAppPids.size > 0 || egoAppPids().size > 0 || hasEgoBrowserService()) {
+const existingBundledRuntimePids = bundledRuntimePids()
+if (existingBundledAppPids.size > 0 || existingBundledRuntimePids.size > 0 || egoAppPids().size > 0 || hasEgoBrowserService()) {
   fail(
     "TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE: another Ego Lite browser service is active. The smoke test will not use, close, or replace it; close the other Ego Lite app before retrying this release check.",
   )
@@ -81,19 +122,10 @@ const sourceSignature = spawnSync("codesign", ["--verify", "--deep", "--strict",
 })
 if (sourceSignature.status !== 0) fail(`packaged Ego Lite source signature is invalid: ${sourceSignature.stderr || sourceSignature.error?.message || "unknown error"}`)
 
-const copy = spawnSync("ditto", [sourceEgoLite, egoLite], { encoding: "utf8", timeout: 120_000 })
-if (copy.status !== 0) fail(`could not prepare isolated Ego Lite runtime: ${copy.stderr || copy.error?.message || "unknown error"}`)
-if (!existsSync(helper)) fail("isolated Ego Lite helper is missing")
-
-const runtimeSignature = spawnSync("codesign", ["--verify", "--deep", "--strict", egoLite], {
-  encoding: "utf8",
-  timeout: 30_000,
-})
-if (runtimeSignature.status !== 0) fail(`isolated Ego Lite signature is invalid: ${runtimeSignature.stderr || runtimeSignature.error?.message || "unknown error"}`)
-
-await mkdir(fixedEgoConfigDirectory, { recursive: true })
-await writeFile(join(fixedEgoConfigDirectory, "ego_config.json"), JSON.stringify({ not_first_run: true }) + "\n", { flag: "wx", mode: 0o600 })
-await mkdir(join(directory, "03_state"), { recursive: true })
+await Promise.all([
+  mkdir(join(directory, "03_state"), { recursive: true }),
+  mkdir(join(directory, "05_screenshots"), { recursive: true }),
+])
 await Promise.all([
   writeFile(join(directory, "03_state/material_review.json"), JSON.stringify({ status: "approved", mode: "skip" }, null, 2) + "\n"),
   writeFile(join(directory, "03_state/task_control.json"), JSON.stringify({ paused: false }, null, 2) + "\n"),
@@ -102,6 +134,7 @@ const packageConfigProbe = spawnSync(appExecutable, ["--terra-package-smoke-writ
   encoding: "utf8",
   env: {
     ...process.env,
+    HOME: fixedEgoHome,
     CFFIXED_USER_HOME: fixedEgoHome,
     TERRA_EDU_PACKAGE_SMOKE_WORKSPACE: directory,
     TERRA_EDU_PACKAGE_SMOKE_RUNTIME_ROOT: runtimeRoot,
@@ -124,9 +157,11 @@ if (
   !packagedWrapper.includes("APP_PATH=") ||
   !packagedWrapper.includes(sourceEgoLite) ||
   !packagedWrapper.includes("RUNTIME_ROOT=") ||
-  !packagedWrapper.includes(runtimeRoot)
+  !packagedWrapper.includes(runtimeRoot) ||
+  !packagedWrapper.includes("SINGLE_LAUNCH_SENTINEL=") ||
+  !packagedWrapper.includes(singleLaunchClaim)
 ) {
-  await failAfterRuntimeSetup("packaged config probe generated a wrapper for the wrong app or runtime root")
+  await failAfterRuntimeSetup("packaged config probe generated a wrapper for the wrong app, runtime root, or single-launch claim")
 }
 const packagedEgoSkill = await Bun.file(join(directory, ".opencode/skills/ego-browser/SKILL.md")).text()
 const canonicalObserver = packagedEgoSkill.match(
@@ -143,22 +178,44 @@ if (
 ) {
   await failAfterRuntimeSetup("packaged ego-browser skill does not contain the required bounded observePageAction protocol")
 }
-
-const launch = spawnSync(
-  "open",
-  ["-n", "-gj", "--env", `CFFIXED_USER_HOME=${fixedEgoHome}`, egoLite, "--args", "--no-default-browser-check", "--no-first-run"],
-  { encoding: "utf8", timeout: 15_000 },
+const canonicalInitialNavigation = packagedEgoSkill.match(
+  /```js\r?\n(async function navigateInitialPageCapturingAlerts[\s\S]*?\r?\n})\r?\n```/,
 )
-if (launch.status !== 0) fail(`could not launch isolated Ego Lite runtime: ${launch.stderr || launch.error?.message || "unknown error"}`)
+if (!canonicalInitialNavigation) await failAfterRuntimeSetup("packaged ego-browser skill is missing its canonical initial-navigation alert capture")
+const navigateInitialPageCapturingAlerts = canonicalInitialNavigation[1]
+if (
+  !navigateInitialPageCapturingAlerts.includes("Page.addScriptToEvaluateOnNewDocument") ||
+  !navigateInitialPageCapturingAlerts.includes("Runtime.addBinding") ||
+  !navigateInitialPageCapturingAlerts.includes("globalThis.alert=wrapped") ||
+  navigateInitialPageCapturingAlerts.includes("globalThis.confirm=") ||
+  navigateInitialPageCapturingAlerts.includes("globalThis.prompt=")
+) {
+  await failAfterRuntimeSetup("packaged initial navigation must capture only information-only alerts through direct Ego CDP")
+}
 
 async function stopSmokeLaunchedApps() {
-  const launchedPids = () => [...bundledAppPids()].filter((pid) => !existingBundledAppPids.has(pid))
-  for (const pid of launchedPids()) spawnSync("/bin/kill", ["-TERM", String(pid)], { encoding: "utf8" })
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    if (launchedPids().length === 0) return
-    await Bun.sleep(1_000)
+  const launchedPids = () => [...bundledRuntimePids()].filter((pid) => !existingBundledRuntimePids.has(pid))
+  // Ego 0.4.4.15 can crash while gracefully tearing down an NSWindow that has
+  // hosted native dialogs. Kill only the exact disposable runtime processes so
+  // cleanup cannot enter that vendor window-close path or touch an external Ego.
+  let emptyScans = 0
+  for (let attempt = 1; attempt <= 24; attempt++) {
+    for (const pid of launchedPids()) spawnSync("/bin/kill", ["-KILL", String(pid)], { encoding: "utf8" })
+    await Bun.sleep(250)
+    const remaining = launchedPids()
+    emptyScans = remaining.length === 0 ? emptyScans + 1 : 0
+    if (emptyScans >= 3) return []
   }
-  for (const pid of launchedPids()) spawnSync("/bin/kill", ["-KILL", String(pid)], { encoding: "utf8" })
+  return launchedPids()
+}
+
+async function newEgoCrashReports() {
+  for (let attempt = 1; attempt <= 20; attempt++) {
+    const reports = [...egoCrashReports()].filter(([name, fingerprint]) => crashReportsBefore.get(name) !== fingerprint).map(([name]) => name)
+    if (reports.length > 0 || attempt === 20) return reports
+    await Bun.sleep(500)
+  }
+  return []
 }
 
 async function waitForBundledApp() {
@@ -178,27 +235,101 @@ async function waitForBundledService() {
     })
     if (result.status === 0) return
     if (result.status === 255) fail("TERRA_EGO_BROWSER_VERSION_CONFLICT: an incompatible Ego Lite service is active.")
-    if (result.status !== 252) fail(`bundled Ego readiness failed with exit ${result.status ?? "unknown"}: ${result.stderr || result.stdout || result.error?.message || "no output"}`)
     if (attempt < 15) await Bun.sleep(1_000)
+    if (attempt === 15) {
+      fail(`TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: packaged Ego Lite did not become ready within 15 seconds (last exit ${result.status ?? "unknown"}): ${result.stderr || result.stdout || result.error?.message || "no output"}`)
+    }
   }
-  fail("TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: packaged Ego Lite did not become ready within 15 seconds.")
+}
+
+let originalMainPid: number | undefined
+
+function requireOriginalMainProcess(label: string, phase: "before" | "after") {
+  if (originalMainPid && !bundledAppPids().has(originalMainPid)) {
+    fail(`${label} ${phase} check found that original Ego main PID ${originalMainPid} was replaced or terminated`)
+  }
 }
 
 function runWrapperRound(label: string, source: string) {
+  requireOriginalMainProcess(label, "before")
+  console.log(`[dialog smoke] ${label}...`)
   const wrapper = join(directory, ".opencode/bin/ego-browser")
   const result = spawnSync(wrapper, ["nodejs"], {
     cwd: directory,
     encoding: "utf8",
-    env: { ...process.env, CFFIXED_USER_HOME: fixedEgoHome },
+    env: { ...process.env, HOME: fixedEgoHome, CFFIXED_USER_HOME: fixedEgoHome },
     input: source,
     timeout: 60_000,
   })
   const output = `${result.stdout}${result.stderr}`
+  requireOriginalMainProcess(label, "after")
   if (result.status !== 0) {
     fail(`${label} failed (exit ${result.status ?? "unknown"}${result.signal ? `, signal ${result.signal}` : ""}): ${output || result.error?.message || "no output"}`)
   }
+  output.split(/\r?\n/).filter((line) => line.startsWith("TERRA_")).forEach((line) => console.log(line))
+  console.log(`[dialog smoke] ${label} passed`)
   return output
 }
+
+const requireCdpPostEvidence = String.raw`
+function requireCdpPostEvidence(events, expectation) {
+  if (!Array.isArray(events)) throw new Error(expectation.label + ' drainEvents result was not a real CDP event array: ' + JSON.stringify(events))
+  const requests = events.filter((event) => event && event.method === 'Network.requestWillBeSent' && event.params && event.params.request)
+  const request = requests.find((event) => event.params.request.method === 'POST' && event.params.request.url === expectation.requestUrl)
+  if (!request) throw new Error(expectation.label + ' did not emit the expected POST request: ' + JSON.stringify(requests.map((event) => ({ method: event.params.request.method, url: event.params.request.url }))))
+  const response = events.find((event) =>
+    event &&
+    event.method === 'Network.responseReceived' &&
+    event.params &&
+    event.params.requestId === request.params.requestId &&
+    event.params.response &&
+    event.params.response.url === expectation.responseUrl
+  )
+  if (!response) throw new Error(expectation.label + ' did not emit a joined responseReceived event for requestId ' + request.params.requestId)
+  const fields = [
+    ['request.requestId', request.params.requestId],
+    ['request.frameId', request.params.frameId],
+    ['request.loaderId', request.params.loaderId],
+    ['response.requestId', response.params.requestId],
+    ['response.frameId', response.params.frameId],
+    ['response.loaderId', response.params.loaderId],
+  ]
+  const missing = fields.filter((entry) => typeof entry[1] !== 'string' || !entry[1]).map((entry) => entry[0])
+  if (missing.length > 0) throw new Error(expectation.label + ' CDP event shape was missing real identifiers: ' + missing.join(', '))
+  if (response.params.response.status !== 200) throw new Error(expectation.label + ' response status was not 200: ' + response.params.response.status)
+  if (String(request.params.type).toLowerCase() !== expectation.resourceType || String(response.params.type).toLowerCase() !== expectation.resourceType) {
+    throw new Error(expectation.label + ' resource type mismatch: ' + request.params.type + '/' + response.params.type)
+  }
+  const redirect = expectation.redirectUrl
+    ? requests.find((event) =>
+        event.params.requestId === request.params.requestId &&
+        event.params.request.url === expectation.redirectUrl &&
+        event.params.redirectResponse &&
+        event.params.redirectResponse.status === 303
+      )
+    : undefined
+  if (expectation.redirectUrl && !redirect) throw new Error(expectation.label + ' did not preserve the POST requestId through the real 303 redirect')
+  if (redirect && (redirect.params.frameId !== request.params.frameId || redirect.params.loaderId !== request.params.loaderId)) {
+    throw new Error(expectation.label + ' redirect changed its real CDP frame/loader identity')
+  }
+  if (request.params.frameId !== response.params.frameId || request.params.loaderId !== response.params.loaderId) {
+    throw new Error(expectation.label + ' joined events did not retain the same real CDP frame/loader identity')
+  }
+  return {
+    requestId: request.params.requestId,
+    frameId: request.params.frameId,
+    loaderId: request.params.loaderId,
+    responseFrameId: response.params.frameId,
+    responseLoaderId: response.params.loaderId,
+    redirected: Boolean(redirect),
+  }
+}
+
+function flattenFrameTree(node) {
+  if (!node || !node.frame) return []
+  return [node.frame].concat((node.childFrames || []).flatMap(flattenFrameTree))
+}
+`
 
 const fixtureHtml = `<!doctype html>
 <body data-navigation-state="waiting" data-alert-state="waiting" data-delayed-state="waiting" data-iframe-state="waiting" data-confirm-state="waiting" data-prompt-state="waiting">
@@ -208,16 +339,81 @@ const fixtureHtml = `<!doctype html>
   <button id="beforeunload-trigger" onclick="location.href='/left.html'">Attempt to leave</button>
   <button id="confirm-trigger" onclick="document.body.dataset.confirmState=confirm(${JSON.stringify(`${marker}-unknown confirmation`)})?'accepted':'cancelled'">Open confirmation</button>
   <button id="prompt-trigger" onclick="document.body.dataset.promptState=prompt(${JSON.stringify(`${marker}-unknown prompt`)},'fixture default')===null?'cancelled':'accepted'">Open prompt</button>
+  <button id="fetch-post-trigger">Save with fetch POST</button>
+  <form method="post" action="/document-post"><input type="hidden" name="marker" value=${JSON.stringify(marker)}><button id="document-post-submit" type="submit">Save document POST</button></form>
+  <button id="iframe-document-submit-trigger" onclick="document.querySelector('#network-frame').contentDocument.querySelector('form').requestSubmit()">Save iframe document POST</button>
   <iframe title="same-origin alert fixture" src="/dialog-frame.html"></iframe>
-  <script>window.blockBeforeUnload=true;window.__disableBeforeUnload=()=>{window.blockBeforeUnload=false};window.addEventListener('load',()=>{alert(${JSON.stringify(`${marker}-navigation-alert`)});document.body.dataset.navigationState='accepted'},{once:true});window.addEventListener('beforeunload',(event)=>{if(!window.blockBeforeUnload)return;event.preventDefault();event.returnValue=''})</script>
+  <iframe id="network-frame" title="same-origin network fixture" src="/network-frame.html"></iframe>
+  <script>
+    window.blockBeforeUnload=true
+    window.__disableBeforeUnload=()=>{window.blockBeforeUnload=false}
+    document.querySelector('#fetch-post-trigger').addEventListener('click',async()=>{
+      const response=await fetch('/fetch-post',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:'marker='+encodeURIComponent(${JSON.stringify(marker)})})
+      document.body.dataset.fetchState=(await response.json()).marker
+    })
+    window.addEventListener('load',()=>{
+      if(new URL(location.href).searchParams.has('skip-navigation-alert')){document.body.dataset.navigationState='accepted';return}
+      alert(${JSON.stringify(`${marker}-navigation-alert`)})
+      document.body.dataset.navigationState='accepted'
+    },{once:true})
+    window.addEventListener('beforeunload',(event)=>{if(!window.blockBeforeUnload)return;event.preventDefault();event.returnValue=''})
+  </script>
 </body>`
-const fixtureFrameHtml = `<!doctype html><body><script>window.openIframeAlert=()=>{alert(${JSON.stringify(`${marker}-iframe-alert: Title of degree; Abbreviation; Date of award`)});parent.document.body.dataset.iframeState='accepted'}</script></body>`
+const fixtureFrameHtml = `<!doctype html><body><script>
+window.openIframeAlert=()=>{alert(${JSON.stringify(`${marker}-iframe-alert: Title of degree; Abbreviation; Date of award`)});parent.document.body.dataset.iframeState='accepted'}
+window.addEventListener('load',()=>{
+  if(new URLSearchParams(parent.location.search).has('skip-navigation-alert')){parent.document.body.dataset.iframeNavigationState='accepted';return}
+  alert(${JSON.stringify(`${marker}-iframe-navigation-alert`)})
+  parent.document.body.dataset.iframeNavigationState='accepted'
+},{once:true})
+</script></body>`
+const fixtureNetworkFrameHtml = `<!doctype html><body><form method="post" action="/iframe-document-post"><input type="hidden" name="marker" value=${JSON.stringify(marker)}><button id="iframe-document-post-submit" type="submit">Save iframe</button></form></body>`
 const fixtureReadyPath = join(runtimeRoot, "dialog-fixture-ready")
+const fixtureServerSource = String.raw`
+const readyPath = process.env.TERRA_EDU_FIXTURE_READY_PATH
+const marker = process.env.TERRA_EDU_FIXTURE_MARKER
+if (!readyPath || !marker) throw new Error('missing fixture configuration')
+const markerResponse = (body) => new Response(body, { headers: { 'content-type': 'text/html; charset=utf-8' } })
+const server = Bun.serve({
+  hostname: '127.0.0.1',
+  port: 0,
+  async fetch(request) {
+    const url = new URL(request.url)
+    if (url.pathname === '/dialog-frame.html') return markerResponse(process.env.TERRA_EDU_FIXTURE_FRAME_HTML)
+    if (url.pathname === '/network-frame.html') return markerResponse(process.env.TERRA_EDU_FIXTURE_NETWORK_FRAME_HTML)
+    if (url.pathname === '/left.html') return markerResponse('<!doctype html><title>unexpected navigation</title>')
+    if (url.pathname === '/fetch-post' && request.method === 'POST') {
+      const body = await request.text()
+      return new Response(JSON.stringify({ marker: new URLSearchParams(body).get('marker') === marker ? marker : 'invalid' }), {
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    if (url.pathname === '/document-post' && request.method === 'POST') {
+      const body = await request.text()
+      const accepted = new URLSearchParams(body).get('marker') === marker
+      return markerResponse('<!doctype html><title>document post result</title><body data-marker="' + (accepted ? marker : 'invalid') + '">Document POST saved</body>')
+    }
+    if (url.pathname === '/iframe-document-post' && request.method === 'POST') {
+      const body = await request.text()
+      if (new URLSearchParams(body).get('marker') !== marker) return new Response('invalid marker', { status: 400 })
+      return new Response(null, { status: 303, headers: { location: '/iframe-document-result' } })
+    }
+    if (url.pathname === '/iframe-document-result') {
+      return markerResponse('<!doctype html><title>iframe document result</title><body data-marker="' + marker + '">Iframe POST saved</body>')
+    }
+    if (url.pathname !== '/dialog-smoke.html') return new Response('Not found', { status: 404 })
+    return markerResponse(process.env.TERRA_EDU_FIXTURE_HTML)
+  },
+})
+await Bun.write(readyPath, String(server.port))
+setInterval(() => {}, 2 ** 30)
+`
 const fixtureServer = Bun.spawn(
   [
     process.execPath,
     "-e",
-    "const readyPath=process.env.TERRA_EDU_FIXTURE_READY_PATH;if(!readyPath)throw new Error('missing fixture readiness path');const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch(request){const path=new URL(request.url).pathname;if(path==='/dialog-frame.html')return new Response(process.env.TERRA_EDU_FIXTURE_FRAME_HTML,{headers:{'content-type':'text/html; charset=utf-8'}});if(path==='/left.html')return new Response('<!doctype html><title>unexpected navigation</title>',{headers:{'content-type':'text/html; charset=utf-8'}});if(path!=='/dialog-smoke.html')return new Response('Not found',{status:404});return new Response(process.env.TERRA_EDU_FIXTURE_HTML,{headers:{'content-type':'text/html; charset=utf-8'}})}});await Bun.write(readyPath,String(server.port));setInterval(()=>{},2**30)",
+    fixtureServerSource,
+    runtimeRoot,
   ],
   {
     env: {
@@ -225,6 +421,8 @@ const fixtureServer = Bun.spawn(
       TERRA_EDU_FIXTURE_READY_PATH: fixtureReadyPath,
       TERRA_EDU_FIXTURE_HTML: fixtureHtml,
       TERRA_EDU_FIXTURE_FRAME_HTML: fixtureFrameHtml,
+      TERRA_EDU_FIXTURE_NETWORK_FRAME_HTML: fixtureNetworkFrameHtml,
+      TERRA_EDU_FIXTURE_MARKER: marker,
     },
     stderr: "pipe",
     stdout: "ignore",
@@ -260,38 +458,91 @@ try {
   if (!fixtureResponse?.ok || !(await fixtureResponse.text()).includes(marker)) {
     fail(`loopback fixture readiness endpoint was invalid: ${fixtureResponse?.status ?? "unreachable"}`)
   }
-  await waitForBundledApp()
-  await waitForBundledService()
+  if (existsSync(egoLite) || existsSync(join(fixedEgoConfigDirectory, "ego_config.json"))) {
+    fail("cold-start fixture was contaminated before the first product-wrapper invocation")
+  }
+  const visualScreenshotRelative = `05_screenshots/${marker}.png`
+  const visualScreenshot = join(directory, visualScreenshotRelative)
 
-  const initial = runWrapperRound(
-    "initial observation",
-    `${observePageAction}
+  const coldStart = runWrapperRound(
+    "cold-start task-space observation",
+    `
 const task = await useOrCreateTaskSpace(${JSON.stringify(taskSpaceName)})
 const beforeOpen = await pageInfo()
 if (!beforeOpen || (typeof beforeOpen === 'object' && 'dialog' in beforeOpen)) throw new Error('initial task space did not produce a clear first observation')
-const result = await observePageAction(
-  () => openOrReuseTab(${JSON.stringify(sourceUrl)}, { wait: true, timeout: 30 }),
-  { actionTimeoutMs: 30000 },
-)
-if (
-  result.kind !== 'dialog' ||
-  result.info.dialog.type !== 'alert' ||
-  result.info.dialog.message !== ${JSON.stringify(`${marker}-navigation-alert`)} ||
-  result.info.dialog.url !== ${JSON.stringify(sourceUrl)}
-) throw new Error('navigation alert payload was not observed: ' + JSON.stringify(result))
-await cdp('Page.handleJavaScriptDialog', { accept: true })
-const action = await Promise.race([
-  result.actionPromise,
-  new Promise((resolve) => setTimeout(() => resolve({ status: 'timeout' }), 5000)),
-])
-if (!action || action.status !== 'resolved') throw new Error('initial navigation did not settle after its alert was handled: ' + JSON.stringify(action))
-cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_HANDLED')
 cliLog('TERRA_EGO_DIALOG_SMOKE_TASK:' + task.id)
+cliLog('TERRA_EGO_DIALOG_SMOKE_COLD_OBSERVATION:' + JSON.stringify(beforeOpen))
 `,
   )
-  const taskMatch = initial.match(/TERRA_EGO_DIALOG_SMOKE_TASK:(\d+)/)
-  if (!taskMatch) fail(`could not read task-space ID: ${initial}`)
+  await waitForBundledApp()
+  const initialMainPids = [...bundledAppPids()]
+  if (initialMainPids.length !== 1) fail(`initial wrapper round did not leave exactly one Ego main process: ${initialMainPids.join(", ") || "none"}`)
+  originalMainPid = initialMainPids[0]
+  if (!existsSync(singleLaunchClaim)) fail(`initial wrapper round did not create ${singleLaunchClaim}`)
+  if (!existsSync(helper)) fail("product wrapper did not copy the locked Ego helper into the managed runtime")
+  const runtimeSignature = spawnSync("codesign", ["--verify", "--deep", "--strict", egoLite], {
+    encoding: "utf8",
+    timeout: 30_000,
+  })
+  if (runtimeSignature.status !== 0) fail(`product-wrapper cold-start produced an invalid Ego signature: ${runtimeSignature.stderr || runtimeSignature.error?.message || "unknown error"}`)
+  const coldStartConfigPath = join(fixedEgoConfigDirectory, "ego_config.json")
+  if (!(await Bun.file(coldStartConfigPath).exists())) fail("product wrapper did not create Ego first-run state")
+  const coldStartConfig = await Bun.file(coldStartConfigPath).json().catch(() => undefined)
+  if (!coldStartConfig || coldStartConfig.not_first_run !== true) fail("product wrapper did not suppress Ego onboarding in its fresh profile")
+  await waitForBundledService()
+  console.log("TERRA_EGO_DIALOG_SMOKE_COLD_START")
+  const taskMatch = coldStart.match(/TERRA_EGO_DIALOG_SMOKE_TASK:(\d+)/)
+  if (!taskMatch) fail(`could not read task-space ID: ${coldStart}`)
   taskId = Number(taskMatch[1])
+
+  // Brief settle after cold-start so CDP is not still ramping when the first load-time alert path runs.
+  await Bun.sleep(2_000)
+  let navigationOutput = ""
+  let navigationTaskId = taskId
+  for (let navigationAttempt = 1; navigationAttempt <= 2; navigationAttempt += 1) {
+    const attemptTaskName = navigationAttempt === 1 ? taskSpaceName : `${taskSpaceName} retry ${navigationAttempt}`
+    try {
+      navigationOutput = runWrapperRound(
+        `initial navigation alert capture (attempt ${navigationAttempt}/2)`,
+        `${navigateInitialPageCapturingAlerts}
+const task = await useOrCreateTaskSpace(${JSON.stringify(attemptTaskName)})
+cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_TASK:' + task.id)
+const beforeOpen = await pageInfo()
+if (!beforeOpen || (typeof beforeOpen === 'object' && 'dialog' in beforeOpen)) throw new Error('navigation round did not produce a clear first observation')
+const result = await navigateInitialPageCapturingAlerts(${JSON.stringify(sourceUrl)}, { timeout: 30, settle: 1 })
+if (result.kind === 'cleanup_failed' || result.kind === 'alert_evidence_lost') {
+  throw new Error('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_HARD_STOP:' + JSON.stringify(result))
+}
+if (result.kind !== 'alerts') throw new Error('initial navigation did not return captured alerts: ' + JSON.stringify(result))
+const navigationAlert = result.alerts.find((item) => item.message === ${JSON.stringify(`${marker}-navigation-alert`)} && item.url === ${JSON.stringify(sourceUrl)})
+if (!navigationAlert || !navigationAlert.frameId) throw new Error('initial navigation alert evidence was incomplete: ' + JSON.stringify(result.alerts))
+const iframeNavigationAlert = result.alerts.find((item) => item.message === ${JSON.stringify(`${marker}-iframe-navigation-alert`)})
+if (!iframeNavigationAlert || !iframeNavigationAlert.url.endsWith('/dialog-frame.html') || !iframeNavigationAlert.frameId || iframeNavigationAlert.frameId === navigationAlert.frameId) throw new Error('iframe load-time alert evidence was incomplete: ' + JSON.stringify(result.alerts))
+if (!result.info || result.info.dialog || result.info.url !== ${JSON.stringify(sourceUrl)}) throw new Error('initial navigation alert capture did not leave an observable destination page: ' + JSON.stringify(result.info))
+cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_CAPTURED:' + JSON.stringify(navigationAlert))
+cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_IFRAME_ALERT_CAPTURED:' + JSON.stringify(iframeNavigationAlert))
+cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ROUND_ENDED')
+`,
+      )
+      const navigationTaskMatch = navigationOutput.match(/TERRA_EGO_DIALOG_SMOKE_NAVIGATION_TASK:(\d+)/)
+      if (navigationTaskMatch) navigationTaskId = Number(navigationTaskMatch[1])
+      break
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const retryable = /cleanup_failed|alert_evidence_lost|CDP request timed out|pageInfo timed out|TERRA_EGO_DIALOG_SMOKE_NAVIGATION_HARD_STOP/.test(message)
+      if (!retryable || navigationAttempt === 2) throw error
+      console.log(`[dialog smoke] navigation attempt ${navigationAttempt} hit a retryable Ego hard-stop; creating a fresh task space`)
+      await Bun.sleep(1_500)
+    }
+  }
+  taskId = navigationTaskId
+  if (
+    !navigationOutput.includes("TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_CAPTURED") ||
+    !navigationOutput.includes("TERRA_EGO_DIALOG_SMOKE_NAVIGATION_IFRAME_ALERT_CAPTURED") ||
+    !navigationOutput.includes("TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ROUND_ENDED")
+  ) {
+    fail(`initial navigation did not capture and accept its information-only top-level and iframe alerts: ${navigationOutput}`)
+  }
   await writeFile(
     join(directory, "03_state/application_progress.json"),
     JSON.stringify({
@@ -311,11 +562,30 @@ if (
   !info ||
   info.dialog ||
   info.url !== ${JSON.stringify(sourceUrl)} ||
-  await js('document.body.dataset.navigationState') !== 'accepted'
+  await js('document.body.dataset.navigationState') !== 'accepted' ||
+  await js('document.body.dataset.iframeNavigationState') !== 'accepted'
 ) throw new Error('navigation alert did not resume on the loopback fixture: ' + JSON.stringify(info))
 cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_REOBSERVED')
 `,
   )
+
+  runWrapperRound(
+    "visual screenshot",
+    `
+await useOrCreateTaskSpace(${taskId})
+const info = await pageInfo()
+if (!info || info.dialog || info.url !== ${JSON.stringify(sourceUrl)}) throw new Error('visual screenshot round did not begin on the live fixture')
+// Write with an absolute path: the Ego helper process cwd is not always the workspace root
+// after cold-start + navigation rounds, so a relative 05_screenshots/... open can ENOENT.
+await captureScreenshot(${JSON.stringify(visualScreenshot)})
+cliLog('TERRA_EGO_VISUAL_SCREENSHOT_WRITTEN')
+`,
+  )
+  const visualScreenshotBytes = Buffer.from(await Bun.file(visualScreenshot).arrayBuffer())
+  if (visualScreenshotBytes.length < 100 || !visualScreenshotBytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    fail("real Ego visual workflow did not write a valid PNG through captureScreenshot")
+  }
+  console.log("TERRA_EGO_VISUAL_SCREENSHOT_VERIFIED")
 
   runWrapperRound(
     "top-level alert",
@@ -511,24 +781,174 @@ cliLog('TERRA_EGO_DIALOG_SMOKE_PROMPT_REOBSERVED')
   )
 
   runWrapperRound(
-    "task-space cleanup",
-    `
-const result = await completeTaskSpace(${taskId}, { keep: false })
-if (!result || result.done !== true) throw new Error('dialog smoke task space did not close')
-cliLog('TERRA_EGO_DIALOG_SMOKE_CLEANUP')
+    "top-level fetch POST network evidence",
+    `${requireCdpPostEvidence}
+await useOrCreateTaskSpace(${taskId})
+const before = await pageInfo()
+if (!before || before.dialog || before.url !== ${JSON.stringify(sourceUrl)}) throw new Error('fetch POST round did not begin on the live loopback page')
+await cdp('Network.enable')
+await drainEvents()
+const sourceFrame = (await cdp('Page.getFrameTree')).frameTree.frame
+await click('#fetch-post-trigger', { label: 'save fetch fixture' })
+for (let attempt = 1; attempt <= 30; attempt++) {
+  if (await js('document.body.dataset.fetchState') === ${JSON.stringify(marker)}) break
+  if (attempt === 30) throw new Error('real fetch POST did not update the fixture page')
+  await wait(0.1)
+}
+await wait(0.3)
+const events = await drainEvents()
+const evidence = requireCdpPostEvidence(events, {
+  label: 'top-level fetch POST',
+  requestUrl: ${JSON.stringify(`http://127.0.0.1:${fixturePort}/fetch-post`)},
+  responseUrl: ${JSON.stringify(`http://127.0.0.1:${fixturePort}/fetch-post`)},
+  resourceType: 'fetch',
+})
+if (evidence.frameId !== sourceFrame.id || evidence.loaderId !== sourceFrame.loaderId) throw new Error('fetch POST was not bound to the observed top-level frame/loader')
+cliLog('TERRA_EGO_NETWORK_EVENT_SHAPE_FETCH_POST:' + JSON.stringify(evidence))
 `,
   )
-  taskId = undefined
+
+  runWrapperRound(
+    "top-level document POST network evidence",
+    `${requireCdpPostEvidence}
+await useOrCreateTaskSpace(${taskId})
+const before = await pageInfo()
+if (!before || before.dialog || before.url !== ${JSON.stringify(sourceUrl)}) throw new Error('document POST round did not begin on the live loopback page')
+await cdp('Network.enable')
+await drainEvents()
+const sourceFrame = (await cdp('Page.getFrameTree')).frameTree.frame
+await click('#document-post-submit', { label: 'save document fixture' })
+let destinationInfo
+for (let attempt = 1; attempt <= 50; attempt++) {
+  destinationInfo = await pageInfo()
+  if (destinationInfo && !destinationInfo.dialog && destinationInfo.url === ${JSON.stringify(`http://127.0.0.1:${fixturePort}/document-post`)}) break
+  if (attempt === 50) throw new Error('real document POST did not navigate to its response page: ' + JSON.stringify(destinationInfo))
+  await wait(0.1)
+}
+await wait(0.3)
+const events = await drainEvents()
+const evidence = requireCdpPostEvidence(events, {
+  label: 'top-level document POST',
+  requestUrl: ${JSON.stringify(`http://127.0.0.1:${fixturePort}/document-post`)},
+  responseUrl: ${JSON.stringify(`http://127.0.0.1:${fixturePort}/document-post`)},
+  resourceType: 'document',
+})
+const destinationFrame = (await cdp('Page.getFrameTree')).frameTree.frame
+if (evidence.frameId !== sourceFrame.id || evidence.frameId !== destinationFrame.id || evidence.loaderId !== destinationFrame.loaderId) {
+  throw new Error('document POST events were not bound to the actual source/destination top-level frame')
+}
+if (await js('document.body.dataset.marker') !== ${JSON.stringify(marker)}) throw new Error('document POST response did not receive the submitted fixture value')
+cliLog('TERRA_EGO_NETWORK_EVENT_SHAPE_DOCUMENT_POST:' + JSON.stringify(evidence))
+`,
+  )
+
+  const restoredSourceUrl = `${sourceUrl}?skip-navigation-alert=1`
+  runWrapperRound(
+    "restore network fixture without a second startup alert",
+    `
+await useOrCreateTaskSpace(${taskId})
+await gotoAndWait(${JSON.stringify(restoredSourceUrl)}, { timeout: 30, settle: 1 })
+const info = await pageInfo()
+if (!info || info.dialog || info.url !== ${JSON.stringify(restoredSourceUrl)} || await js('document.body.dataset.navigationState') !== 'accepted') {
+  throw new Error('network fixture did not restore to a clear observed page: ' + JSON.stringify(info))
+}
+cliLog('TERRA_EGO_NETWORK_FIXTURE_RESTORED')
+`,
+  )
+
+  runWrapperRound(
+    "iframe document POST redirect network evidence",
+    `${requireCdpPostEvidence}
+await useOrCreateTaskSpace(${taskId})
+const before = await pageInfo()
+if (!before || before.dialog || before.url !== ${JSON.stringify(restoredSourceUrl)}) throw new Error('iframe document POST round did not begin on the restored live page')
+await cdp('Network.enable')
+await drainEvents()
+const sourceFrames = flattenFrameTree((await cdp('Page.getFrameTree')).frameTree)
+const sourceFrame = sourceFrames.find((frame) => frame.url === ${JSON.stringify(`http://127.0.0.1:${fixturePort}/network-frame.html`)})
+if (!sourceFrame || !sourceFrame.id || !sourceFrame.loaderId) throw new Error('could not observe the real source iframe frame/loader')
+await click('#iframe-document-submit-trigger', { label: 'save iframe fixture' })
+let destinationFrame
+for (let attempt = 1; attempt <= 50; attempt++) {
+  destinationFrame = flattenFrameTree((await cdp('Page.getFrameTree')).frameTree).find((frame) => frame.url === ${JSON.stringify(`http://127.0.0.1:${fixturePort}/iframe-document-result`)})
+  if (destinationFrame) break
+  if (attempt === 50) throw new Error('real iframe POST redirect did not produce its destination frame')
+  await wait(0.1)
+}
+await wait(0.3)
+const events = await drainEvents()
+const evidence = requireCdpPostEvidence(events, {
+  label: 'iframe document POST redirect',
+  requestUrl: ${JSON.stringify(`http://127.0.0.1:${fixturePort}/iframe-document-post`)},
+  responseUrl: ${JSON.stringify(`http://127.0.0.1:${fixturePort}/iframe-document-result`)},
+  redirectUrl: ${JSON.stringify(`http://127.0.0.1:${fixturePort}/iframe-document-result`)},
+  resourceType: 'document',
+})
+if (evidence.frameId !== sourceFrame.id || evidence.frameId !== destinationFrame.id || evidence.loaderId !== destinationFrame.loaderId) {
+  throw new Error('iframe redirect evidence did not remain bound to the real iframe frame and destination loader')
+}
+if (await js("document.querySelector('#network-frame').contentDocument.body.dataset.marker") !== ${JSON.stringify(marker)}) {
+  throw new Error('iframe POST redirect response did not receive the submitted fixture value')
+}
+const after = await pageInfo()
+if (!after || after.dialog || after.url !== ${JSON.stringify(restoredSourceUrl)}) throw new Error('iframe document POST changed the top-level page')
+cliLog('TERRA_EGO_NETWORK_EVENT_SHAPE_IFRAME_DOCUMENT_REDIRECT:' + JSON.stringify(evidence))
+`,
+  )
+
+  runWrapperRound(
+    "completion readiness observation",
+    `
+await useOrCreateTaskSpace(${taskId})
+const info = await pageInfo()
+const tabs = await listTabs()
+if (!info || info.dialog || info.url !== ${JSON.stringify(restoredSourceUrl)}) throw new Error('completion readiness did not observe the preserved result page')
+if (!Array.isArray(tabs) || tabs.length === 0) throw new Error('completion readiness did not observe a live page tab')
+cliLog('TERRA_EGO_DIALOG_SMOKE_READY_FOR_COMPLETION:' + JSON.stringify({ taskId: ${taskId}, url: info.url, title: info.title, tabCount: tabs.length }))
+`,
+  )
+
+  const completionOutput = runWrapperRound(
+    "keep-true task-space completion",
+    `
+const taskId = ${taskId}
+const completion = await completeTaskSpace(taskId, { keep: true })
+if (!completion || completion.done !== true) throw new Error('keep:true completion did not return done:true: ' + JSON.stringify(completion))
+const preserved = (await listTaskSpaces()).find((task) => Number(task.id) === taskId)
+if (!preserved) throw new Error('keep:true completion removed the task space and its page')
+cliLog('TERRA_EGO_DIALOG_SMOKE_COMPLETE_KEEP_TRUE:' + JSON.stringify({ done: completion.done, taskId, ownership: preserved.ownership }))
+cliLog('TERRA_EGO_DIALOG_SMOKE_PAGE_PRESERVED:' + ${JSON.stringify(restoredSourceUrl)})
+`,
+  )
+  if (!completionOutput.includes('"done":true') || !completionOutput.includes(restoredSourceUrl)) {
+    fail(`keep:true completion output did not prove the task and page were preserved: ${completionOutput}`)
+  }
+  if (!originalMainPid || !bundledAppPids().has(originalMainPid)) {
+    fail("keep:true completion unexpectedly replaced or terminated the original isolated Ego process")
+  }
+  const completedTaskProbe = spawnSync(helper, ["taskspace", "list"], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: fixedEgoHome, CFFIXED_USER_HOME: fixedEgoHome, TERRA_EGO_LITE_APP: egoLite, TERRA_EGO_BROWSER_HELPER: helper },
+    timeout: 5_000,
+  })
+  if (completedTaskProbe.status !== 0 || !completedTaskProbe.stdout.includes(taskSpaceName)) {
+    fail(`keep:true completion did not leave the task space visible to the live Ego service: ${completedTaskProbe.stderr || completedTaskProbe.stdout || completedTaskProbe.error?.message || "no output"}`)
+  }
+  console.log("TERRA_EGO_DIALOG_SMOKE_PROCESS_PRESERVED_AFTER_COMPLETION")
+
   console.log("Application Agent direct Ego dialog GUI smoke passed.")
   console.log(`Ego source: ${realpathSync(sourceEgoLite)}`)
 } finally {
-  if (taskId) {
-    try {
-      runWrapperRound("failure cleanup", `const result = await completeTaskSpace(${taskId}, { keep: false }); cliLog(JSON.stringify(result))`)
-    } catch {}
-  }
+  // Never gracefully close a task-space window from the smoke. The locked Ego
+  // build can crash in NSWindow teardown after a native dialog lifecycle, so the
+  // exact disposable runtime is killed without entering native window cleanup.
   fixtureServer.kill()
   await fixtureServer.exited
-  await stopSmokeLaunchedApps()
-  await rm(runtimeRoot, { recursive: true, force: true })
+  const lingeringPids = await stopSmokeLaunchedApps()
+  const newCrashReports = await newEgoCrashReports()
+  if (ownsRuntimeRoot && lingeringPids.length === 0) await rm(runtimeRoot, { recursive: true, force: true })
+  if (newCrashReports.length > 0) {
+    fail(`Ego Lite crashed during the isolated smoke: ${newCrashReports.join(", ")}`)
+  }
+  if (lingeringPids.length > 0) fail(`isolated Ego Lite processes survived exact SIGKILL cleanup: ${lingeringPids.join(", ")}`)
 }
