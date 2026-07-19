@@ -1686,7 +1686,7 @@ async function writeGeneratedDocuments(
   await writeFile(join(workspacePath, "02_generated/info_collection_form.md"), renderInfoCollection(input, activeMissingItems), "utf8")
   await writeFile(join(workspacePath, "02_generated/material_collection_form.md"), renderMaterialCollection(input, activeMissingItems), "utf8")
   await writeFile(join(workspacePath, "02_generated/task_summary.md"), renderTaskSummary(input, materials, activeMissingItems), "utf8")
-  await writeFile(join(workspacePath, "02_generated/missing_materials.docx"), makeDocx(renderWordText(input, activeMissingItems)))
+  await writeFile(join(workspacePath, "02_generated/missing_materials.docx"), makeDocx(renderWordChecklistData(input, activeMissingItems)))
 }
 
 function renderStudentProfile(input: ApplicationTaskInput, materials: MaterialRecord[]) {
@@ -1814,30 +1814,22 @@ ${records.map((item) => `- ${item.fileName} → ${item.classifiedPath}（${item.
 `
 }
 
-function renderWordText(input: ApplicationTaskInput, missingItems: MissingItem[]) {
+function renderWordChecklistData(input: ApplicationTaskInput, missingItems: MissingItem[]) {
   const includedItems = missingItems.filter((item) => item.addedToWordList !== false)
-  const lines = [
-    `${input.studentName} 补充材料清单`,
-    "",
-    `申请学校：${input.school}`,
-    `申请项目：${input.program}`,
-    "",
-    "请按以下要求补充材料或信息。补齐后请发给顾问，或放入指定补充材料文件夹。",
-    "",
-  ]
-  if (includedItems.length === 0) {
-    lines.push("当前没有需要补充的材料或信息。")
-  } else {
-    includedItems.forEach((item, index) => {
-      lines.push(`${index + 1}. ${item.name}`)
-      lines.push(`需要原因：${item.whyNeeded}`)
-      lines.push(`准备方式：${item.prepareFrom}`)
-      lines.push(`格式要求：${item.formatRequirement}`)
-      lines.push("")
-    })
+  return {
+    title: `${input.studentName} 补充材料清单`,
+    school: input.school,
+    program: input.program,
+    intro: "请按以下要求补充材料或信息。补齐后请发给顾问，或放入指定补充材料文件夹。",
+    rows: includedItems.map((item, index) => ({
+      index: String(index + 1),
+      name: item.name,
+      whyNeeded: item.whyNeeded,
+      prepareFrom: item.prepareFrom,
+      formatRequirement: item.formatRequirement,
+    })),
+    footer: "说明：最终提交申请、付款和推荐信邀请需由顾问人工确认完成。",
   }
-  lines.push("说明：最终提交申请、付款和推荐信邀请需由顾问人工确认完成。")
-  return lines.join("\n")
 }
 
 function initialApplicationProgress(): ApplicationProgress {
@@ -1986,15 +1978,57 @@ function escapeXml(value: string) {
     .replace(/'/g, "&apos;")
 }
 
-function makeDocx(text: string): Buffer {
+function paragraphXml(text: string, bold = false) {
+  const run = bold
+    ? `<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`
+    : `<w:r><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`
+  return `<w:p>${run}</w:p>`
+}
+
+function cellXml(text: string, width: number, header = false) {
+  return `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/>${header ? `<w:shd w:val="clear" w:color="auto" w:fill="E8F0E9"/>` : ""}</w:tcPr>${paragraphXml(text, header)}</w:tc>`
+}
+
+function makeDocx(checklist: {
+  title: string
+  school: string
+  program: string
+  intro: string
+  rows: Array<{ index: string; name: string; whyNeeded: string; prepareFrom: string; formatRequirement: string }>
+  footer: string
+}): Buffer {
+  const widths = [700, 2200, 2800, 2800, 2200]
+  const headers = ["序号", "缺失项", "为什么需要", "如何准备", "文件格式"]
+  let table = `<w:tbl><w:tblPr><w:tblW w:w="10700" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="B7C8B8"/><w:left w:val="single" w:sz="4" w:color="B7C8B8"/><w:bottom w:val="single" w:sz="4" w:color="B7C8B8"/><w:right w:val="single" w:sz="4" w:color="B7C8B8"/><w:insideH w:val="single" w:sz="4" w:color="B7C8B8"/><w:insideV w:val="single" w:sz="4" w:color="B7C8B8"/></w:tblBorders></w:tblPr><w:tr>${headers.map((header, index) => cellXml(header, widths[index], true)).join("")}</w:tr>`
+  if (checklist.rows.length === 0) {
+    table += `<w:tr>${cellXml("—", widths[0])}${cellXml("当前没有需要补充的材料或信息。", widths[1] + widths[2] + widths[3] + widths[4])}</w:tr>`
+  } else {
+    for (const row of checklist.rows) {
+      table += `<w:tr>${[
+        cellXml(row.index, widths[0]),
+        cellXml(row.name, widths[1]),
+        cellXml(row.whyNeeded, widths[2]),
+        cellXml(row.prepareFrom, widths[3]),
+        cellXml(row.formatRequirement, widths[4]),
+      ].join("")}</w:tr>`
+    }
+  }
+  table += "</w:tbl>"
+  const body = [
+    paragraphXml(checklist.title, true),
+    paragraphXml(`申请学校：${checklist.school}`),
+    paragraphXml(`申请项目：${checklist.program}`),
+    paragraphXml(checklist.intro),
+    paragraphXml(""),
+    table,
+    paragraphXml(""),
+    paragraphXml(checklist.footer),
+  ].join("")
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
-    ${text
-      .split("\n")
-      .map((line) => `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>`)
-      .join("\n")}
-    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+    ${body}
+    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080"/></w:sectPr>
   </w:body>
 </w:document>`
   return zipStore({

@@ -1733,6 +1733,27 @@ function ApplicationAgentShell(props: {
                       title="当前学校完成或暂停后，才会启动下一所学校"
                       onClick={switchToNextBatchTask}
                     >进入下一所学校</button>
+                    <Show when={currentTask().input.sharedWorkspacePath && currentTask().sharedDossierStatus !== "ready"}>
+                      <button
+                        type="button"
+                        disabled={busy()}
+                        title="当共享档案卡在未 ready 状态时，重算 hashes 并按材料审核结果修复"
+                        onClick={async () => {
+                          setBusy(true)
+                          setError(null)
+                          try {
+                            const result = await window.api.repairApplicationSharedDossier(currentTask().workspacePath)
+                            const latest = await window.api.getApplicationTask(currentTask().workspacePath)
+                            setTask(latest)
+                            setRestoreNotice(`共享档案已修复为 ${result.status}（version ${result.version}）`)
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : String(err))
+                          } finally {
+                            setBusy(false)
+                          }
+                        }}
+                      >修复共享档案</button>
+                    </Show>
                   </div>
                 </section>
               </Show>

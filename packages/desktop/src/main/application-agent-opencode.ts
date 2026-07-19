@@ -1273,7 +1273,7 @@ function renderApplicationAgentTools() {
 import { existsSync } from "node:fs"
 import { cp, mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { basename, dirname, extname, join, relative, resolve } from "node:path"
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
@@ -2462,19 +2462,19 @@ export const materials = {
       const results = [...previous]
       const ocrStartedAt = Date.now()
       const totalCandidates = candidates.length
-      const etaMinutes = Math.max(1, Math.ceil((totalCandidates * 35) / 60))
+      const etaMinutes = Math.max(1, Math.ceil((totalCandidates * 20) / 60))
       await appendLog(
         workspace,
         "agent",
-        "已启动随包 PaddleOCR，正在逐份扫描 " + totalCandidates + " 份 PDF/图片材料。约 35 秒/份，合计预计 " + etaMinutes + "–" + (etaMinutes + 2) + " 分钟；CPU 升高属正常，请保持应用打开。",
+        "已启动随包 PaddleOCR，正在扫描 " + totalCandidates + " 份 PDF/图片材料。批量模式优先（模型只加载一次），预计约 " + etaMinutes + "–" + (etaMinutes + 2) + " 分钟；CPU 升高属正常，请保持应用打开。",
       )
       task.ocr = {
         phase: "running",
         current: 0,
         total: totalCandidates,
         startedAt: new Date(ocrStartedAt).toISOString(),
-        avgSeconds: 35,
-        etaAt: new Date(ocrStartedAt + totalCandidates * 35_000).toISOString(),
+        avgSeconds: 20,
+        etaAt: new Date(ocrStartedAt + totalCandidates * 20_000).toISOString(),
       }
       await saveTask(
         workspace,
@@ -2483,26 +2483,20 @@ export const materials = {
         "PaddleOCR 正在扫描 0/" + totalCandidates + " 份材料（预计约 " + etaMinutes + " 分钟，CPU 高属正常）。",
       )
       let processedNew = 0
+      const pending = []
       for (const [index, file] of candidates.entries()) {
-        await ensureTaskIsActive(workspace)
         const sourceSha256 = await hashFile(file)
-        if (results.some((item) => item.sourceSha256 === sourceSha256)) {
-          task.ocr = {
-            phase: "running",
-            current: index + 1,
-            total: totalCandidates,
-            startedAt: new Date(ocrStartedAt).toISOString(),
-            avgSeconds: processedNew > 0 ? Math.max(1, Math.round((Date.now() - ocrStartedAt) / 1000 / processedNew)) : 35,
-            etaAt: new Date(Date.now() + Math.max(0, totalCandidates - index - 1) * 35_000).toISOString(),
-          }
-          continue
-        }
+        if (results.some((item) => item.sourceSha256 === sourceSha256)) continue
+        pending.push({ index, file, sourceSha256 })
+      }
+      const processOne = async (item, avgHint = 20) => {
+        await ensureTaskIsActive(workspace)
         const elapsedSeconds = Math.max(1, Math.round((Date.now() - ocrStartedAt) / 1000))
-        const avgSeconds = processedNew > 0 ? Math.max(1, Math.round(elapsedSeconds / processedNew)) : 35
-        const remaining = totalCandidates - index
+        const avgSeconds = processedNew > 0 ? Math.max(1, Math.round(elapsedSeconds / processedNew)) : avgHint
+        const remaining = Math.max(1, pending.length - processedNew)
         task.ocr = {
           phase: "running",
-          current: index + 1,
+          current: item.index + 1,
           total: totalCandidates,
           startedAt: new Date(ocrStartedAt).toISOString(),
           avgSeconds,
@@ -2512,22 +2506,84 @@ export const materials = {
           workspace,
           task,
           "正在读取文件",
-          "PaddleOCR 正在扫描第 " + (index + 1) + "/" + totalCandidates + " 份材料（约 " + avgSeconds + " 秒/份，预计剩余 " + Math.max(1, Math.ceil((remaining * avgSeconds) / 60)) + " 分钟）。",
+          "PaddleOCR 正在扫描第 " + (item.index + 1) + "/" + totalCandidates + " 份材料（约 " + avgSeconds + " 秒/份，预计剩余 " + Math.max(1, Math.ceil((remaining * avgSeconds) / 60)) + " 分钟）。",
         )
-        const output = join(outputDir, sourceSha256 + ".txt")
-        const result = await execFileAsync(ocr, [file], { maxBuffer: 16 * 1024 * 1024 }).then(
+        const output = join(outputDir, item.sourceSha256 + ".txt")
+        const result = await execFileAsync(ocr, [item.file], { maxBuffer: 16 * 1024 * 1024 }).then(
           ({ stdout, stderr }) => ({ text: stdout.trim(), error: stderr.trim() }),
           (error) => ({ text: "", error: error instanceof Error ? error.message : String(error) }),
         )
         if (result.text) await writeFile(output, result.text + "\n", "utf8")
         results.push({
-          file: shared?.layoutVersion === 2 ? file : relative(workspace, file),
+          file: shared?.layoutVersion === 2 ? item.file : relative(workspace, item.file),
           output: shared?.layoutVersion === 2 ? output : relative(workspace, output),
           textLength: result.text.length,
           error: result.error,
-          sourceSha256,
+          sourceSha256: item.sourceSha256,
         })
         processedNew += 1
+      }
+      let usedBatch = false
+      if (pending.length > 1) {
+        await ensureTaskIsActive(workspace)
+        await saveTask(workspace, task, "正在读取文件", "PaddleOCR 批量扫描 " + pending.length + " 份材料（模型只加载一次）。")
+        usedBatch = await new Promise((resolve) => {
+          const child = spawn(ocr, ["--jsonl", ...pending.map((item) => item.file)])
+          let lineBuffer = ""
+          let chain = Promise.resolve()
+          let okCount = 0
+          const consumeLine = (line) => {
+            const trimmed = line.trim()
+            if (!trimmed) return
+            chain = chain.then(async () => {
+              let payload
+              try { payload = JSON.parse(trimmed) } catch { return }
+              const match = pending.find((item) => item.file === payload.file) || pending[Number(payload.index || 0) - 1]
+              if (!match || results.some((item) => item.sourceSha256 === match.sourceSha256)) return
+              const output = join(outputDir, match.sourceSha256 + ".txt")
+              const text = String(payload.text || "")
+              if (text) await writeFile(output, text + "\n", "utf8")
+              results.push({
+                file: shared?.layoutVersion === 2 ? match.file : relative(workspace, match.file),
+                output: shared?.layoutVersion === 2 ? output : relative(workspace, output),
+                textLength: text.length,
+                error: String(payload.error || ""),
+                sourceSha256: match.sourceSha256,
+              })
+              processedNew += 1
+              okCount += 1
+              const avgSeconds = Math.max(1, Math.round((Date.now() - ocrStartedAt) / 1000 / Math.max(1, processedNew)))
+              task.ocr = {
+                phase: "running",
+                current: Math.min(totalCandidates, match.index + 1),
+                total: totalCandidates,
+                startedAt: new Date(ocrStartedAt).toISOString(),
+                avgSeconds,
+                etaAt: new Date(Date.now() + Math.max(0, pending.length - okCount) * avgSeconds * 1000).toISOString(),
+              }
+              await saveTask(workspace, task, "正在读取文件", "PaddleOCR 批量进度 " + okCount + "/" + pending.length + "（约 " + avgSeconds + " 秒/份）。")
+            })
+          }
+          child.stdout.on("data", (chunk) => {
+            lineBuffer += String(chunk)
+            const parts = lineBuffer.split(/\r?\n/)
+            lineBuffer = parts.pop() || ""
+            for (const line of parts) consumeLine(line)
+          })
+          child.on("error", () => resolve(false))
+          child.on("close", async (code) => {
+            if (lineBuffer.trim()) consumeLine(lineBuffer)
+            try { await chain } catch { resolve(false); return }
+            const complete = pending.every((item) => results.some((result) => result.sourceSha256 === item.sourceSha256))
+            resolve(code === 0 && complete)
+          })
+        })
+      }
+      if (!usedBatch) {
+        for (const item of pending) {
+          if (results.some((result) => result.sourceSha256 === item.sourceSha256)) continue
+          await processOne(item, pending.length > 1 ? 35 : 20)
+        }
       }
       await writeJson(resultStore, results)
       const baseResults = schoolOverlay && sharedAccess ? await readJson(sharedAccess.shared.ocrIndex, []) : []
@@ -4407,32 +4463,70 @@ function renderCollection(studentName: string, input: any, title: string, items:
 }
 
 function renderWordChecklist(studentName: string, input: any, items: any[]) {
-  const lines = [
-    studentName + " 补充材料清单",
-    "",
-    "申请学校：" + (input.school || ""),
-    "申请项目：" + (input.program || ""),
-    "",
-    "请按以下要求补充材料或信息。补齐后请发给顾问，或放入指定补充材料文件夹。",
-    "",
-  ]
   const included = items.filter((item: any) => item.addedToWordList !== false)
-  if (included.length === 0) lines.push("当前没有需要补充的材料或信息。")
-  for (let index = 0; index < included.length; index += 1) {
-    const item = included[index]
-    lines.push(String(index + 1) + ". " + item.name, "为什么需要：" + item.whyNeeded, "如何准备：" + item.prepareFrom, "文件格式：" + item.formatRequirement, "")
+  return {
+    title: studentName + " 补充材料清单",
+    school: String(input.school || ""),
+    program: String(input.program || ""),
+    intro: "请按以下要求补充材料或信息。补齐后请发给顾问，或放入指定补充材料文件夹。",
+    rows: included.map((item: any, index: number) => ({
+      index: String(index + 1),
+      name: String(item.name || ""),
+      whyNeeded: String(item.whyNeeded || ""),
+      prepareFrom: String(item.prepareFrom || ""),
+      formatRequirement: String(item.formatRequirement || ""),
+    })),
+    footer: "说明：最终提交申请、付款和推荐信邀请需由顾问人工确认完成。",
   }
-  lines.push("说明：最终提交申请、付款和推荐信邀请需由顾问人工确认完成。")
-  return lines.join("\n")
 }
 
 function escapeXml(value: string) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;")
 }
 
-function makeDocx(text: string) {
-  const body = text.split("\n").map((line) => "<w:p><w:r><w:t xml:space=\"preserve\">" + escapeXml(line) + "</w:t></w:r></w:p>").join("\n")
-  const documentXml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" + body + "<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/></w:sectPr></w:body></w:document>"
+function paragraphXml(text: string, bold = false) {
+  const run = bold
+    ? "<w:r><w:rPr><w:b/></w:rPr><w:t xml:space=\"preserve\">" + escapeXml(text) + "</w:t></w:r>"
+    : "<w:r><w:t xml:space=\"preserve\">" + escapeXml(text) + "</w:t></w:r>"
+  return "<w:p>" + run + "</w:p>"
+}
+
+function cellXml(text: string, width: number, header = false) {
+  return "<w:tc><w:tcPr><w:tcW w:w=\"" + width + "\" w:type=\"dxa\"/>" + (header ? "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"E8F0E9\"/>" : "") + "</w:tcPr>" + paragraphXml(text, header) + "</w:tc>"
+}
+
+function makeDocx(checklist: any) {
+  const data = typeof checklist === "string"
+    ? { title: "补充材料清单", school: "", program: "", intro: checklist, rows: [], footer: "" }
+    : checklist
+  const widths = [700, 2200, 2800, 2800, 2200]
+  const headers = ["序号", "缺失项", "为什么需要", "如何准备", "文件格式"]
+  let table = "<w:tbl><w:tblPr><w:tblW w:w=\"10700\" w:type=\"dxa\"/><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\" w:color=\"B7C8B8\"/><w:left w:val=\"single\" w:sz=\"4\" w:color=\"B7C8B8\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:color=\"B7C8B8\"/><w:right w:val=\"single\" w:sz=\"4\" w:color=\"B7C8B8\"/><w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"B7C8B8\"/><w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"B7C8B8\"/></w:tblBorders></w:tblPr><w:tr>" + headers.map((header, index) => cellXml(header, widths[index], true)).join("") + "</w:tr>"
+  if (!data.rows || data.rows.length === 0) {
+    table += "<w:tr>" + cellXml("—", widths[0]) + cellXml("当前没有需要补充的材料或信息。", widths[1] + widths[2] + widths[3] + widths[4]) + "</w:tr>"
+  } else {
+    for (const row of data.rows) {
+      table += "<w:tr>" + [
+        cellXml(row.index, widths[0]),
+        cellXml(row.name, widths[1]),
+        cellXml(row.whyNeeded, widths[2]),
+        cellXml(row.prepareFrom, widths[3]),
+        cellXml(row.formatRequirement, widths[4]),
+      ].join("") + "</w:tr>"
+    }
+  }
+  table += "</w:tbl>"
+  const body = [
+    paragraphXml(data.title || "补充材料清单", true),
+    paragraphXml("申请学校：" + (data.school || "")),
+    paragraphXml("申请项目：" + (data.program || "")),
+    paragraphXml(data.intro || ""),
+    paragraphXml(""),
+    table,
+    paragraphXml(""),
+    paragraphXml(data.footer || "说明：最终提交申请、付款和推荐信邀请需由顾问人工确认完成。"),
+  ].join("")
+  const documentXml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" + body + "<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:pgMar w:top=\"1080\" w:right=\"1080\" w:bottom=\"1080\" w:left=\"1080\"/></w:sectPr></w:body></w:document>"
   return zipStore({
     "[Content_Types].xml": "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>",
     "_rels/.rels": "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>",

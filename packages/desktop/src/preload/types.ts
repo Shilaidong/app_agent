@@ -325,6 +325,11 @@ export type ElectronAPI = {
     input: { decisionId: string; taskSpaceId: string },
   ) => Promise<ApplicationTask>
   submitApplicationMaterialReview: (workspacePath: string, input: ApplicationMaterialReviewInput) => Promise<ApplicationTask>
+  repairApplicationSharedDossier: (workspacePath: string) => Promise<{
+    status: "prepared" | "ready"
+    sharedWorkspacePath: string
+    version: number
+  }>
   blockHighRiskAction: (workspacePath: string, action: string) => Promise<ApplicationTask>
   getApplicationPlatformAccount: (applicationUrl: string) => Promise<ApplicationPlatformAccount | null>
   saveApplicationPlatformAccount: (input: {
