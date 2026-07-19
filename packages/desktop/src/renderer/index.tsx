@@ -23,6 +23,7 @@ import pkg from "../../package.json"
 import type {
   ApplicationAgentChatItem,
   ApplicationAgentSession,
+  ApplicationSelectionListPreview,
   ApplicationTask,
   ApplicationTaskInput,
   TerraAuthStatus,
@@ -39,6 +40,7 @@ import {
   quickCommands,
   taskGeneratedFiles,
   taskGoals,
+  taskGroupKey,
   taskCounts,
   taskProgress,
 } from "./application-agent-view-model"
@@ -355,8 +357,36 @@ function agentMessageTime(message: ApplicationAgentChatItem) {
 
 function AgentQuestionCard(props: { message: ApplicationAgentChatItem; onReply: (text: string) => void }) {
   const [customAnswer, setCustomAnswer] = createSignal("")
+  const [selectedOptions, setSelectedOptions] = createSignal<Record<number, string[]>>({})
   const questions = () => props.message.question?.questions ?? []
-  const sendOption = (header: string, label: string) => props.onReply(`关于「${header || "顾问确认"}」：${label}`)
+  const selected = (index: number) => selectedOptions()[index] ?? []
+  const chooseOption = (index: number, question: NonNullable<ApplicationAgentChatItem["question"]>["questions"][number], label: string) => {
+    setSelectedOptions((current) => {
+      const previous = current[index] ?? []
+      const next = question.multiple
+        ? previous.includes(label)
+          ? previous.filter((item) => item !== label)
+          : [...previous, label]
+        : [label]
+      return { ...current, [index]: next }
+    })
+  }
+  const canSubmitOptions = () =>
+    questions().some((question) => question.options?.length) &&
+    questions().every((question, index) => !question.options?.length || selected(index).length > 0)
+  const submitOptions = () => {
+    if (!canSubmitOptions()) return
+    props.onReply(
+      questions()
+        .map((question, index) => {
+          const labels = selected(index)
+          if (labels.length === 0) return ""
+          return `关于「${question.header || "顾问确认"}」：${labels.join("、")}`
+        })
+        .filter(Boolean)
+        .join("\n"),
+    )
+  }
   const sendCustom = () => {
     const text = customAnswer().trim()
     if (!text) return
@@ -371,19 +401,22 @@ function AgentQuestionCard(props: { message: ApplicationAgentChatItem; onReply: 
       </div>
       <div class="question-card-body">
         <For each={questions()}>
-          {(question) => (
+          {(question, index) => (
             <section>
               <h3>{question.header || "确认问题"}</h3>
               <p>{question.question}</p>
               <Show when={question.options?.length}>
+                <small class="question-selection-hint">{question.multiple ? "可多选，选完后统一提交。" : "请选择一项，选完后统一提交。"}</small>
                 <div class="question-options">
                   <For each={question.options}>
                     {(option) => (
                       <button
                         type="button"
+                        classList={{ selected: selected(index()).includes(option.label) }}
+                        aria-pressed={selected(index()).includes(option.label)}
                         onClick={(event) => {
                           event.currentTarget.blur()
-                          sendOption(question.header, option.label)
+                          chooseOption(index(), question, option.label)
                         }}
                       >
                         <strong>{option.label}</strong>
@@ -396,6 +429,11 @@ function AgentQuestionCard(props: { message: ApplicationAgentChatItem; onReply: 
             </section>
           )}
         </For>
+        <Show when={questions().some((question) => question.options?.length)}>
+          <button type="button" class="question-submit" disabled={!canSubmitOptions()} onClick={submitOptions}>
+            确认并提交所选项
+          </button>
+        </Show>
         <div class="question-custom-reply">
           <input
             value={customAnswer()}
@@ -535,29 +573,37 @@ function ApplicationAgentShell(props: {
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
   const [showOpenCode, setShowOpenCode] = createSignal(false)
-  const [goKey, setGoKey] = createSignal("")
   const [goConfigured, setGoConfigured] = createSignal(false)
   const [agentMessages, setAgentMessages] = createSignal<ApplicationAgentChatItem[]>([])
   const [agentInput, setAgentInput] = createSignal("")
   const [restoreNotice, setRestoreNotice] = createSignal<string | null>(null)
   const [applicationTasks, setApplicationTasks] = createSignal<ApplicationTask[]>([])
   const [homeMode, setHomeMode] = createSignal<"new" | "read">("new")
-  const [selectedTaskStudent, setSelectedTaskStudent] = createSignal("")
+  const [selectedTaskGroupKey, setSelectedTaskGroupKey] = createSignal("")
   const [authStatus, setAuthStatus] = createSignal<TerraAuthStatus | null>(null)
   const [loginEmail, setLoginEmail] = createSignal("")
   const [loginPassword, setLoginPassword] = createSignal("")
-  const [platformPassword, setPlatformPassword] = createSignal("")
-  const [savedPlatformCredential, setSavedPlatformCredential] = createSignal<{ username: string; hasPassword: boolean; updatedAt: string } | null>(null)
+  const [creationMode, setCreationMode] = createSignal<"manual" | "selection-list">("manual")
+  const [selectionListPath, setSelectionListPath] = createSignal("")
+  const [selectionListPreview, setSelectionListPreview] = createSignal<ApplicationSelectionListPreview | null>(null)
+  const [selectedSelectionRows, setSelectedSelectionRows] = createSignal<number[]>([])
+  const [savedPlatformAccount, setSavedPlatformAccount] = createSignal<{ username: string; updatedAt: string } | null>(null)
+  const [supplementalFolder, setSupplementalFolder] = createSignal("")
+  const [materialNote, setMaterialNote] = createSignal("")
+  const [shareSupplementAcrossSchools, setShareSupplementAcrossSchools] = createSignal(false)
+  const [showRefillConfirmation, setShowRefillConfirmation] = createSignal(false)
+  const [refillRequestID, setRefillRequestID] = createSignal("")
   let agentChatListRef: HTMLDivElement | undefined
-  let pendingScrollRestore: { top: number; height: number } | null = null
   let lastAgentMessageSignature = ""
   let lastAutomationNotificationKey = ""
+  let lastBrowserHandoffNotificationKey = ""
   let lastProgressNotificationKey = ""
   let lastQuestionNotificationKey = ""
+  let lastSelectedActiveWorkspacePath = ""
   const taskGroups = createMemo(() => groupedTasks(applicationTasks()))
   const selectedTaskGroup = createMemo(() => {
     const groups = taskGroups()
-    return groups.find((group) => group.student === selectedTaskStudent()) ?? groups[0]
+    return groups.find((group) => group.key === selectedTaskGroupKey()) ?? groups[0]
   })
   const needsLogin = createMemo(() => Boolean(authStatus()?.configured && !authStatus()?.authenticated))
   const quotaText = createMemo(() => {
@@ -565,6 +611,7 @@ function ApplicationAgentShell(props: {
     if (!quota) return authStatus()?.localDevelopment ? "本地开发模式" : "等待登录"
     return `${quota.creditsRemaining} / ${quota.creditsTotal} credits`
   })
+  const supplementalFolderName = createMemo(() => supplementalFolder().split("/").filter(Boolean).at(-1) || "")
 
   const persistActiveSession = (session: ApplicationAgentSession) => {
     localStorage.setItem(activeApplicationSessionKey, JSON.stringify({ ...session, savedAt: Date.now() }))
@@ -578,34 +625,12 @@ function ApplicationAgentShell(props: {
     setInput((current) => ({ ...current, [key]: value }))
   }
 
-  const captureAgentScroll = () => {
-    const list = agentChatListRef
-    if (!list) return
-    pendingScrollRestore = { top: list.scrollTop, height: list.scrollHeight }
-  }
-
-  const agentListNearBottom = () => {
-    const list = agentChatListRef
-    if (!list) return true
-    return list.scrollHeight - list.scrollTop - list.clientHeight < 140
-  }
-
-  const scheduleAgentScroll = (mode: "restore" | "bottom", smooth = true) => {
+  const scrollAgentToLatest = () => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         const list = agentChatListRef
         if (!list) return
-        if (mode === "restore") {
-          if (!pendingScrollRestore) return
-          const delta = list.scrollHeight - pendingScrollRestore.height
-          list.scrollTop = Math.max(0, pendingScrollRestore.top + Math.min(delta, 0))
-          pendingScrollRestore = null
-          return
-        }
-        list.scrollTo({
-          top: list.scrollHeight,
-          behavior: smooth ? "smooth" : "auto",
-        })
+        list.scrollTop = list.scrollHeight
       })
     })
   }
@@ -638,6 +663,7 @@ function ApplicationAgentShell(props: {
   const notifyTaskProgress = (latestTask: ApplicationTask) => {
     const latestProgress = latestTask.progress.at(-1)
     if (!latestProgress) return
+    if (requiresBrowserHandoff(latestTask, latestProgress.message)) return
     const key = `${latestTask.workspacePath}:${latestProgress.at}:${latestProgress.status}:${latestProgress.message}`
     if (key === lastProgressNotificationKey) return
     if (!isRecentNotification(latestProgress.at)) return
@@ -650,20 +676,136 @@ function ApplicationAgentShell(props: {
     )
   }
 
+  const requiresBrowserHandoff = (latestTask: ApplicationTask, message: string) =>
+    latestTask.status === "等待顾问登录" ||
+    latestTask.status === "等待顾问接管浏览器" ||
+    /浏览器接管|顾问接管|handOffTaskSpace|验证码|MFA|captcha|人工确认|TERRA_EGO_BROWSER_(?:VERSION_CONFLICT|EXTERNAL_SERVICE_ACTIVE|SERVICE_UNAVAILABLE)|user\s*(?:is\s*)?controlling|user[-\s]?owned|inactive|not[-\s]?assigned|用户.*(?:控制|接管)|控制权.*(?:已被|不可用)/i.test(message)
+
+  const notifyBrowserHandoff = (latestTask: ApplicationTask, messages: ApplicationAgentChatItem[] = []) => {
+    const latestProgress = latestTask.progress.at(-1)
+    const handoffMessage = messages
+      .filter((item) => item.role !== "user")
+      .findLast((item) => requiresBrowserHandoff(latestTask, `${item.title}\n${item.body}`))
+    const message = handoffMessage ? `${handoffMessage.title}\n${handoffMessage.body}` : latestProgress?.message || "请在 ego-lite 中完成登录、验证码或人工确认，然后回复继续任务。"
+    if (!requiresBrowserHandoff(latestTask, message)) return
+    const key = `${latestTask.workspacePath}:${latestTask.status}:${handoffMessage?.id ?? latestProgress?.at ?? latestTask.updatedAt}:${message}`
+    if (key === lastBrowserHandoffNotificationKey) return
+    if (!isRecentNotification(handoffMessage?.time ?? latestProgress?.at ?? latestTask.updatedAt)) return
+    lastBrowserHandoffNotificationKey = key
+    window.api.showUrgentNotification("⚠️ 顾问需要接管浏览器", message)
+  }
+
   const pickFolder = async () => {
     const folder = await window.api.openDirectoryPicker({ title: "选择学生资料文件夹" })
     if (typeof folder === "string") update("sourceFolder", folder)
   }
 
-  const loadPlatformCredential = async (applicationUrl = input().applicationUrl) => {
-    if (!applicationUrl.trim()) {
-      setSavedPlatformCredential(null)
+  const pickSupplementalFolder = async () => {
+    const folder = await window.api.openDirectoryPicker({ title: "选择要补充给当前申请的材料文件夹" })
+    if (typeof folder === "string") setSupplementalFolder(folder)
+  }
+
+  const submitMaterialReview = async (mode: "supplement_folder" | "skip" | "note") => {
+    const current = task()
+    const session = opencodeSession()
+    const note = materialNote().trim()
+    if (!current || !session) return
+    if (mode === "supplement_folder" && !supplementalFolder()) {
+      setError("请先选择包含补充材料的文件夹。")
       return
     }
-    const saved = await window.api.getApplicationPlatformCredential(applicationUrl).catch(() => null)
-    setSavedPlatformCredential(saved ? { username: saved.username, hasPassword: saved.hasPassword, updatedAt: saved.updatedAt } : null)
+    if (mode === "note" && !note) {
+      setError("请先填写需要补充给 Agent 的文字信息。")
+      return
+    }
+
+    setBusy(true)
+    setError(null)
+    try {
+      const reviewed = await window.api.submitApplicationMaterialReview(current.workspacePath, {
+        mode,
+        sourceFolder: mode === "supplement_folder" ? supplementalFolder() : undefined,
+        note: note || undefined,
+        scope: shareSupplementAcrossSchools() ? "student" : "school",
+      })
+      setTask(reviewed)
+      await window.api.sendApplicationAgentPrompt(
+        session,
+        [
+          "顾问已在桌面应用的材料确认关口完成选择，material_review.json 已批准。",
+          "先读取 03_state/material_review.json，并以其中 supplementalFolder 的真实路径读取补充材料；不要猜固定目录。",
+          shareSupplementAcrossSchools()
+            ? "顾问已明确选择“同步到学生共享资料库”。只把跨学校通用事实写入 material_review.json 指定的 sharedProfileCandidatePath；当前学校专用内容仍留在本校 student_profile。应用完成并校验后才可发布共享档案新版本。"
+            : "顾问选择“仅当前学校”，所有补充内容必须保留在本校 overlay 中，不得改写学生共享资料库。",
+          mode === "supplement_folder"
+            ? "请先对新增文件运行 OCR、材料分类、学生档案和缺失项复查，并重新生成顾问文档。"
+            : mode === "note"
+              ? "请先将顾问填写的文字补充同步到学生档案、缺失项和顾问文档。"
+              : "顾问确认暂不补充材料或信息，请保留现有缺失项记录。",
+          "材料确认已完成，不要再次等待材料确认。完成必要复查后，再调用 application-agent_cua prepare_ego_task 并启动 ego-browser 填表。",
+        ].join("\n"),
+      )
+      setSupplementalFolder("")
+      setMaterialNote("")
+      setShareSupplementAcrossSchools(false)
+      setRestoreNotice("材料确认已交给 Agent。它会先同步补充内容，再启动 ego-lite 填表。")
+      await refreshAgentMessages(session)
+      await loadApplicationTasks()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const pickSelectionList = async () => {
+    const file = await window.api.openFilePicker({
+      title: "选择选校清单（Excel）",
+      extensions: ["xlsx"],
+    })
+    if (typeof file !== "string") return
+    setBusy(true)
+    setError(null)
+    try {
+      const preview = await window.api.previewApplicationSelectionList(file)
+      setSelectionListPath(file)
+      setSelectionListPreview(preview)
+      setSelectedSelectionRows(preview.rows.filter((row) => row.status === "ready" || row.status === "needs_research").map((row) => row.rowNumber))
+    } catch (err) {
+      setSelectionListPath("")
+      setSelectionListPreview(null)
+      setSelectedSelectionRows([])
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const downloadSelectionListTemplate = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const destination = await window.api.downloadApplicationSelectionListTemplate()
+      if (destination) setRestoreNotice(`已下载无密码选校清单模板：${destination}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleSelectionRow = (rowNumber: number, checked: boolean) => {
+    setSelectedSelectionRows((current) => (checked ? [...new Set([...current, rowNumber])] : current.filter((row) => row !== rowNumber)))
+  }
+
+  const loadPlatformAccount = async (applicationUrl = input().applicationUrl || "") => {
+    if (!applicationUrl.trim()) {
+      setSavedPlatformAccount(null)
+      return
+    }
+    const saved = await window.api.getApplicationPlatformAccount(applicationUrl).catch(() => null)
+    setSavedPlatformAccount(saved ? { username: saved.username, updatedAt: saved.updatedAt } : null)
     if (saved?.username && !input().platformUsername?.trim()) update("platformUsername", saved.username)
-    if (saved?.hasPassword) update("rememberPlatformPassword", true)
   }
 
   const loadApplicationTasks = async () => {
@@ -708,15 +850,13 @@ function ApplicationAgentShell(props: {
     }
   }
 
-  const clearPlatformCredential = async () => {
-    if (!input().applicationUrl.trim()) return
+  const clearPlatformAccount = async () => {
+    if (!(input().applicationUrl || "").trim()) return
     setBusy(true)
     setError(null)
     try {
-      await window.api.clearApplicationPlatformCredential(input().applicationUrl)
-      setSavedPlatformCredential(null)
-      setPlatformPassword("")
-      update("rememberPlatformPassword", false)
+      await window.api.clearApplicationPlatformAccount(input().applicationUrl || "")
+      setSavedPlatformAccount(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -735,15 +875,12 @@ function ApplicationAgentShell(props: {
         await switchTask(existingTask, "已找到已有申请，已切换到原工作区；不会再创建重复任务。", true)
         return
       }
-      if (input().applicationUrl.trim() && input().platformUsername?.trim()) {
-        const saved = await window.api.saveApplicationPlatformCredential({
-          applicationUrl: input().applicationUrl,
+      if ((input().applicationUrl || "").trim() && input().platformUsername?.trim()) {
+        const saved = await window.api.saveApplicationPlatformAccount({
+          applicationUrl: input().applicationUrl || "",
           username: input().platformUsername || "",
-          password: platformPassword(),
-          rememberPassword: Boolean(input().rememberPlatformPassword),
         })
-        setSavedPlatformCredential(saved ? { username: saved.username, hasPassword: saved.hasPassword, updatedAt: saved.updatedAt } : null)
-        setPlatformPassword("")
+        setSavedPlatformAccount(saved ? { username: saved.username, updatedAt: saved.updatedAt } : null)
       }
       const created = await window.api.createApplicationTask(input())
       if (created.reusedExisting) {
@@ -755,6 +892,43 @@ function ApplicationAgentShell(props: {
       setOpenCodeSession(session)
       persistActiveSession(session)
       setShowOpenCode(false)
+      await refreshAgentMessages(session)
+      await refreshAuthStatus()
+      await loadApplicationTasks()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const createTasksFromSelectionList = async () => {
+    if (!selectionListPath() || !selectionListPreview()) {
+      setError("请先选择并解析选校清单。")
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const batch = await window.api.createApplicationTasksFromSelectionList({
+        studentName: input().studentName,
+        sourceFolder: input().sourceFolder,
+        applicationType: input().applicationType,
+        selectionListPath: selectionListPath(),
+        selectedRows: selectedSelectionRows(),
+        outputLanguage: input().outputLanguage,
+        allowUpload: input().allowUpload,
+        taskGoal: input().taskGoal,
+      })
+      const firstTask = batch.tasks[0]
+      if (!firstTask) throw new Error("没有创建可启动的申请任务。")
+      setApplicationTasks((current) => [...batch.tasks, ...current.filter((item) => !batch.tasks.some((task) => task.workspacePath === item.workspacePath))])
+      setTask(firstTask)
+      const session = await window.api.startApplicationAgentSession(firstTask)
+      setOpenCodeSession(session)
+      persistActiveSession(session)
+      setShowOpenCode(false)
+      setRestoreNotice(`已创建 1 个学生工作区和 ${batch.tasks.length} 个学校子任务；材料、OCR、分类和学生核心档案只整理一次，将从第 1 所学校开始。`)
       await refreshAgentMessages(session)
       await refreshAuthStatus()
       await loadApplicationTasks()
@@ -782,6 +956,97 @@ function ApplicationAgentShell(props: {
     }
   }
 
+  const resendStartPrompt = async () => {
+    const current = task()
+    const session = opencodeSession()
+    if (!current || !session) return
+    setBusy(true)
+    setError(null)
+    try {
+      await window.api.resendApplicationAgentStartPrompt(session, current)
+      setRestoreNotice("已重新发送精简启动指令：只要求建立 todowrite、初始化工作区并同步状态。")
+      await refreshAgentMessages(session)
+      await refreshAuthStatus()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const openRefillConfirmation = () => {
+    if (!refillRequestID()) setRefillRequestID(window.crypto.randomUUID())
+    setShowRefillConfirmation(true)
+  }
+
+  const cancelRefillConfirmation = () => {
+    setShowRefillConfirmation(false)
+  }
+
+  const authorizeBrowserSafetyContinue = async () => {
+    const current = task()
+    const stop = current?.browserSafetyStop
+    if (!current || !stop || stop.kind !== "alert_evidence_lost" || !stop.active) return
+    setBusy(true)
+    setError(null)
+    try {
+      const updated = await window.api.authorizeBrowserSafetyContinue(current.workspacePath, {
+        decisionId: stop.decisionId,
+        taskSpaceId: stop.taskSpaceId,
+      })
+      setTask(updated)
+      setRestoreNotice("已授权在当前浏览器空间继续。Agent 下一回合只能先观察页面，不得直接填写或保存。")
+      if (opencodeSession()) {
+        await window.api.sendApplicationAgentPrompt(
+          opencodeSession()!,
+          [
+            "顾问已在桌面授权 alert_evidence_lost 同空间继续。",
+            "先读取 03_state/application_progress.json 中的 egoBrowser.safetyStop：应已 active=false 且 observationRequired=true，decisionId 与 taskSpaceId 保持不变。",
+            "不要调用 resolve_browser_safety_stop 伪造确认，也不要传 consultantConfirmed:true 试图解锁。",
+            "下一独立 heredoc 只能复用同一 taskSpaceId 做 pageInfo/list/snapshot 观察；然后调用 record_observation。",
+            "在首次 record_observation 成功前，禁止填写、保存、complete、takeOver 或导航。",
+            "若顾问选择重新填写，走桌面“重新填写”正式链路，不要静默新建空间。",
+          ].join("\n"),
+        )
+      }
+      await loadApplicationTasks()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const startRefillSession = async () => {
+    const current = task()
+    if (!current) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await window.api.startApplicationAgentRefillSession({
+        task: current,
+        requestID: refillRequestID() || window.crypto.randomUUID(),
+        sourceSessionID: opencodeSession()?.sessionID,
+      })
+      setOpenCodeSession(result.session)
+      setAgentMessages([])
+      persistActiveSession(result.session)
+      setShowOpenCode(false)
+      setShowRefillConfirmation(false)
+      setRefillRequestID("")
+      setRestoreNotice(
+        `已新建第 ${result.attempt.ordinal} 次独立填表会话。材料、学生档案和学校要求继续复用；旧对话、旧浏览器进度与审计记录均已保留。`,
+      )
+      await refreshAgentMessages(result.session)
+      await refreshAuthStatus()
+      await loadApplicationTasks()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const blockSubmit = async () => {
     const current = task()
     const session = opencodeSession()
@@ -791,13 +1056,60 @@ function ApplicationAgentShell(props: {
     await refreshAuthStatus()
   }
 
-  const stopAutomation = async () => {
+  const taskNeedsExplicitContinue = (status: ApplicationTask["status"]) =>
+    ["已暂停", "等待顾问登录", "等待顾问接管浏览器"].includes(status)
+
+  const canStartRefill = (status: ApplicationTask["status"]) => [
+    "正在填写申请平台",
+    "正在保存申请进度",
+    "正在上传材料",
+    "等待补充材料",
+    "等待顾问登录",
+    "等待顾问接管浏览器",
+    "阶段性完成",
+    "异常中断",
+    "已暂停",
+  ].includes(status)
+
+  const canEnterNextSchool = (current: ApplicationTask) =>
+    current.sharedDossierStatus === "ready" &&
+    ["阶段性完成", "等待补充材料", "异常中断", "已暂停"].includes(current.status)
+
+  const toggleTaskPause = async () => {
+    const current = task()
+    if (!current) return
+    setBusy(true)
     setError(null)
     try {
-      await window.api.stopApplicationAutomation(task()?.workspacePath)
-      setRestoreNotice("已停止浏览器自动化，并把窗口焦点释放回申请 Agent。")
+      if (taskNeedsExplicitContinue(current.status)) {
+        const resumed = await window.api.resumeApplicationTask(current.workspacePath)
+        setTask(resumed)
+        setRestoreNotice("顾问已明确继续任务。Agent 会先读取已保存的浏览器审计状态；只有此前明确交接的空间才会恢复，绝不会抢占顾问自行控制或 inactive 的浏览器。")
+        if (opencodeSession()) {
+          await window.api.sendApplicationAgentPrompt(
+            opencodeSession()!,
+            [
+              "顾问已明确点击继续任务。先读取 task_control.json、task_state.json、application_progress.json 和 agent_execution_audit.json；不要依据旧聊天内容猜测浏览器控制权。",
+              "继续任务只清除普通暂停 paused，绝不会清除 egoBrowser.safetyStop。若 safetyStop.active 为 true，或 observationRequired 为 true，必须遵守该硬停止，不得 resume/takeOver/填写/保存。",
+              "仅当 application_progress.json 中 egoBrowser.handoffPending 为 true，或旧记录存在 handoffAt 且 handoffPending 未明确为 false、并且保存的是可信数值 taskSpaceId，且没有 active safetyStop 时，才调用 application-agent_cua：action=resume_ego、taskSpaceId=保存的 ID、consultantConfirmed=true。不得在调用成功前运行 ego-browser。",
+              "resume_ego 成功后，严格按其返回指令执行：新的 heredoc 只能 takeOverTaskSpace(保存的数值 ID) 后 pageInfo() 观察；这一观察回合不得填写、导航、保存、关闭或处理未知弹窗。",
+              "若没有上述已审计的待恢复交接，绝不调用 resume_ego 或 takeOverTaskSpace。改为调用 prepare_ego_task：它会对缺失或非数值的旧 taskSpaceId 先列出 listTaskSpaces 并用 OpenCode question 请求顾问确认；正常 agent ownership 空间也必须先重新观察。遇到 user controlling、inactive 或不明确弹窗时继续交接，不得自动抢占。",
+            ].join("\n"),
+          )
+        }
+      } else {
+        const paused = await window.api.pauseApplicationTask(current.workspacePath)
+        setTask(paused)
+        setRestoreNotice("任务将在当前浏览器回合或单项处理结束后暂停；之后不会启动新的浏览器回合、材料处理或申请步骤。")
+        if (opencodeSession()) {
+          await window.api.sendApplicationAgentPrompt(opencodeSession()!, "顾问已暂停任务。不要再启动任何新操作；当前单项处理完成后停止，并等待顾问点击继续任务。")
+        }
+      }
+      await loadApplicationTasks()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -805,14 +1117,12 @@ function ApplicationAgentShell(props: {
     const text = agentInput().trim()
     const session = opencodeSession()
     if (!session || !text) return
-    const wasNearBottom = agentListNearBottom()
     setBusy(true)
     setError(null)
     try {
       setAgentInput("")
       await window.api.sendApplicationAgentPrompt(session, text)
       await refreshAgentMessages(session)
-      if (wasNearBottom) scheduleAgentScroll("bottom", true)
       await refreshAuthStatus()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -824,13 +1134,11 @@ function ApplicationAgentShell(props: {
   const replyToAgentQuestion = async (text: string) => {
     const session = opencodeSession()
     if (!session || !text.trim()) return
-    captureAgentScroll()
     setBusy(true)
     setError(null)
     try {
       await window.api.sendApplicationAgentPrompt(session, text.trim())
       await refreshAgentMessages(session)
-      scheduleAgentScroll("restore", false)
       await refreshAuthStatus()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -841,10 +1149,19 @@ function ApplicationAgentShell(props: {
 
   const resetToHome = () => {
     clearActiveSession()
+    lastSelectedActiveWorkspacePath = ""
+    setInput(defaultTaskInput())
+    setCreationMode("manual")
+    setSelectionListPath("")
+    setSelectionListPreview(null)
+    setSelectedSelectionRows([])
+    setSavedPlatformAccount(null)
     setTask(null)
     setOpenCodeSession(null)
     setShowOpenCode(false)
     setError(null)
+    setShowRefillConfirmation(false)
+    setRefillRequestID("")
   }
 
   const switchTask = async (next: ApplicationTask, notice?: string, force = false) => {
@@ -856,9 +1173,14 @@ function ApplicationAgentShell(props: {
     try {
       const latestTask = await window.api.getApplicationTask(next.workspacePath)
       const session = await window.api.findApplicationAgentSession(latestTask.workspacePath)
-      if (!session) throw new Error("未找到或无法创建该申请的 OpenCode 会话")
+        ?? await window.api.startApplicationAgentSession(latestTask)
       setTask(latestTask)
       setInput(latestTask.input)
+      setSupplementalFolder("")
+      setMaterialNote("")
+      setShareSupplementAcrossSchools(false)
+      setShowRefillConfirmation(false)
+      setRefillRequestID("")
       setOpenCodeSession(session)
       setShowOpenCode(false)
       setAgentMessages([])
@@ -873,6 +1195,24 @@ function ApplicationAgentShell(props: {
     }
   }
 
+  const switchToNextBatchTask = async () => {
+    const current = task()
+    if (!current?.input.batchId) return
+    if (!canEnterNextSchool(current)) {
+      setRestoreNotice("请先完成学生共享档案，并完成或暂停当前学校。资料整理、材料确认或浏览器填写仍在进行时，不会并发启动下一所学校。")
+      return
+    }
+    const next = applicationTasks()
+      .filter((item) => item.input.batchId === current.input.batchId && (item.input.batchOrder ?? 0) > (current.input.batchOrder ?? 0))
+      .sort((a, b) => (a.input.batchOrder ?? Number.MAX_SAFE_INTEGER) - (b.input.batchOrder ?? Number.MAX_SAFE_INTEGER))[0]
+    if (!next) {
+      setRestoreNotice("这是本批次最后一个学校任务。")
+      return
+    }
+    if (current.status !== "已暂停") await window.api.pauseApplicationTask(current.workspacePath)
+    await switchTask(next, `已暂停上一所学校并切换到第 ${next.input.batchOrder} 所；新 Agent 将直接复用学生共享档案，不再重复 OCR、分类和整理资料。`)
+  }
+
   const renderTaskList = () => (
     <Show
       when={taskGroups().length > 0}
@@ -884,11 +1224,12 @@ function ApplicationAgentShell(props: {
             {(group) => (
               <button
                 type="button"
-                classList={{ active: group.student === selectedTaskGroup()?.student }}
-                onClick={() => setSelectedTaskStudent(group.student)}
+                classList={{ active: group.key === selectedTaskGroup()?.key }}
+                onClick={() => setSelectedTaskGroupKey(group.key)}
+                title={group.key}
               >
                 <strong>{group.student}</strong>
-                <small>{group.items.length} 个申请</small>
+                <small>{group.items.length} 个申请 · {new Date(Math.min(...group.items.map((item) => new Date(item.createdAt).getTime()))).toLocaleDateString()} · {group.items[0]?.input.school || "未命名批次"}</small>
               </button>
             )}
           </For>
@@ -905,7 +1246,7 @@ function ApplicationAgentShell(props: {
                       disabled={busy()}
                       onClick={() => switchTask(item)}
                     >
-                      <strong>{item.input.school || "未填写学校"}</strong>
+                      <strong>{item.input.batchOrder ? `第 ${item.input.batchOrder} 所 · ` : ""}{item.input.school || "未填写学校"}</strong>
                       <span>{item.input.program || "未填写项目"}</span>
                       <small>{item.status} · {new Date(item.updatedAt).toLocaleString()}</small>
                     </button>
@@ -919,27 +1260,8 @@ function ApplicationAgentShell(props: {
     </Show>
   )
 
-  const saveGoKey = async () => {
-    setBusy(true)
-    setError(null)
-    try {
-      await window.api.setOpenCodeGoApiKey(goKey())
-      setGoConfigured(Boolean(goKey().trim()))
-      setGoKey("")
-      window.api.showNotification(
-        "OpenCode Go 已配置",
-        "API key 已保存到本机安全存储。重启应用后 OpenCode sidecar 会自动读取。",
-      )
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const refreshAgentMessages = async (session = opencodeSession()) => {
     if (!session) return
-    const wasNearBottom = agentListNearBottom()
     const [messages, latestTask] = await Promise.all([
       window.api.getApplicationAgentMessages(session),
       window.api.getApplicationTask(session.workspacePath).catch(() => null),
@@ -950,10 +1272,10 @@ function ApplicationAgentShell(props: {
     if (changed) {
       lastAgentMessageSignature = nextSignature
       notifyPendingQuestion(messages)
-      if (pendingScrollRestore) scheduleAgentScroll("restore", false)
-      else if (wasNearBottom) scheduleAgentScroll("bottom", true)
+      scrollAgentToLatest()
     }
     if (latestTask) {
+      notifyBrowserHandoff(latestTask, messages)
       notifyTaskProgress(latestTask)
       const stopKey = `${latestTask.workspacePath}:${latestTask.status}:${latestTask.updatedAt}`
       const latestProgressMessage = latestTask.progress.at(-1)?.message || ""
@@ -984,24 +1306,31 @@ function ApplicationAgentShell(props: {
   createEffect(() => {
     const groups = taskGroups()
     if (groups.length === 0) {
-      setSelectedTaskStudent("")
+      setSelectedTaskGroupKey("")
       return
     }
-    const activeStudent = task()?.input.studentName.trim()
-    if (activeStudent && groups.some((group) => group.student === activeStudent)) {
-      setSelectedTaskStudent(activeStudent)
+    const activeTask = task()
+    const activeKey = activeTask ? taskGroupKey(activeTask) : ""
+    if (
+      activeTask?.workspacePath &&
+      activeTask.workspacePath !== lastSelectedActiveWorkspacePath &&
+      activeKey &&
+      groups.some((group) => group.key === activeKey)
+    ) {
+      lastSelectedActiveWorkspacePath = activeTask.workspacePath
+      setSelectedTaskGroupKey(activeKey)
       return
     }
-    if (!groups.some((group) => group.student === selectedTaskStudent())) {
-      setSelectedTaskStudent(groups[0].student)
+    if (!groups.some((group) => group.key === selectedTaskGroupKey())) {
+      setSelectedTaskGroupKey(groups[0].key)
     }
   })
 
   createEffect(() => {
-    const applicationUrl = input().applicationUrl
+    const applicationUrl = input().applicationUrl || ""
     if (!applicationUrl.trim() || !URL.canParse(applicationUrl)) return
     const timer = window.setTimeout(() => {
-      void loadPlatformCredential(applicationUrl)
+      void loadPlatformAccount(applicationUrl)
     }, 350)
     onCleanup(() => window.clearTimeout(timer))
   })
@@ -1119,7 +1448,7 @@ function ApplicationAgentShell(props: {
               </div>
               <div class="application-agent-status-card">
                 <span>OpenCode Go / DeepSeek V4 Flash</span>
-                <strong>{goConfigured() ? "GO 订阅 API 已内置" : "需要配置 GO API"}</strong>
+                <strong>{goConfigured() ? "GO 订阅 API 已内置" : "模型服务暂不可用"}</strong>
                 <small>{props.providerReady ? "本地 OpenCode 服务已就绪。" : "首页可用，OpenCode 服务正在后台启动。"}</small>
                 <div class="quota-card-line">
                   <span>AI 额度</span>
@@ -1133,21 +1462,7 @@ function ApplicationAgentShell(props: {
                     </div>
                   )}
                 </Show>
-                <Show
-                  when={!goConfigured()}
-                  fallback={<small>模型凭据已随本机程序配置，顾问可直接创建申请任务。</small>}
-                >
-                  <div class="go-key-row">
-                    <input
-                      type="password"
-                      value={goKey()}
-                      onInput={(event) => setGoKey(event.currentTarget.value)}
-                      placeholder="粘贴 OpenCode Go API key"
-                    />
-                    <button type="button" disabled={busy() || !goKey().trim()} onClick={saveGoKey}>保存</button>
-                  </div>
-                  <small>备用配置会保存到本机安全存储；保存后请重启应用让 sidecar 读取。</small>
-                </Show>
+                <small>{goConfigured() ? "模型凭据已随本机程序配置；不会写入钥匙串。" : "请联系 Terra-Edu 管理员检查本机模型服务配置。"}</small>
               </div>
             </section>
 
@@ -1168,6 +1483,24 @@ function ApplicationAgentShell(props: {
               }
             >
             <section class="application-agent-form">
+              <div class="creation-mode-picker" role="group" aria-label="创建申请任务方式">
+                <button
+                  type="button"
+                  classList={{ active: creationMode() === "manual" }}
+                  onClick={() => setCreationMode("manual")}
+                >
+                  <strong>单个学校</strong>
+                  <span>手动填写一所学校和项目</span>
+                </button>
+                <button
+                  type="button"
+                  classList={{ active: creationMode() === "selection-list" }}
+                  onClick={() => setCreationMode("selection-list")}
+                >
+                  <strong>导入选校清单</strong>
+                  <span>从 Excel 批量创建学校任务</span>
+                </button>
+              </div>
               <div class="field-grid">
                 <label>
                   学生姓名
@@ -1181,14 +1514,6 @@ function ApplicationAgentShell(props: {
                   </div>
                 </label>
                 <label>
-                  申请学校
-                  <input value={input().school} onInput={(event) => update("school", event.currentTarget.value)} />
-                </label>
-                <label>
-                  申请项目 / 专业
-                  <input value={input().program} onInput={(event) => update("program", event.currentTarget.value)} />
-                </label>
-                <label>
                   申请类型
                   <select
                     value={input().applicationType}
@@ -1198,66 +1523,10 @@ function ApplicationAgentShell(props: {
                   </select>
                 </label>
                 <label>
-                  申请平台链接
-                  <input
-                    value={input().applicationUrl}
-                    onInput={(event) => update("applicationUrl", event.currentTarget.value)}
-                    onBlur={() => void loadPlatformCredential()}
-                    placeholder="https://..."
-                  />
-                </label>
-                <label>
-                  申请平台账号
-                  <input
-                    value={input().platformUsername || ""}
-                    onInput={(event) => update("platformUsername", event.currentTarget.value)}
-                    placeholder="申请系统登录邮箱/账号"
-                  />
-                </label>
-                <label>
-                  申请平台密码
-                  <input
-                    type="password"
-                    value={platformPassword()}
-                    onInput={(event) => setPlatformPassword(event.currentTarget.value)}
-                    placeholder={savedPlatformCredential()?.hasPassword ? "已保存，可留空继续使用" : "可选：用于自动登录"}
-                  />
-                </label>
-                <div class="credential-card wide">
-                  <label class="check-row">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(input().rememberPlatformPassword)}
-                      onChange={(event) => update("rememberPlatformPassword", event.currentTarget.checked)}
-                    />
-                    记住此申请平台密码，下次自动登录
-                  </label>
-                  <Show
-                    when={savedPlatformCredential()}
-                    fallback={<small>密码只保存在本机钥匙串，不写入申请工作区、聊天或生成文件。</small>}
-                  >
-                    {(saved) => (
-                      <div class="credential-status">
-                        <span>{saved().username}</span>
-                        <strong>{saved().hasPassword ? "已保存密码" : "仅保存账号"}</strong>
-                        <button type="button" disabled={busy()} onClick={clearPlatformCredential}>清除</button>
-                      </div>
-                    )}
-                  </Show>
-                </div>
-                <label>
-                  申请截止日期
-                  <input type="date" value={input().deadline} onInput={(event) => update("deadline", event.currentTarget.value)} />
-                </label>
-                <label>
                   本次任务目标
                   <select value={input().taskGoal} onChange={(event) => update("taskGoal", event.currentTarget.value)}>
                     <For each={taskGoals}>{(item) => <option value={item}>{item}</option>}</For>
                   </select>
-                </label>
-                <label>
-                  登录方式
-                  <input value={input().loginMethod} onInput={(event) => update("loginMethod", event.currentTarget.value)} />
                 </label>
                 <label>
                   输出语言
@@ -1269,11 +1538,101 @@ function ApplicationAgentShell(props: {
                     <option value="en">English</option>
                   </select>
                 </label>
-                <label class="wide">
-                  顾问备注
-                  <textarea value={input().notes} onInput={(event) => update("notes", event.currentTarget.value)} />
-                </label>
               </div>
+              <Show
+                when={creationMode() === "manual"}
+                fallback={
+                  <section class="selection-list-import">
+                    <header>
+                      <div>
+                        <h2>选校清单导入</h2>
+                        <p>系统会创建一个学生工作区，材料、OCR、分类和学生核心档案只整理一次；每所学校作为独立子任务依次填写。</p>
+                      </div>
+                      <button type="button" disabled={busy()} onClick={downloadSelectionListTemplate}>下载无密码模板</button>
+                    </header>
+                    <div class="folder-picker-row">
+                      <input value={selectionListPath()} readonly placeholder="选择已填写的 .xlsx 选校清单" />
+                      <button type="button" disabled={busy()} onClick={pickSelectionList}>选择 Excel</button>
+                    </div>
+                    <Show when={selectionListPreview()}>
+                      {(preview) => (
+                        <div class="selection-list-preview">
+                          <p>已读取 {preview().sourceName}：勾选要创建的学校项目；没有申请链接的行会先由 Agent 核验。</p>
+                          <For each={preview().rows}>
+                            {(row) => {
+                              const selectable = row.status === "ready" || row.status === "needs_research"
+                              return (
+                                <label classList={{ "selection-list-row": true, invalid: !selectable }}>
+                                  <input
+                                    type="checkbox"
+                                    disabled={!selectable}
+                                    checked={selectedSelectionRows().includes(row.rowNumber)}
+                                    onChange={(event) => toggleSelectionRow(row.rowNumber, event.currentTarget.checked)}
+                                  />
+                                  <span>第 {row.rowNumber} 行</span>
+                                  <strong>{row.school || "未填学校"} · {row.program || "未填项目"}</strong>
+                                  <small>{row.warnings.join("；") || (row.status === "ready" ? "信息齐全" : "待核验链接")}</small>
+                                </label>
+                              )
+                            }}
+                          </For>
+                          <For each={preview().warnings}>{(warning) => <p class="application-agent-error">{warning}</p>}</For>
+                        </div>
+                      )}
+                    </Show>
+                  </section>
+                }
+              >
+                <div class="field-grid">
+                  <label>
+                    申请学校
+                    <input value={input().school} onInput={(event) => update("school", event.currentTarget.value)} />
+                  </label>
+                  <label>
+                    申请项目 / 专业
+                    <input value={input().program} onInput={(event) => update("program", event.currentTarget.value)} />
+                  </label>
+                  <label>
+                    申请平台链接
+                    <input
+                      value={input().applicationUrl || ""}
+                      onInput={(event) => update("applicationUrl", event.currentTarget.value)}
+                      onBlur={() => void loadPlatformAccount()}
+                      placeholder="https://..."
+                    />
+                  </label>
+                  <label>
+                    申请平台账号
+                    <input
+                      value={input().platformUsername || ""}
+                      onInput={(event) => update("platformUsername", event.currentTarget.value)}
+                      placeholder="申请系统登录邮箱/账号"
+                    />
+                  </label>
+                  <div class="credential-card wide">
+                    <Show
+                      when={savedPlatformAccount()}
+                      fallback={<small>只保存申请平台账号；密码不收集、不保存，登录时由顾问在平台页面手动输入。</small>}
+                    >
+                      {(saved) => (
+                        <div class="credential-status">
+                          <span>{saved().username}</span>
+                          <strong>已保存账号</strong>
+                          <button type="button" disabled={busy()} onClick={clearPlatformAccount}>清除</button>
+                        </div>
+                      )}
+                    </Show>
+                  </div>
+                  <label>
+                    申请截止日期
+                    <input type="date" value={input().deadline || ""} onInput={(event) => update("deadline", event.currentTarget.value)} />
+                  </label>
+                  <label class="wide">
+                    顾问备注
+                    <textarea value={input().notes || ""} onInput={(event) => update("notes", event.currentTarget.value)} />
+                  </label>
+                </div>
+              </Show>
               <label class="check-row">
                 <input
                   type="checkbox"
@@ -1283,8 +1642,13 @@ function ApplicationAgentShell(props: {
                 允许 Agent 尝试上传可确认匹配的材料
               </label>
               <Show when={error()}>{(message) => <p class="application-agent-error">{message()}</p>}</Show>
-              <button class="primary-action" type="button" disabled={busy()} onClick={createTask}>
-                {busy() ? "正在交给 OpenCode Agent..." : "开始申请任务"}
+              <button
+                class="primary-action"
+                type="button"
+                disabled={busy() || (creationMode() === "selection-list" && selectedSelectionRows().length === 0)}
+                onClick={creationMode() === "manual" ? createTask : createTasksFromSelectionList}
+              >
+                {busy() ? "正在交给 OpenCode Agent..." : creationMode() === "manual" ? "开始申请任务" : `创建 ${selectedSelectionRows().length} 个申请任务`}
               </button>
             </section>
             </Show>
@@ -1313,10 +1677,28 @@ function ApplicationAgentShell(props: {
                   <dd><span class="status-pill">{currentTask().status}</span></dd>
                 </dl>
 	              </section>
-		              <section class="side-section task-switcher">
-		                <h2>申请列表</h2>
+              <section class="side-section task-switcher">
+	                <h2>申请列表</h2>
                     {renderTaskList()}
-		              </section>
+	              </section>
+              <Show when={currentTask().input.batchId}>
+                <section class="side-section">
+                  <h2>批次处理</h2>
+                  <p>当前为第 {currentTask().input.batchOrder || "?"} 所学校。学生材料、OCR、分类结果和核心档案统一复用；各校要求、缺失项、Agent 对话、Ego 空间和填表进度彼此隔离。</p>
+                  <div class="student-workspace-actions">
+                    <button type="button" onClick={() => window.api.openPath(currentTask().input.batchWorkspacePath || currentTask().workspacePath)}>打开学生工作区</button>
+                    <Show when={currentTask().input.sharedWorkspacePath}>
+                      {(path) => <button type="button" onClick={() => window.api.openPath(path())}>打开共享资料库</button>}
+                    </Show>
+                    <button
+                      type="button"
+                      disabled={busy() || !canEnterNextSchool(currentTask())}
+                      title="当前学校完成或暂停后，才会启动下一所学校"
+                      onClick={switchToNextBatchTask}
+                    >进入下一所学校</button>
+                  </div>
+                </section>
+              </Show>
               <section class="side-section">
                 <h2>缺失统计</h2>
                 <div class="stat-grid">
@@ -1337,26 +1719,152 @@ function ApplicationAgentShell(props: {
                 <h2>快捷操作</h2>
                 <div class="quick-actions">
                   <For each={quickCommands}>{(command) => <button type="button" disabled={busy()} onClick={() => runCommand(command)}>{command}</button>}</For>
-                  <button type="button" class="danger-outline" onClick={stopAutomation}>停止自动化 / 释放控制</button>
+                  <button type="button" class="danger-outline" disabled={busy()} onClick={toggleTaskPause}>{taskNeedsExplicitContinue(currentTask().status) ? "继续任务" : "暂停任务"}</button>
+                  <small>暂停会等待当前浏览器回合或单项处理结束；之后不会启动新的申请步骤。</small>
                   <button type="button" class="danger-outline" onClick={blockSubmit}>测试高风险拦截</button>
                 </div>
               </section>
             </aside>
 
               <section class="application-agent-main">
-              <Show when={restoreNotice()}>
-                {(notice) => <div class="restore-notice">{notice()}</div>}
-              </Show>
-              <div class="progress-strip">
-                <For each={taskProgress(currentTask()).slice(-12)}>
-                  {(entry) => (
-                    <article>
-                      <span>{new Date(entry.at).toLocaleTimeString()}</span>
-                      <strong>{entry.status}</strong>
-                      <p>{entry.message}</p>
-                    </article>
-                  )}
-                </For>
+              <div class="application-agent-context">
+                <Show when={restoreNotice()}>
+                  {(notice) => <div class="restore-notice">{notice()}</div>}
+                </Show>
+                <Show when={showRefillConfirmation()}>
+                  <section class="refill-confirmation" aria-live="polite">
+                    <div>
+                      <p>重新填写</p>
+                      <h2>新建一个干净的填表对话？</h2>
+                      <span>不会再次 OCR、分类或生成学生档案，也不会继续读取旧聊天上下文。</span>
+                    </div>
+                    <ul>
+                      <li><strong>继续复用：</strong>现有材料、学生档案、学校要求、缺失项</li>
+                      <li><strong>重新开始：</strong>OpenCode 对话、独立 Ego 浏览器空间、当次填表进度</li>
+                      <li><strong>完整保留：</strong>旧对话、旧浏览器进度和审计记录</li>
+                    </ul>
+                    <div class="refill-confirmation-actions">
+                      <Show when={currentTask().input.batchId}>
+                        <small>批量任务会按学校逐个重开，避免多个浏览器互相干扰；切换到下一所后可再次使用本功能，仍复用同一批学生材料。</small>
+                      </Show>
+                      <button type="button" class="primary-action" disabled={busy()} onClick={startRefillSession}>
+                        {busy() ? "正在创建干净会话..." : "确认重新填写"}
+                      </button>
+                      <button type="button" disabled={busy()} onClick={cancelRefillConfirmation}>取消</button>
+                    </div>
+                  </section>
+                </Show>
+                <Show when={currentTask().browserSafetyStop?.active || currentTask().browserSafetyStop?.observationRequired}>
+                  <section class="material-review-gate" aria-live="polite">
+                    <div class="material-review-heading">
+                      <p>浏览器安全停止</p>
+                      <h2>
+                        {currentTask().browserSafetyStop?.kind === "cleanup_failed"
+                          ? "当前 task space 已污染"
+                          : currentTask().browserSafetyStop?.observationRequired
+                            ? "请先观察当前页面"
+                            : "弹窗证据可能丢失"}
+                      </h2>
+                      <span>
+                        {currentTask().browserSafetyStop?.kind === "cleanup_failed"
+                          ? "注入清理失败，当前浏览器空间不可继续使用。只能点击“重新填写”创建全新空间；普通“继续任务”不能解除。"
+                          : currentTask().browserSafetyStop?.observationRequired
+                            ? "顾问已授权同空间继续。Agent 下一回合只能观察，首次观察成功前不能填写或保存。"
+                            : "iframe load-time alert 文字可能丢失。可在查看页面后继续当前空间，或重新填写；不能仅凭模型确认绕过。"}
+                      </span>
+                    </div>
+                    <div class="material-review-summary">
+                      <span>taskSpaceId {currentTask().browserSafetyStop?.taskSpaceId}</span>
+                      <span>decisionId {currentTask().browserSafetyStop?.decisionId}</span>
+                    </div>
+                    <div class="material-review-buttons">
+                      <Show when={currentTask().browserSafetyStop?.kind === "alert_evidence_lost" && currentTask().browserSafetyStop?.active}>
+                        <button type="button" class="primary-action" disabled={busy()} onClick={() => void authorizeBrowserSafetyContinue()}>
+                          查看后继续当前空间
+                        </button>
+                      </Show>
+                      <button type="button" class="refill-action" disabled={busy() || showRefillConfirmation()} onClick={openRefillConfirmation}>
+                        重新填写（新建浏览器空间）
+                      </button>
+                    </div>
+                  </section>
+                </Show>
+                <Show when={currentTask().status === "等待顾问确认材料"}>
+                  <section class="material-review-gate" aria-live="polite">
+                    <div class="material-review-heading">
+                      <p>材料确认</p>
+                      <h2>确认后再启动申请平台</h2>
+                      <span>资料档案、缺失清单和阶段总结已生成。ego-lite 还没有启动。</span>
+                    </div>
+                    <div class="material-review-summary">
+                      <span>{taskCounts(currentTask()).totalFiles} 份已整理材料</span>
+                      <span>{taskCounts(currentTask()).missingMaterials + taskCounts(currentTask()).missingInformation + taskCounts(currentTask()).uncertainItems} 项待处理</span>
+                    </div>
+                    <div class="material-review-actions">
+                      <div class="material-review-folder">
+                        <div>
+                          <strong>补充材料文件夹</strong>
+                          <span>{supplementalFolderName() ? `已选择：${supplementalFolderName()}` : "直接选择文件夹，无需复制地址"}</span>
+                        </div>
+                        <button type="button" disabled={busy()} onClick={pickSupplementalFolder}>
+                          {supplementalFolderName() ? "更换文件夹" : "选择文件夹"}
+                        </button>
+                      </div>
+                      <label>
+                        补充文字信息（可选）
+                        <textarea
+                          value={materialNote()}
+                          onInput={(event) => setMaterialNote(event.currentTarget.value)}
+                          placeholder="例如：学生确认当前无工作经历；父母职业信息待填……"
+                        />
+                      </label>
+                      <Show when={currentTask().input.sharedWorkspacePath}>
+                        <label class="material-review-scope">
+                          <input
+                            type="checkbox"
+                            checked={shareSupplementAcrossSchools()}
+                            onChange={(event) => setShareSupplementAcrossSchools(event.currentTarget.checked)}
+                          />
+                          <span>
+                            <strong>同步到这个学生的后续学校</strong>
+                            <small>仅勾选成绩单、证件、语言成绩等通用事实；当前学校专用文书或回答不要勾选。</small>
+                          </span>
+                        </label>
+                      </Show>
+                      <div class="material-review-buttons">
+                        <button
+                          type="button"
+                          class="primary-action"
+                          disabled={busy() || !supplementalFolder()}
+                          onClick={() => void submitMaterialReview("supplement_folder")}
+                        >
+                          读取补充材料后开始填表
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy() || !materialNote().trim()}
+                          onClick={() => void submitMaterialReview("note")}
+                        >
+                          把文字交给 AI 后开始填表
+                        </button>
+                        <button type="button" disabled={busy()} onClick={() => void submitMaterialReview("skip")}>
+                          暂不补充，开始填表
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+                </Show>
+                <div class="progress-strip">
+                  <For each={taskProgress(currentTask()).slice(-12)}>
+                    {(entry) => (
+                      <article>
+                        <span>{new Date(entry.at).toLocaleTimeString()}</span>
+                        <strong>{entry.status}</strong>
+                        <p>{entry.message}</p>
+                      </article>
+                    )}
+                  </For>
+                </div>
               </div>
 
               <div class="opencode-frame">
@@ -1369,7 +1877,18 @@ function ApplicationAgentShell(props: {
                     </div>
                   </div>
                   <div class="workspace-actions">
-                    <button type="button" class="danger-outline" onClick={stopAutomation}>停止自动化</button>
+                    <button type="button" class="danger-outline" disabled={busy()} onClick={toggleTaskPause}>{taskNeedsExplicitContinue(currentTask().status) ? "继续任务" : "暂停任务"}</button>
+                    <Show when={currentTask().status === "已创建"}>
+                      <button type="button" disabled={busy() || !opencodeSession()} onClick={resendStartPrompt}>重新发送启动指令</button>
+                    </Show>
+                    <Show
+                      when={
+                        canStartRefill(currentTask().status) &&
+                        taskGeneratedFiles(currentTask()).some((file) => file.label === "学生申请档案")
+                      }
+                    >
+                      <button type="button" class="refill-action" disabled={busy() || showRefillConfirmation()} onClick={openRefillConfirmation}>根据现有内容重新填写</button>
+                    </Show>
                     <button type="button" onClick={() => setShowOpenCode(true)}>进入 OpenCode 对话</button>
                     <button type="button" onClick={() => window.api.openPath(currentTask().workspacePath)}>打开申请工作区</button>
                   </div>

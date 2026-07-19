@@ -14,6 +14,7 @@ import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { EffectBridge } from "@/effect/bridge"
 import { init } from "#db"
 import { Effect, Schema } from "effect"
+import { repairLegacyPermissionSchema } from "./permission-schema-repair"
 
 declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
@@ -125,6 +126,9 @@ export const Client = Object.assign(
       }
       applyMigrations(db, entries)
     }
+
+    const repair = repairLegacyPermissionSchema(db.$client, dbPath)
+    if (repair.repaired) log.warn("repaired legacy permission schema", repair)
 
     client = db
     loaded = true

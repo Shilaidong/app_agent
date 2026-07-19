@@ -108,7 +108,7 @@ packages/desktop/dist/
 
 ## 随包 ego-lite 规则
 
-当前版本把 ego-lite `0.4.2.15` 打包进桌面 app，OpenCode 工作区通过下面这个 wrapper 调用它：
+当前版本把官方签名的 ego-lite `0.4.4.15` 打包进桌面 app，OpenCode 工作区通过下面这个 wrapper 调用它：
 
 ```text
 .opencode/bin/ego-browser
@@ -122,7 +122,25 @@ PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF'
 EOF
 ```
 
+`packages/desktop/resources/ego-runtime.lock.json` 是随包 Ego runtime 的唯一锁源。它固定 Info.plist 版本和 bundle identity、Citro team/签名/CDHash、Framework `Versions/Current`、`ego-browser` helper SHA256，以及 Current framework 官方 Skill 的正文 SHA256、元数据版本和日期。工作区只能从这一份 Current Skill 生成；仓库不再维护第二份改写副本。`terraPolicyRevision` 用于标识 Terra 在官方 Skill 旁边追加的浏览器可靠性策略版本。
+
+开发、接手或发版前可单独验证：
+
+```bash
+bun run --cwd packages/desktop verify:ego-runtime
+```
+
+`bun run doctor` 和最终 App/ZIP/DMG 包验证也会使用同一个 lock，检查 `Info.plist`、`Versions/Current`、Current 官方 Skill、精确 hash 和官方代码签名。官方签名包中的 updater payload 会保留，但所有 updater 文件都必须不可执行；不要通过删除签名资源来关闭更新。
+
 不要让 Agent 或用户自动安装、自动更新、替换公共网站上的 ego-lite。这个项目依赖固定版本的行为，随意升级可能导致浏览器填写策略变化。
+
+只有仓库 owner 完成人工来源、签名和行为复核，并已在本地替换 vendor app 后，才能从这个本地副本刷新 lock：
+
+```bash
+bun run --cwd packages/desktop update:ego-runtime-lock:owner --accept-reviewed-local-vendor
+```
+
+这个命令不会联网、下载或升级 Ego，也不会接受 bundle、签名 team 或签名 authority 的变化；它只读取已经 vendored 的本地 app，解析官方 Skill frontmatter，重新计算 hash，并在完整验证通过后写 lock。
 
 ## GitHub Release 流程
 

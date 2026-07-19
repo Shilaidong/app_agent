@@ -2,7 +2,7 @@
   "name": "@terra-edu/application-agent-desktop",
   "private": true,
   "description": "Terra-Edu independent application automation Agent desktop app.",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "type": "module",
   "license": "MIT",
   "homepage": "https://terra-edu.local/application-agent",
@@ -11,9 +11,13 @@
     "email": "hello@terra-edu.local"
   },
   "scripts": {
+    "test": "bun test",
     "typecheck": "tsgo -b",
     "verify:application-agent": "bun ./scripts/verify-application-agent.ts",
     "verify:application-agent:e2e": "bun ./scripts/verify-application-agent-e2e.ts",
+    "verify:application-agent:package": "bun ./scripts/verify-application-agent-package.ts",
+    "verify:ego-runtime": "bun ./scripts/verify-ego-runtime.ts",
+    "update:ego-runtime-lock:owner": "bun ./scripts/update-ego-runtime-lock.ts",
     "release:mac": "bun ./scripts/release-mac.ts",
     "release:mac:free": "bun ./scripts/release-mac.ts",
     "predev": "bun ./scripts/predev.ts",
@@ -29,14 +33,15 @@
   },
   "main": "./out/main/index.js",
   "dependencies": {
+    "drizzle-orm": "catalog:",
     "effect": "catalog:",
     "electron-context-menu": "4.1.2",
     "electron-log": "^5",
     "electron-store": "^10",
     "electron-updater": "^6",
     "electron-window-state": "^5.0.3",
-    "drizzle-orm": "catalog:",
-    "marked": "^15"
+    "marked": "^15",
+    "xlsx": "0.18.5"
   },
   "devDependencies": {
     "@actions/artifact": "4.0.0",

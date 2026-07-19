@@ -54,6 +54,7 @@ const api: ElectronAPI = {
   openPath: (path, app) => ipcRenderer.invoke("open-path", path, app),
   readClipboardImage: () => ipcRenderer.invoke("read-clipboard-image"),
   showNotification: (title, body) => ipcRenderer.send("show-notification", title, body),
+  showUrgentNotification: (title, body) => ipcRenderer.send("show-urgent-notification", title, body),
   getWindowFocused: () => ipcRenderer.invoke("get-window-focused"),
   setWindowFocus: () => ipcRenderer.invoke("set-window-focus"),
   showWindow: () => ipcRenderer.invoke("show-window"),
@@ -67,26 +68,33 @@ const api: ElectronAPI = {
   installUpdate: () => ipcRenderer.invoke("install-update"),
   setBackgroundColor: (color: string) => ipcRenderer.invoke("set-background-color", color),
   createApplicationTask: (input) => ipcRenderer.invoke("application-agent:create-task", input),
+  previewApplicationSelectionList: (sourcePath) => ipcRenderer.invoke("application-agent:preview-selection-list", sourcePath),
+  createApplicationTasksFromSelectionList: (input) =>
+    ipcRenderer.invoke("application-agent:create-selection-list-tasks", input),
+  downloadApplicationSelectionListTemplate: () =>
+    ipcRenderer.invoke("application-agent:download-selection-list-template"),
   startApplicationAgentSession: (task) => ipcRenderer.invoke("application-agent:start-session", task),
+  startApplicationAgentRefillSession: (input) =>
+    ipcRenderer.invoke("application-agent:start-refill-session", input),
+  resendApplicationAgentStartPrompt: (session, task) =>
+    ipcRenderer.invoke("application-agent:resend-start-prompt", session, task),
   sendApplicationAgentPrompt: (session, prompt) => ipcRenderer.invoke("application-agent:send-prompt", session, prompt),
   getApplicationAgentMessages: (session) => ipcRenderer.invoke("application-agent:get-messages", session),
   getApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:get-task", workspacePath),
   listApplicationTasks: (limit) => ipcRenderer.invoke("application-agent:list-tasks", limit),
   findApplicationAgentSession: (workspacePath) => ipcRenderer.invoke("application-agent:find-session", workspacePath),
   continueApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:continue-task", workspacePath),
-  runApplicationCommand: (workspacePath, command) =>
-    ipcRenderer.invoke("application-agent:run-command", workspacePath, command),
-  openApplicationPlatform: (workspacePath) => ipcRenderer.invoke("application-agent:open-platform", workspacePath),
+  pauseApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:pause-task", workspacePath),
+  resumeApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:resume-task", workspacePath),
+  authorizeBrowserSafetyContinue: (workspacePath, input) =>
+    ipcRenderer.invoke("application-agent:authorize-browser-safety-continue", workspacePath, input),
+  submitApplicationMaterialReview: (workspacePath, input) =>
+    ipcRenderer.invoke("application-agent:submit-material-review", workspacePath, input),
   blockHighRiskAction: (workspacePath, action) =>
     ipcRenderer.invoke("application-agent:block-high-risk-action", workspacePath, action),
-  stopApplicationAutomation: (workspacePath) => ipcRenderer.invoke("application-agent:stop-automation", workspacePath),
-  getApplicationPlatformCredential: (applicationUrl) =>
-    ipcRenderer.invoke("application-agent:get-platform-credential", applicationUrl),
-  saveApplicationPlatformCredential: (input) =>
-    ipcRenderer.invoke("application-agent:save-platform-credential", input),
-  clearApplicationPlatformCredential: (applicationUrl) =>
-    ipcRenderer.invoke("application-agent:clear-platform-credential", applicationUrl),
-  setOpenCodeGoApiKey: (key) => ipcRenderer.invoke("application-agent:set-go-api-key", key),
+  getApplicationPlatformAccount: (applicationUrl) => ipcRenderer.invoke("application-agent:get-platform-account", applicationUrl),
+  saveApplicationPlatformAccount: (input) => ipcRenderer.invoke("application-agent:save-platform-account", input),
+  clearApplicationPlatformAccount: (applicationUrl) => ipcRenderer.invoke("application-agent:clear-platform-account", applicationUrl),
   hasOpenCodeGoApiKey: () => ipcRenderer.invoke("application-agent:has-go-api-key"),
   getTerraAuthStatus: () => ipcRenderer.invoke("terra-auth:status"),
   loginTerraAdvisor: (email, password) => ipcRenderer.invoke("terra-auth:login", email, password),

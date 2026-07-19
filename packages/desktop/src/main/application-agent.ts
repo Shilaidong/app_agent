@@ -1,13 +1,34 @@
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
-import { cp, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises"
-import { basename, dirname, extname, join, relative } from "node:path"
-import { app, shell } from "electron"
-import { getApplicationPlatformCredential } from "./application-credentials"
+import { cp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises"
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path"
+import { app } from "electron"
 import { writeOpenCodeConfig } from "./application-agent-opencode"
+import {
+  createStudentWorkspace,
+  discoverApplicationTaskWorkspaces,
+  studentWorkspaceLayout,
+} from "./application-student-workspace"
+import {
+  completeApplicationRefillState,
+  inspectApplicationRefillState,
+  markApplicationRefillPromptSentState,
+  prepareApplicationRefillState,
+  validateApplicationRefillArtifacts,
+  type ApplicationRefillAttempt,
+} from "./application-agent-refill"
+import { previewSelectionList, type SelectionListRow } from "./application-selection-list"
+import {
+  authorizeBrowserSafetyContinue as authorizeBrowserSafetyContinueState,
+  browserSafetyStopSummary,
+  type BrowserSafetyStopSummary,
+} from "./application-agent-browser-safety"
 
-export { buildApplicationAgentStartPrompt } from "./application-agent-opencode"
+export { buildApplicationAgentRefillPrompt, buildApplicationAgentStartPrompt } from "./application-agent-opencode"
+export { applicationRefillSessionTitle } from "./application-agent-refill"
 export { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
+export type { ApplicationRefillAttempt } from "./application-agent-refill"
+export type { BrowserSafetyStopSummary } from "./application-agent-browser-safety"
 
 export type ApplicationTaskInput = {
   studentName: string
@@ -15,12 +36,17 @@ export type ApplicationTaskInput = {
   school: string
   program: string
   applicationType: string
-  applicationUrl: string
+  applicationUrl?: string
   deadline?: string
   notes?: string
   loginMethod?: string
   platformUsername?: string
-  rememberPlatformPassword?: boolean
+  batchId?: string
+  batchWorkspacePath?: string
+  sharedWorkspacePath?: string
+  batchOrder?: number
+  selectionListPath?: string
+  selectionListRow?: number
   outputLanguage?: "zh" | "en"
   allowUpload?: boolean
   taskGoal?: string
@@ -44,12 +70,41 @@ export type ApplicationTask = {
   generatedFiles: GeneratedFile[]
   progress: ProgressEntry[]
   reusedExisting?: boolean
+  sharedDossierStatus?: "preparing" | "prepared" | "ready"
+  browserSafetyStop?: BrowserSafetyStopSummary
+}
+
+export type ApplicationMaterialReviewInput = {
+  mode: "supplement_folder" | "skip" | "note"
+  sourceFolder?: string
+  note?: string
+  scope?: "school" | "student"
 }
 
 export type ApplicationAgentSession = {
   sessionID: string
   directory: string
   workspacePath: string
+}
+
+export type ApplicationSelectionListInput = {
+  studentName: string
+  sourceFolder: string
+  applicationType: string
+  selectionListPath: string
+  selectedRows: number[]
+  outputLanguage?: "zh" | "en"
+  allowUpload?: boolean
+  taskGoal?: string
+}
+
+export type ApplicationSelectionListBatch = {
+  id: string
+  workspacePath: string
+  sourceFolder: string
+  selectionListPath: string
+  createdAt: string
+  tasks: ApplicationTask[]
 }
 
 type GeneratedFile = {
@@ -108,6 +163,7 @@ type ApplicationProgress = {
 
 export type ApplicationTaskStatus =
   | "已创建"
+  | "已暂停"
   | "正在复制原始材料"
   | "正在创建申请工作区"
   | "正在读取文件"
@@ -115,10 +171,12 @@ export type ApplicationTaskStatus =
   | "正在生成学生资料"
   | "正在检查缺失内容"
   | "等待顾问登录"
+  | "等待顾问接管浏览器"
   | "正在填写申请平台"
   | "正在保存申请进度"
   | "正在上传材料"
   | "等待补充材料"
+  | "等待顾问确认材料"
   | "可继续申请"
   | "阶段性完成"
   | "异常中断"
@@ -157,8 +215,9 @@ const GENERATED: Array<[string, string, GeneratedFile["kind"]]> = [
   ["申请进度记录", "03_state/application_progress.json", "json"],
   ["申请要求记录", "03_state/application_requirements.json", "json"],
   ["申请要求摘要", "02_generated/application_requirements.md", "markdown"],
-  ["浏览器自动化控制状态", "03_state/cua_control.json", "json"],
-  ["登录凭证状态", "03_state/login_credentials.json", "json"],
+  ["材料确认记录", "03_state/material_review.json", "json"],
+  ["任务暂停状态", "03_state/task_control.json", "json"],
+  ["浏览器审计状态", "03_state/cua_control.json", "json"],
   ["工具执行审计", "03_state/agent_execution_audit.json", "json"],
   ["Agent 日志", "04_logs/agent_log.md", "log"],
   ["浏览器自动化日志", "04_logs/cua_log.md", "log"],
@@ -166,6 +225,7 @@ const GENERATED: Array<[string, string, GeneratedFile["kind"]]> = [
 
 const STATUS_MESSAGES: Record<ApplicationTaskStatus, string> = {
   已创建: "我已收到申请任务，接下来会把完整任务 Prompt 交给 OpenCode Agent 接管。",
+  已暂停: "任务已由顾问暂停。当前文件处理完成后不会启动下一项操作；点击“继续任务”后才会恢复。",
   正在复制原始材料: "我正在复制学生原始材料，后续操作都会在副本中完成。",
   正在创建申请工作区: "我正在建立隔离申请工作区和标准目录。",
   正在读取文件: "我正在读取学生文件夹，并识别里面的申请材料。",
@@ -173,10 +233,12 @@ const STATUS_MESSAGES: Record<ApplicationTaskStatus, string> = {
   正在生成学生资料: "我正在生成结构化学生申请档案。",
   正在检查缺失内容: "我正在检查缺失信息、缺失材料和需要确认的内容。",
   等待顾问登录: "我已打开申请平台。如果需要登录，请顾问先完成登录。",
+  等待顾问接管浏览器: "浏览器正在等待顾问处理登录、验证码、原生弹窗或页面控制权；处理完成后点击“继续任务”。",
   正在填写申请平台: "我正在通过 ego-browser 操作申请平台的普通字段。",
   正在保存申请进度: "我正在保存当前可以保存的申请页面。",
   正在上传材料: "我正在尝试上传可确认匹配的材料。",
   等待补充材料: "当前可处理内容已完成，剩余内容需要补充材料后继续。",
+  等待顾问确认材料: "材料整理和总结已完成。请顾问确认是否补充材料或信息，再启动申请平台。",
   可继续申请: "我发现补充材料已准备好，可以继续申请。",
   阶段性完成: "本次申请任务已完成阶段性处理。",
   异常中断: "任务遇到无法自动处理的问题，需要顾问介入。",
@@ -191,9 +253,9 @@ export async function createApplicationTask(input: ApplicationTaskInput): Promis
   const id = randomUUID()
   const createdAt = new Date().toISOString()
   const slug = makeTaskSlug(sanitizedInput)
-  const workspacePath = await uniqueWorkspacePath(slug)
+  const workspacePath = await uniqueWorkspacePath(slug, await taskWorkspaceParent(sanitizedInput))
   const sessionDirectory = workspacePath
-  await createWorkspace(workspacePath)
+  await createWorkspace(workspacePath, sanitizedInput)
 
   const task = buildTask({
     id,
@@ -207,9 +269,142 @@ export async function createApplicationTask(input: ApplicationTaskInput): Promis
   })
   await writeJson(join(workspacePath, "03_state/task_input.json"), sanitizedInput)
   await writeJson(join(workspacePath, "03_state/application_progress.json"), initialApplicationProgress())
-  await writeLoginCredentialState(workspacePath, sanitizedInput)
+  if (sanitizedInput.batchWorkspacePath) {
+    await writeJson(join(workspacePath, "03_state/batch_context.json"), {
+      workspaceLayoutVersion: sanitizedInput.sharedWorkspacePath ? 2 : 1,
+      batchId: sanitizedInput.batchId,
+      batchWorkspacePath: sanitizedInput.batchWorkspacePath,
+      batchOrder: sanitizedInput.batchOrder,
+      selectionListPath: sanitizedInput.selectionListPath,
+      selectionListRow: sanitizedInput.selectionListRow,
+      sharedMaterialsPath: sanitizedInput.sourceFolder,
+      sharedWorkspacePath: sanitizedInput.sharedWorkspacePath,
+      sharedProfilePath: sanitizedInput.sharedWorkspacePath
+        ? join(sanitizedInput.sharedWorkspacePath, "02_generated", "student_profile.md")
+        : undefined,
+      note: "学生材料、OCR、分类结果和学生核心档案由批次共享；学校要求、缺失项、浏览器进度和审计记录保持独立。",
+    })
+  }
   await persistTask(task)
   return task
+}
+
+export async function createApplicationTasksFromSelectionList(
+  input: ApplicationSelectionListInput,
+): Promise<ApplicationSelectionListBatch> {
+  if (!input.studentName.trim()) throw new Error("学生姓名不能为空")
+  if (!input.applicationType.trim()) throw new Error("申请类型不能为空")
+  if (!existsSync(input.sourceFolder)) throw new Error("学生资料文件夹不存在")
+  if (!existsSync(input.selectionListPath)) throw new Error("选校清单文件不存在")
+
+  const preview = await previewSelectionList(input.selectionListPath)
+  const selectedRows = new Set(input.selectedRows)
+  const selections = preview.rows.filter((row) => selectedRows.has(row.rowNumber) && isSelectableSelectionRow(row))
+  if (selections.length === 0) throw new Error("请至少选择一条可创建的学校/专业记录")
+  const invalidUrl = selections.find((selection) => {
+    const url = String(selection.applicationUrl || selection.programUrl || "").trim()
+    return url && !URL.canParse(url)
+  })
+  if (invalidUrl) throw new Error(`选校清单第 ${invalidUrl.rowNumber} 行的申请链接格式不正确，请修正后重试。`)
+
+  const id = randomUUID()
+  const createdAt = new Date().toISOString()
+  const workspacePath = await uniqueWorkspacePath(`${slugPart(input.studentName)}-申请批次`)
+  const layout = await createStudentWorkspace(workspacePath)
+  await cp(input.sourceFolder, layout.sharedMaterialsPath, { recursive: true, force: false, errorOnExist: false })
+  const copiedSelectionListPath = join(layout.selectionListPath, basename(input.selectionListPath))
+  await cp(input.selectionListPath, copiedSelectionListPath, { force: false, errorOnExist: false })
+  await writeJson(join(workspacePath, "03_state/selection_list_preview.json"), preview)
+  await writeJson(layout.sharedDossierStatePath, {
+    status: "preparing",
+    version: 0,
+    studentName: input.studentName.trim(),
+    createdAt,
+    updatedAt: createdAt,
+    ownerTaskId: "",
+    profilePath: layout.sharedProfilePath,
+    note: "第一所学校完成材料整理后生成共享学生档案；后续学校只读复用。",
+  })
+  await writeJson(join(workspacePath, "03_state/batch_state.json"), {
+    id,
+    workspaceLayoutVersion: 2,
+    createdAt,
+    studentName: input.studentName.trim(),
+    sourceFolder: input.sourceFolder,
+    sharedWorkspacePath: layout.sharedWorkspacePath,
+    sharedMaterialsPath: layout.sharedMaterialsPath,
+    selectionListPath: copiedSelectionListPath,
+    selectedRows: selections.map((row) => row.rowNumber),
+    status: "待依次处理",
+    materialHandling: "学生原始资料、OCR、分类结果和核心档案只整理一次；各学校仅保留本校要求、缺失项和浏览器进度。",
+  })
+
+  const tasks: ApplicationTask[] = []
+  try {
+    for (const [index, selection] of selections.entries()) {
+      tasks.push(await createApplicationTask({
+        studentName: input.studentName,
+        sourceFolder: layout.sharedMaterialsPath,
+        school: selection.school,
+        program: selection.program,
+        applicationType: input.applicationType,
+        applicationUrl: selection.applicationUrl || selection.programUrl,
+        deadline: selection.deadline,
+        notes: selection.notes,
+        loginMethod: "顾问手动登录",
+        platformUsername: selection.platformUsername,
+        outputLanguage: input.outputLanguage,
+        allowUpload: input.allowUpload,
+        taskGoal: input.taskGoal,
+        batchId: id,
+        batchWorkspacePath: workspacePath,
+        sharedWorkspacePath: layout.sharedWorkspacePath,
+        batchOrder: index + 1,
+        selectionListPath: copiedSelectionListPath,
+        selectionListRow: selection.rowNumber,
+      }))
+      if (index === 0) {
+        await writeJson(layout.sharedDossierStatePath, {
+          status: "preparing",
+          version: 0,
+          studentName: input.studentName.trim(),
+          createdAt,
+          updatedAt: new Date().toISOString(),
+          ownerTaskId: tasks[0].id,
+          profilePath: layout.sharedProfilePath,
+          note: "第一所学校负责一次性整理共享学生档案；后续学校只读复用。",
+        })
+      }
+    }
+  } catch (error) {
+    await rm(workspacePath, { recursive: true, force: true })
+    throw error
+  }
+  await writeJson(layout.sharedDossierStatePath, {
+    status: "preparing",
+    version: 0,
+    studentName: input.studentName.trim(),
+    createdAt,
+    updatedAt: new Date().toISOString(),
+    ownerTaskId: tasks[0]?.id || "",
+    profilePath: layout.sharedProfilePath,
+    note: "第一所学校负责一次性整理共享学生档案；后续学校只读复用。",
+  })
+  await writeJson(join(workspacePath, "03_state/batch_state.json"), {
+    id,
+    workspaceLayoutVersion: 2,
+    createdAt,
+    studentName: input.studentName.trim(),
+    sourceFolder: input.sourceFolder,
+    sharedWorkspacePath: layout.sharedWorkspacePath,
+    sharedMaterialsPath: layout.sharedMaterialsPath,
+    selectionListPath: copiedSelectionListPath,
+    selectedRows: selections.map((row) => row.rowNumber),
+    status: "待依次处理",
+    materialHandling: "学生原始资料、OCR、分类结果和核心档案只整理一次；各学校仅保留本校要求、缺失项和浏览器进度。",
+    tasks: tasks.map((task) => ({ id: task.id, workspacePath: task.workspacePath, school: task.input.school, program: task.input.program, order: task.input.batchOrder })),
+  })
+  return { id, workspacePath, sourceFolder: layout.sharedMaterialsPath, selectionListPath: copiedSelectionListPath, createdAt, tasks }
 }
 
 export async function getApplicationWorkspaceRoot() {
@@ -218,7 +413,7 @@ export async function getApplicationWorkspaceRoot() {
   return root
 }
 
-async function resetCuaControl(workspacePath: string) {
+async function initializeCuaAuditState(workspacePath: string) {
   await writeJson(join(workspacePath, "03_state/cua_control.json"), {
     stopped: false,
     stoppedAt: "",
@@ -232,14 +427,20 @@ async function resetCuaControl(workspacePath: string) {
   })
 }
 
+async function setTaskPaused(workspacePath: string, paused: boolean, resumeStatus?: ApplicationTaskStatus) {
+  const current = await readJson<{ resumeStatus?: ApplicationTaskStatus }>(join(workspacePath, "03_state/task_control.json"), {})
+  await writeJson(join(workspacePath, "03_state/task_control.json"), {
+    paused,
+    updatedAt: new Date().toISOString(),
+    reason: paused ? "顾问在任务工作台点击了暂停任务。" : "顾问在任务工作台点击了继续任务。",
+    resumeStatus: paused ? resumeStatus || current.resumeStatus || "" : current.resumeStatus || "",
+  })
+}
+
 export async function listApplicationTasks(limit = 8): Promise<ApplicationTask[]> {
   const root = await getApplicationWorkspaceRoot()
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => [])
   const tasks: ApplicationTask[] = []
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue
-    const workspacePath = join(root, entry.name)
-    if (!existsSync(join(workspacePath, "03_state/task_state.json"))) continue
+  for (const workspacePath of await discoverApplicationTaskWorkspaces(root)) {
     try {
       const task = await getApplicationTask(workspacePath)
       if (isListableApplicationTask(task)) tasks.push(task)
@@ -258,7 +459,10 @@ export async function prepareApplicationAgentConfig(directory: string) {
     await writeJson(join(directory, "03_state/agent_execution_audit.json"), [])
   }
   if (!existsSync(join(directory, "03_state/cua_control.json"))) {
-    await resetCuaControl(directory)
+    await initializeCuaAuditState(directory)
+  }
+  if (!existsSync(join(directory, "03_state/task_control.json"))) {
+    await setTaskPaused(directory, false)
   }
   if (!existsSync(join(directory, "03_state/application_requirements.json"))) {
     await writeJson(join(directory, "03_state/application_requirements.json"), {
@@ -269,51 +473,75 @@ export async function prepareApplicationAgentConfig(directory: string) {
       notes: "",
     })
   }
-  if (!existsSync(join(directory, "03_state/login_credentials.json"))) {
-    await writeJson(join(directory, "03_state/login_credentials.json"), {
-      applicationUrl: "",
-      platformHost: "",
-      username: "",
-      hasSavedPassword: false,
-      serviceName: "",
-      updatedAt: new Date().toISOString(),
-      note: "密码不保存在申请工作区。若 hasSavedPassword 为 true，application-agent_login 会从本机钥匙串读取并填入网页。",
-    })
-  }
   if (!existsSync(join(directory, "02_generated/application_requirements.md"))) {
     await writeFile(join(directory, "02_generated/application_requirements.md"), "# 申请要求摘要\n\n等待 OpenCode Agent 使用 webfetch/websearch 获取官方申请要求。\n", "utf8")
   }
-  await writeOpenCodeConfig(directory)
+  const savedInput = await readJson<ApplicationTaskInput | null>(join(directory, "03_state/task_input.json"), null)
+  const taskInput = savedInput ? await canonicalTaskInput(directory, savedInput) : null
+  await writeOpenCodeConfig(directory, { sharedWorkspacePath: taskInput?.sharedWorkspacePath })
 }
 
 export async function getApplicationTask(workspacePath: string): Promise<ApplicationTask> {
-  const task = await readJson<Record<string, unknown>>(join(workspacePath, "03_state/task_state.json"), {})
-  const savedInput = await readJson<ApplicationTaskInput | null>(join(workspacePath, "03_state/task_input.json"), null)
-  const missing = await readJson<unknown>(join(workspacePath, "03_state/missing_items.json"), null)
-  const progress = await readJson<unknown>(join(workspacePath, "03_state/application_progress.json"), null)
-  const backup = join(workspacePath, "00_original_backup")
-  const totalFiles = existsSync(backup) ? (await scanFiles(backup)).length : 0
-  return normalizeTask(task, workspacePath, savedInput ?? undefined, summarizeMissingRaw(missing, totalFiles, progress))
+  const [task, savedInput, missing, progress, control] = await Promise.all([
+    readJson<Record<string, unknown>>(join(workspacePath, "03_state/task_state.json"), {}),
+    readJson<ApplicationTaskInput | null>(join(workspacePath, "03_state/task_input.json"), null),
+    readJson<unknown>(join(workspacePath, "03_state/missing_items.json"), null),
+    readJson<unknown>(join(workspacePath, "03_state/application_progress.json"), null),
+    readJson<{ paused?: boolean; updatedAt?: string }>(join(workspacePath, "03_state/task_control.json"), {}),
+  ])
+  const canonicalInput = savedInput ? await canonicalTaskInput(workspacePath, savedInput) : undefined
+  const totalFiles = (await scanTaskMaterials(workspacePath, canonicalInput)).length
+  const normalized = normalizeTask(task, workspacePath, canonicalInput, summarizeMissingRaw(missing, totalFiles, progress))
+  if (canonicalInput?.sharedWorkspacePath) {
+    const sharedState = await readJson<{ status?: string }>(
+      join(canonicalInput.sharedWorkspacePath, "03_state", "shared_dossier_state.json"),
+      {},
+    )
+    if (["preparing", "prepared", "ready"].includes(String(sharedState.status || ""))) {
+      normalized.sharedDossierStatus = sharedState.status as ApplicationTask["sharedDossierStatus"]
+    }
+  }
+  const safety = browserSafetyStopSummary(progress)
+  if (safety) normalized.browserSafetyStop = safety
+  if (!control.paused || normalized.status === "已暂停") return normalized
+  const updatedAt = stringValue(control.updatedAt) ?? normalized.updatedAt
+  return {
+    ...normalized,
+    updatedAt,
+    status: "已暂停",
+    progress: normalized.progress.at(-1)?.status === "已暂停"
+      ? normalized.progress
+      : [...normalized.progress, { at: updatedAt, status: "已暂停", message: STATUS_MESSAGES.已暂停 }],
+  }
 }
 
 export async function continueApplicationTask(workspacePath: string): Promise<ApplicationTask> {
   const task = await getApplicationTask(workspacePath)
+  await setTaskPaused(workspacePath, false)
   await appendProgress(task, "可继续申请")
-  const newMaterialsPath = join(workspacePath, "06_new_materials")
-  const newFiles = existsSync(newMaterialsPath) ? await scanFiles(newMaterialsPath) : []
-  if (newFiles.length > 0) {
-    const backupTarget = join(workspacePath, "00_original_backup", "supplemental")
-    await mkdir(backupTarget, { recursive: true })
-    for (const file of newFiles) {
-      await cp(file, join(backupTarget, basename(file)), { force: false, errorOnExist: false })
-    }
-  }
-
-  const allFiles = await scanFiles(join(workspacePath, "00_original_backup"))
-  const materials = await classifyMaterials(workspacePath, allFiles)
+  const allFiles = await scanTaskMaterials(workspacePath, task.input)
+  const materials = await classifyMaterials(workspacePath, allFiles, task.input)
   const missingItems = inferMissingItems(task.input, materials)
   const progress = await readJson<ApplicationProgress>(join(workspacePath, "03_state/application_progress.json"), initialApplicationProgress())
-  await writeGeneratedDocuments(workspacePath, task.input, materials, missingItems, progress)
+  await writeGeneratedDocuments(
+    workspacePath,
+    task.input,
+    materials,
+    missingItems,
+    progress,
+    Boolean(task.input.sharedWorkspacePath),
+  )
+  const materialReview = await readJson<Record<string, unknown>>(join(workspacePath, "03_state/material_review.json"), {})
+  if (
+    materialReview.status === "approved" &&
+    !materialReview.preparationCompleteAt &&
+    (materialReview.mode === "skip" || Date.parse(String(materialReview.appliedAt || "")))
+  ) {
+    await writeJson(join(workspacePath, "03_state/material_review.json"), {
+      ...materialReview,
+      preparationCompleteAt: new Date().toISOString(),
+    })
+  }
 
   task.counts = summarizeCounts(allFiles.length, missingItems)
   task.status = missingItems.length > 0 ? "等待补充材料" : "阶段性完成"
@@ -332,17 +560,171 @@ export async function continueApplicationTask(workspacePath: string): Promise<Ap
   return task
 }
 
+export async function submitApplicationMaterialReview(workspacePath: string, input: ApplicationMaterialReviewInput): Promise<ApplicationTask> {
+  const task = await getApplicationTask(workspacePath)
+  if (task.status !== "等待顾问确认材料") {
+    throw new Error("当前不在材料确认阶段，不能提交补充内容。")
+  }
+
+  const note = input.note?.trim() || ""
+  if (input.mode === "note" && !note) {
+    throw new Error("请填写要补充给 Agent 的文字信息，或选择暂不补充。")
+  }
+
+  const sourceFolder = input.sourceFolder?.trim() || ""
+  const scope = task.input.sharedWorkspacePath && input.scope === "student" ? "student" : "school"
+  let supplementalFolder = ""
+  if (input.mode === "supplement_folder") {
+    if (!sourceFolder || !existsSync(sourceFolder)) throw new Error("补充材料文件夹不存在，请重新选择。")
+    if (!(await stat(sourceFolder)).isDirectory()) throw new Error("请选择包含补充材料的文件夹。")
+    supplementalFolder = join(
+      scope === "student" && task.input.sharedWorkspacePath
+        ? join(task.input.sharedWorkspacePath, "00_original_backup")
+        : join(workspacePath, "06_new_materials"),
+      `supplement-${Date.now()}`,
+    )
+    await cp(sourceFolder, supplementalFolder, { recursive: true, force: false, errorOnExist: false })
+  }
+
+  const submittedAt = new Date().toISOString()
+  const sourceManifest = supplementalFolder
+    ? await Promise.all(
+        (await scanFiles(supplementalFolder)).map(async (path) => ({ path, sha256: await fileSha256(path) })),
+      )
+    : []
+  const profilePath = join(workspacePath, "02_generated", "student_profile.md")
+  const sharedProfileCandidatePath = scope === "student" && task.input.sharedWorkspacePath
+    ? join(workspacePath, "02_generated", "shared_profile_candidate.md")
+    : ""
+  if (sharedProfileCandidatePath) {
+    const sharedProfilePath = join(task.input.sharedWorkspacePath!, "02_generated", "student_profile.md")
+    if (!existsSync(sharedProfilePath)) throw new Error("学生共享档案缺少可更新的核心档案。")
+    await cp(sharedProfilePath, sharedProfileCandidatePath, { force: true })
+  }
+  await updateSharedDossierAfterMaterialReview(task, input.mode, scope, submittedAt)
+  await writeJson(join(workspacePath, "03_state/material_review.json"), {
+    reviewId: randomUUID(),
+    status: "approved",
+    mode: input.mode,
+    scope,
+    note,
+    supplementalFolder: supplementalFolder || undefined,
+    sourceManifest,
+    profileSha256Before: existsSync(profilePath) ? await fileSha256(profilePath) : "",
+    sharedProfileCandidatePath: sharedProfileCandidatePath || undefined,
+    sharedProfileSha256Before: sharedProfileCandidatePath ? await fileSha256(sharedProfileCandidatePath) : undefined,
+    submittedAt,
+    preparationCompleteAt: input.mode === "skip" ? submittedAt : undefined,
+  })
+  task.status = "可继续申请"
+  task.updatedAt = new Date().toISOString()
+  task.generatedFiles = generatedFiles(workspacePath)
+  task.progress.push({
+    at: task.updatedAt,
+    status: task.status,
+    message:
+      input.mode === "supplement_folder"
+        ? "顾问已选择补充材料文件夹。Agent 将先读取新增材料和顾问说明，再进入申请平台。"
+        : input.mode === "note"
+          ? "顾问已提交文字补充。Agent 将先写入申请档案和缺失项，再进入申请平台。"
+          : "顾问确认暂不补充材料或信息，Agent 可以进入申请平台填写阶段。",
+  })
+  await persistTask(task)
+  await appendLog(workspacePath, "agent", task.progress.at(-1)?.message || "顾问已完成材料确认。")
+  return task
+}
+
+async function updateSharedDossierAfterMaterialReview(
+  task: ApplicationTask,
+  mode: ApplicationMaterialReviewInput["mode"],
+  scope: "school" | "student",
+  submittedAt: string,
+) {
+  if (!task.input.sharedWorkspacePath) return
+  const path = join(task.input.sharedWorkspacePath, "03_state", "shared_dossier_state.json")
+  const state = await readJson<Record<string, unknown>>(path, {})
+  if (mode === "skip") {
+    if (String(state.ownerTaskId || "") !== task.id || state.status === "ready") return
+    if (state.status !== "prepared") {
+      throw new Error("学生共享档案尚未准备完整，不能跳过材料确认后直接进入学校填表。")
+    }
+    await writeJson(path, {
+      ...state,
+      status: "ready",
+      publishedAt: submittedAt,
+      updatedAt: submittedAt,
+    })
+    return
+  }
+  if (scope !== "student") return
+  await writeJson(path, {
+    ...state,
+    status: "preparing",
+    ownerTaskId: task.id,
+    publishedAt: "",
+    updatedAt: submittedAt,
+    note: "顾问已补充材料或文字；资料库负责人完成更新并重新生成文档后才会发布新版本。",
+  })
+}
+
+export async function pauseApplicationTask(workspacePath: string): Promise<ApplicationTask> {
+  const task = await getApplicationTask(workspacePath)
+  await setTaskPaused(workspacePath, true, task.status)
+  await appendLog(workspacePath, "agent", "顾问已暂停任务。当前正在执行的浏览器回合或单项处理会完成，但不会启动新的浏览器回合或后续步骤；继续前需顾问点击继续任务。")
+  return getApplicationTask(workspacePath)
+}
+
+export async function resumeApplicationTask(workspacePath: string): Promise<ApplicationTask> {
+  await setTaskPaused(workspacePath, false)
+  const task = await getApplicationTask(workspacePath)
+  if (task.status === "已暂停") {
+    const control = await readJson<{ resumeStatus?: ApplicationTaskStatus }>(join(workspacePath, "03_state/task_control.json"), {})
+    const materialReview = await readJson<{ status?: string }>(join(workspacePath, "03_state/material_review.json"), {})
+    const progress = await readJson<{ egoBrowser?: { handoffAt?: string; handoffPending?: boolean; handoffType?: string } }>(join(workspacePath, "03_state/application_progress.json"), {})
+    await appendProgress(
+      task,
+      control.resumeStatus && control.resumeStatus !== "已暂停"
+        ? control.resumeStatus
+        : materialReview.status === "pending"
+          ? "等待顾问确认材料"
+          : progress.egoBrowser?.handoffPending === true || (progress.egoBrowser?.handoffAt && progress.egoBrowser?.handoffPending === undefined)
+            ? progress.egoBrowser.handoffType === "login"
+              ? "等待顾问登录"
+              : "等待顾问接管浏览器"
+          : "可继续申请",
+    )
+  }
+  await appendLog(workspacePath, "agent", "顾问已继续任务。Agent 将从已保存的任务状态和审计记录重新观察后开始下一步；如浏览器仍由顾问控制，不会自动夺回控制权。")
+  return getApplicationTask(workspacePath)
+}
+
+export async function authorizeBrowserSafetyContinue(
+  workspacePath: string,
+  input: { decisionId: string; taskSpaceId: string },
+): Promise<ApplicationTask> {
+  await authorizeBrowserSafetyContinueState(workspacePath, input)
+  const task = await getApplicationTask(workspacePath)
+  await appendProgress(task, "正在填写申请平台")
+  return getApplicationTask(workspacePath)
+}
+
 export async function refreshApplicationTaskDocuments(workspacePath: string): Promise<ApplicationTask> {
   const task = await getApplicationTask(workspacePath)
   const materials = await readJson<MaterialRecord[]>(join(workspacePath, "03_state/materials_index.json"), [])
   const missingRaw = await readJson<unknown>(join(workspacePath, "03_state/missing_items.json"), [])
   const progress = await readJson<ApplicationProgress>(join(workspacePath, "03_state/application_progress.json"), initialApplicationProgress())
   const syncedMissingItems = syncMissingItemsWithProgress(normalizeMissingItems(missingRaw), progress)
-  await writeGeneratedDocuments(workspacePath, task.input, materials, syncedMissingItems, progress)
+  await writeGeneratedDocuments(
+    workspacePath,
+    task.input,
+    materials,
+    syncedMissingItems,
+    progress,
+    Boolean(task.input.sharedWorkspacePath),
+  )
 
   const activeMissingItems = filterActiveMissingItems(syncedMissingItems)
-  const backup = join(workspacePath, "00_original_backup")
-  const totalFiles = existsSync(backup) ? (await scanFiles(backup)).length : task.counts.totalFiles
+  const totalFiles = (await scanTaskMaterials(workspacePath, task.input)).length
   task.counts = summarizeCounts(totalFiles, syncedMissingItems)
   task.status = activeMissingItems.some((item) => item.blocksProgress) ? "等待补充材料" : "阶段性完成"
   task.updatedAt = new Date().toISOString()
@@ -357,59 +739,124 @@ export async function refreshApplicationTaskDocuments(workspacePath: string): Pr
   return task
 }
 
-export async function runApplicationCommand(workspacePath: string, command: string): Promise<ApplicationTask> {
+export async function prepareApplicationRefillAttempt(
+  workspacePath: string,
+  requestID: string,
+  sourceSessionID?: string,
+): Promise<ApplicationRefillAttempt> {
   const task = await getApplicationTask(workspacePath)
-  const normalized = command.trim()
-  if (
-    normalized === "开始申请填表" ||
-    normalized === "继续申请填表" ||
-    /^(开始|继续|恢复).*(填表|CUA|自动化)/i.test(normalized)
-  ) {
-    await resetCuaControl(workspacePath)
-    await openApplicationPlatform(workspacePath)
-    return getApplicationTask(workspacePath)
-  }
-  if (normalized === "材料已经补好了，继续申请") {
-    return continueApplicationTask(workspacePath)
-  }
-  await appendProgress(task, "阶段性完成")
-  await appendLog(workspacePath, "agent", `快捷操作已记录：${normalized}`)
-  await persistTask(task)
-  return task
-}
-
-export async function openApplicationPlatform(workspacePath: string): Promise<ApplicationTask> {
-  const task = await getApplicationTask(workspacePath)
-  await resetCuaControl(workspacePath)
-  await appendProgress(task, "等待顾问登录")
-  const progress = await readJson<ApplicationProgress>(join(workspacePath, "03_state/application_progress.json"), initialApplicationProgress())
-  const now = new Date()
-  const url = task.input.applicationUrl
-  const recentlyOpened =
-    normalizeApplicationUrl(progress.platformLastOpenedUrl) === normalizeApplicationUrl(url) &&
-    Date.parse(progress.platformLastOpenedAt || "") > 0 &&
-    now.getTime() - Date.parse(progress.platformLastOpenedAt || "") < 10 * 60 * 1000
-  if (!recentlyOpened) {
-    await shell.openExternal(url)
-    progress.platformLastOpenedAt = now.toISOString()
-    progress.platformLastOpenedUrl = url
-  } else {
-    await appendLog(workspacePath, "cua", "已跳过重复打开申请平台：" + url)
-  }
-  progress.currentPage = "申请平台登录/当前页面"
-  progress.failedActions.push({
-    at: now.toISOString(),
-    action: "cua_open_application_platform",
-    reason: recentlyOpened ? "申请平台近期已打开，本次复用现有页面继续。" : "申请平台填表将由 OpenCode Agent 通过 ego-browser / ego lite 在独立 Space 中继续执行。",
-  })
-  await writeJson(join(workspacePath, "03_state/application_progress.json"), progress)
+  await syncSharedDossierSnapshot(task)
+  const result = await prepareApplicationRefillState({ workspacePath, task, requestID, sourceSessionID })
+  if (!result.created) return result.attempt
+  await setTaskPaused(workspacePath, false)
+  await appendProgress(task, "正在填写申请平台")
   await appendLog(
     workspacePath,
-    "cua",
-    "已打开申请平台。若页面需要登录，请顾问手动登录；Agent 不保存账号密码，登录完成后可继续填表。",
+    "agent",
+    `顾问已创建第 ${result.attempt.ordinal} 次重新填写：复用既有整理产物，新建 OpenCode 对话和独立 Ego task space；旧浏览器进度已归档到 ${result.attempt.progressArchivePath}。`,
   )
-  await persistTask(task)
-  return task
+  return result.attempt
+}
+
+export async function validateApplicationRefillReadiness(workspacePath: string): Promise<void> {
+  const task = await getApplicationTask(workspacePath)
+  await syncSharedDossierSnapshot(task)
+  await validateApplicationRefillArtifacts(workspacePath, task)
+}
+
+async function syncSharedDossierSnapshot(task: ApplicationTask) {
+  if (!task.input.sharedWorkspacePath) return
+  const state = await readJson<Record<string, unknown>>(
+    join(task.input.sharedWorkspacePath, "03_state", "shared_dossier_state.json"),
+    {},
+  )
+  if (state.status !== "ready") {
+    throw new Error("学生共享档案尚未完成材料确认，不能开始重新填写。")
+  }
+  const profile = join(task.input.sharedWorkspacePath, "02_generated", "student_profile.md")
+  const materialsIndex = join(task.input.sharedWorkspacePath, "03_state", "materials_index.json")
+  if (!existsSync(profile) || !existsSync(materialsIndex)) {
+    throw new Error("学生共享档案不完整：缺少学生核心档案或材料索引。")
+  }
+  const hashes = isRecord(state.hashes) ? state.hashes : {}
+  const ocrIndex = join(task.input.sharedWorkspacePath, "03_state", "ocr_index.json")
+  if (
+    (typeof hashes.studentProfileSha256 === "string" && hashes.studentProfileSha256 !== await fileSha256(profile)) ||
+    (typeof hashes.materialsIndexSha256 === "string" && hashes.materialsIndexSha256 !== await fileSha256(materialsIndex)) ||
+    (typeof hashes.ocrIndexSha256 === "string" && hashes.ocrIndexSha256 && (!existsSync(ocrIndex) || hashes.ocrIndexSha256 !== await fileSha256(ocrIndex))) ||
+    (typeof hashes.rawMaterialsSha256 !== "string" || hashes.rawMaterialsSha256 !== await directorySha256(join(task.input.sharedWorkspacePath, "00_original_backup"))) ||
+    (typeof hashes.classifiedMaterialsSha256 !== "string" || hashes.classifiedMaterialsSha256 !== await directorySha256(join(task.input.sharedWorkspacePath, "01_classified_materials"))) ||
+    (typeof hashes.extractedTextSha256 !== "string" || hashes.extractedTextSha256 !== await directorySha256(join(task.input.sharedWorkspacePath, "03_state", "extracted_text")))
+  ) {
+    throw new Error("学生共享档案在发布后发生变化，已停止重新填写；请重新确认学生资料库。")
+  }
+  const localProfile = join(task.workspacePath, "02_generated", "student_profile.md")
+  const localMaterialsIndex = join(task.workspacePath, "03_state", "materials_index.json")
+  const localOcrIndex = join(task.workspacePath, "03_state", "ocr_index.json")
+  await Promise.all([
+    cp(profile, join(task.workspacePath, "02_generated", "shared_student_profile.md"), { force: true }),
+    cp(materialsIndex, join(task.workspacePath, "03_state", "shared_materials_index.json"), { force: true }),
+    existsSync(localProfile) ? Promise.resolve() : cp(profile, localProfile, { force: true }),
+    existsSync(localMaterialsIndex) ? Promise.resolve() : cp(materialsIndex, localMaterialsIndex, { force: true }),
+    existsSync(ocrIndex)
+      ? cp(
+          ocrIndex,
+          join(task.workspacePath, "03_state", "shared_ocr_index.json"),
+          { force: true },
+        )
+      : Promise.resolve(),
+    existsSync(ocrIndex) && !existsSync(localOcrIndex)
+      ? cp(ocrIndex, localOcrIndex, { force: true })
+      : Promise.resolve(),
+  ])
+  await writeJson(join(task.workspacePath, "03_state", "shared_dossier_snapshot.json"), {
+    status: "ready",
+    reusedSharedDossier: true,
+    sharedWorkspacePath: task.input.sharedWorkspacePath,
+    version: Number(state.version || 1),
+    publishedAt: state.publishedAt || state.updatedAt || "",
+    synchronizedAt: new Date().toISOString(),
+  })
+}
+
+async function fileSha256(path: string) {
+  return createHash("sha256").update(await readFile(path)).digest("hex")
+}
+
+async function directorySha256(path: string) {
+  const files = existsSync(path) ? await scanFiles(path) : []
+  const records = await Promise.all(
+    files.sort().map(async (file) => `${relative(path, file).replaceAll("\\", "/")}\\0${await fileSha256(file)}`),
+  )
+  return createHash("sha256").update(records.join("\n")).digest("hex")
+}
+
+export async function inspectApplicationRefillAttempt(
+  workspacePath: string,
+  requestID: string,
+): Promise<ApplicationRefillAttempt | undefined> {
+  const task = await getApplicationTask(workspacePath)
+  return inspectApplicationRefillState({ workspacePath, task, requestID })
+}
+
+export async function completeApplicationRefillAttempt(
+  workspacePath: string,
+  attemptID: string,
+  sessionID: string,
+): Promise<ApplicationRefillAttempt> {
+  const result = await completeApplicationRefillState(workspacePath, attemptID, sessionID)
+  if (result.changed) {
+    await appendLog(workspacePath, "agent", `第 ${result.attempt.ordinal} 次重新填写已绑定全新 OpenCode 对话 ${sessionID.trim()}。`)
+  }
+  return result.attempt
+}
+
+export async function markApplicationRefillPromptSent(
+  workspacePath: string,
+  attemptID: string,
+  sessionID: string,
+): Promise<ApplicationRefillAttempt> {
+  return (await markApplicationRefillPromptSentState(workspacePath, attemptID, sessionID)).attempt
 }
 
 export async function blockHighRiskAction(workspacePath: string, action: string): Promise<ApplicationTask> {
@@ -433,26 +880,34 @@ function validateTaskInput(input: ApplicationTaskInput) {
     ["school", "申请学校"],
     ["program", "申请项目 / 专业"],
     ["applicationType", "申请类型"],
-    ["applicationUrl", "申请平台或申请链接"],
   ]
   for (const [key, label] of required) {
     if (!String(input[key] ?? "").trim()) throw new Error(`${label}不能为空`)
   }
   if (!existsSync(input.sourceFolder)) throw new Error("学生资料文件夹不存在")
-  if (!URL.canParse(input.applicationUrl)) throw new Error("申请平台链接格式不正确")
+  if (input.applicationUrl && !URL.canParse(input.applicationUrl)) throw new Error("申请平台链接格式不正确")
+  if (input.sharedWorkspacePath && !input.batchWorkspacePath) throw new Error("学生共享资料库必须属于选校批次")
+}
+
+function isSelectableSelectionRow(row: SelectionListRow) {
+  return row.status === "ready" || row.status === "needs_research"
 }
 
 function sanitizeTaskInput(input: ApplicationTaskInput): ApplicationTaskInput {
   return {
     ...input,
+    applicationUrl: input.applicationUrl?.trim() || undefined,
     platformUsername: input.platformUsername?.trim() || undefined,
-    rememberPlatformPassword: Boolean(input.rememberPlatformPassword),
   }
 }
 
 async function findExistingApplicationTask(input: ApplicationTaskInput) {
   const tasks = await listApplicationTasks(200).catch(() => [])
-  return tasks.find((task) => isSameApplicationInput(task.input, input)) ?? null
+  return tasks.find((task) => {
+    if (!isSameApplicationInput(task.input, input)) return false
+    if (!input.batchId) return !task.input.batchId
+    return task.input.batchId === input.batchId
+  }) ?? null
 }
 
 function isSameApplicationInput(a: ApplicationTaskInput, b: ApplicationTaskInput) {
@@ -481,22 +936,9 @@ function normalizeApplicationUrl(value?: string) {
   return `${url.protocol}//${url.host}${pathname || "/"}${url.search}`.toLowerCase()
 }
 
-async function writeLoginCredentialState(workspacePath: string, input: ApplicationTaskInput) {
-  const saved = await getApplicationPlatformCredential(input.applicationUrl).catch(() => null)
-  const username = saved?.username || input.platformUsername || ""
-  await writeJson(join(workspacePath, "03_state/login_credentials.json"), {
-    applicationUrl: input.applicationUrl,
-    platformHost: saved?.platformHost || (URL.canParse(input.applicationUrl) ? new URL(input.applicationUrl).host : ""),
-    username,
-    hasSavedPassword: Boolean(saved?.hasPassword),
-    serviceName: saved?.serviceName || "",
-    updatedAt: new Date().toISOString(),
-    note: "密码不保存在申请工作区。若 hasSavedPassword 为 true，application-agent_login 会从本机钥匙串读取并填入网页。",
-  })
-}
-
-async function uniqueWorkspacePath(slug: string) {
-  const root = await getApplicationWorkspaceRoot()
+async function uniqueWorkspacePath(slug: string, parent?: string) {
+  const root = parent || await getApplicationWorkspaceRoot()
+  await mkdir(root, { recursive: true })
   let candidate = join(root, slug)
   let index = 2
   while (existsSync(candidate)) {
@@ -506,7 +948,83 @@ async function uniqueWorkspacePath(slug: string) {
   return candidate
 }
 
-async function createWorkspace(workspacePath: string) {
+async function taskWorkspaceParent(input: ApplicationTaskInput) {
+  const root = await getApplicationWorkspaceRoot()
+  if (!input.batchWorkspacePath) return root
+
+  const canonicalRoot = await realpath(root)
+  const requestedBatchWorkspacePath = resolve(input.batchWorkspacePath)
+  const batchWorkspacePath = await realpath(requestedBatchWorkspacePath)
+  const child = relative(canonicalRoot, batchWorkspacePath)
+  if (!child || child.startsWith("..") || isAbsolute(child)) {
+    throw new Error("选校批次工作区不属于 Terra-Edu 申请目录")
+  }
+  if (requestedBatchWorkspacePath !== batchWorkspacePath) {
+    throw new Error("选校批次工作区不能是符号链接")
+  }
+  const batchState = await readJson<Record<string, unknown> | null>(
+    join(batchWorkspacePath, "03_state", "batch_state.json"),
+    null,
+  )
+  if (!batchState) {
+    throw new Error("选校批次状态不存在，不能在该目录创建学校任务")
+  }
+  if (
+    Number(batchState.workspaceLayoutVersion || 0) !== 2 ||
+    String(batchState.id || "") !== String(input.batchId || "") ||
+    normalizeComparable(String(batchState.studentName || "")) !== normalizeComparable(input.studentName)
+  ) {
+    throw new Error("选校批次身份与当前学校任务不匹配")
+  }
+  const expectedSharedWorkspacePath = studentWorkspaceLayout(batchWorkspacePath).sharedWorkspacePath
+  const expectedSchoolsPath = join(batchWorkspacePath, "schools")
+  if (
+    resolve(input.sharedWorkspacePath || "") !== expectedSharedWorkspacePath ||
+    resolve(String(batchState.sharedWorkspacePath || "")) !== expectedSharedWorkspacePath ||
+    resolve(input.sourceFolder) !== join(expectedSharedWorkspacePath, "00_original_backup") ||
+    await realpath(expectedSharedWorkspacePath) !== expectedSharedWorkspacePath ||
+    await realpath(expectedSchoolsPath) !== expectedSchoolsPath
+  ) {
+    throw new Error("学生共享资料库路径与选校批次不匹配")
+  }
+  return expectedSchoolsPath
+}
+
+async function canonicalTaskInput(workspacePath: string, input: ApplicationTaskInput) {
+  const canonicalWorkspacePath = await realpath(workspacePath)
+  const schoolsPath = dirname(canonicalWorkspacePath)
+  const batchWorkspacePath = dirname(schoolsPath)
+  const batchState = basename(schoolsPath) === "schools"
+    ? await readJson<Record<string, unknown> | null>(join(batchWorkspacePath, "03_state", "batch_state.json"), null)
+    : null
+  if (Number(batchState?.workspaceLayoutVersion || 0) !== 2) {
+    return { ...input, sharedWorkspacePath: undefined }
+  }
+
+  const canonicalRoot = await realpath(await getApplicationWorkspaceRoot())
+  const child = relative(canonicalRoot, batchWorkspacePath)
+  const sharedWorkspacePath = join(batchWorkspacePath, "shared")
+  if (
+    !child ||
+    child.startsWith("..") ||
+    isAbsolute(child) ||
+    await realpath(schoolsPath) !== schoolsPath ||
+    await realpath(sharedWorkspacePath) !== sharedWorkspacePath ||
+    String(batchState?.id || "") !== String(input.batchId || "") ||
+    normalizeComparable(String(batchState?.studentName || "")) !== normalizeComparable(input.studentName) ||
+    resolve(String(batchState?.sharedWorkspacePath || "")) !== sharedWorkspacePath
+  ) {
+    throw new Error("学校任务与学生共享资料库的绑定已失效，已拒绝加载以避免跨学生读取。")
+  }
+  return {
+    ...input,
+    batchWorkspacePath,
+    sharedWorkspacePath,
+    sourceFolder: join(sharedWorkspacePath, "00_original_backup"),
+  }
+}
+
+async function createWorkspace(workspacePath: string, input?: ApplicationTaskInput) {
   const dirs = [
     "00_original_backup",
     "01_classified_materials/identity",
@@ -540,6 +1058,7 @@ async function createWorkspace(workspacePath: string) {
     consecutiveFailures: 0,
     updatedAt: new Date().toISOString(),
   })
+  await setTaskPaused(workspacePath, false)
   await writeJson(join(workspacePath, "03_state/application_requirements.json"), {
     sources: [],
     fieldRequirements: [],
@@ -547,17 +1066,8 @@ async function createWorkspace(workspacePath: string) {
     uncertainRequirements: [],
     notes: "",
   })
-  await writeJson(join(workspacePath, "03_state/login_credentials.json"), {
-    applicationUrl: "",
-    platformHost: "",
-    username: "",
-    hasSavedPassword: false,
-    serviceName: "",
-    updatedAt: new Date().toISOString(),
-    note: "密码不保存在申请工作区。若 hasSavedPassword 为 true，application-agent_login 会从本机钥匙串读取并填入网页。",
-  })
   await writeFile(join(workspacePath, "02_generated/application_requirements.md"), "# 申请要求摘要\n\n等待 OpenCode Agent 使用 webfetch/websearch 获取官方申请要求。\n", "utf8")
-  await writeOpenCodeConfig(workspacePath)
+  await writeOpenCodeConfig(workspacePath, { sharedWorkspacePath: input?.sharedWorkspacePath })
 }
 
 function buildTask(input: {
@@ -666,6 +1176,7 @@ function normalizeStatus(status: unknown, currentStep: unknown): ApplicationTask
     if (currentStep.includes("profile")) return "正在生成学生资料"
     if (currentStep.includes("missing")) return "正在检查缺失内容"
     if (currentStep.includes("cua_login")) return "等待顾问登录"
+    if (currentStep.includes("cua_handoff") || currentStep.includes("handoff")) return "等待顾问接管浏览器"
     if (currentStep.includes("cua") || currentStep.includes("form")) return "正在填写申请平台"
     if (currentStep.includes("summary")) return "阶段性完成"
   }
@@ -673,6 +1184,17 @@ function normalizeStatus(status: unknown, currentStep: unknown): ApplicationTask
   if (status === "completed") return "阶段性完成"
   if (status === "error") return "异常中断"
   return "已创建"
+}
+
+async function scanTaskMaterials(workspacePath: string, input?: ApplicationTaskInput) {
+  const sharedMaterialsPath = input?.sharedWorkspacePath
+    ? join(input.sharedWorkspacePath, "00_original_backup")
+    : ""
+  const roots = [
+    sharedMaterialsPath && existsSync(sharedMaterialsPath) ? sharedMaterialsPath : join(workspacePath, "00_original_backup"),
+    join(workspacePath, "06_new_materials"),
+  ].filter(existsSync)
+  return (await Promise.all(roots.map((root) => scanFiles(root)))).flat()
 }
 
 async function appendProgress(task: ApplicationTask, status: ApplicationTaskStatus) {
@@ -706,20 +1228,41 @@ async function scanFiles(root: string): Promise<string[]> {
   return output
 }
 
-async function classifyMaterials(workspacePath: string, files: string[]): Promise<MaterialRecord[]> {
+async function classifyMaterials(
+  workspacePath: string,
+  files: string[],
+  input?: ApplicationTaskInput,
+): Promise<MaterialRecord[]> {
   const records: MaterialRecord[] = []
-  const backupRoot = join(workspacePath, "00_original_backup")
+  const sharedWorkspacePath = input?.sharedWorkspacePath && existsSync(input.sharedWorkspacePath)
+    ? input.sharedWorkspacePath
+    : ""
+  const backupRoot = sharedWorkspacePath
+    ? join(sharedWorkspacePath, "00_original_backup")
+    : join(workspacePath, "00_original_backup")
+  const classifiedRoot = sharedWorkspacePath
+    ? join(sharedWorkspacePath, "01_classified_materials")
+    : join(workspacePath, "01_classified_materials")
+  const sharedMaterialsIndex = sharedWorkspacePath
+    ? join(sharedWorkspacePath, "03_state", "materials_index.json")
+    : ""
+  if (sharedMaterialsIndex && existsSync(sharedMaterialsIndex)) {
+    const sharedRecords = await readJson<MaterialRecord[]>(sharedMaterialsIndex, [])
+    await writeJson(join(workspacePath, "03_state/materials_index.json"), sharedRecords)
+    await writeFile(join(workspacePath, "02_generated/materials_index.md"), renderMaterialsIndex(sharedRecords, backupRoot), "utf8")
+    return sharedRecords
+  }
   for (const file of files) {
     const fileName = basename(file)
     const match = classifyFile(fileName)
-    const categoryDir = join(workspacePath, "01_classified_materials", CATEGORY_DIRS[match.category])
+    const categoryDir = join(classifiedRoot, CATEGORY_DIRS[match.category])
     await mkdir(categoryDir, { recursive: true })
     const target = await uniqueFilePath(join(categoryDir, fileName))
     await cp(file, target, { force: false, errorOnExist: false })
     records.push({
       originalPath: file,
-      backupPath: relative(workspacePath, file),
-      classifiedPath: relative(workspacePath, target),
+      backupPath: sharedWorkspacePath ? file : relative(workspacePath, file),
+      classifiedPath: sharedWorkspacePath ? target : relative(workspacePath, target),
       fileName,
       extension: extname(fileName).toLowerCase(),
       category: match.category,
@@ -728,6 +1271,10 @@ async function classifyMaterials(workspacePath: string, files: string[]): Promis
     })
   }
   await writeJson(join(workspacePath, "03_state/materials_index.json"), records)
+  if (sharedWorkspacePath) {
+    await writeJson(join(sharedWorkspacePath, "03_state/materials_index.json"), records)
+    await writeFile(join(sharedWorkspacePath, "02_generated/materials_index.md"), renderMaterialsIndex(records, backupRoot), "utf8")
+  }
   await writeFile(join(workspacePath, "02_generated/materials_index.md"), renderMaterialsIndex(records, backupRoot), "utf8")
   return records
 }
@@ -1000,32 +1547,26 @@ async function writeGeneratedDocuments(
   materials: MaterialRecord[],
   missingItems: MissingItem[],
   applicationProgress: ApplicationProgress,
+  preserveStudentProfile = false,
 ) {
   const syncedMissingItems = syncMissingItemsWithProgress(normalizeMissingItems(missingItems), applicationProgress)
   const activeMissingItems = filterActiveMissingItems(syncedMissingItems)
   await writeJson(join(workspacePath, "03_state/missing_items.json"), syncedMissingItems)
   await writeJson(join(workspacePath, "03_state/application_progress.json"), applicationProgress)
-  await writeFile(join(workspacePath, "02_generated/student_profile.md"), renderStudentProfile(input, materials, activeMissingItems), "utf8")
+  const studentProfilePath = join(workspacePath, "02_generated/student_profile.md")
+  if (!preserveStudentProfile || !existsSync(studentProfilePath)) {
+    await writeFile(studentProfilePath, renderStudentProfile(input, materials), "utf8")
+  }
   await writeFile(join(workspacePath, "02_generated/info_collection_form.md"), renderInfoCollection(input, activeMissingItems), "utf8")
   await writeFile(join(workspacePath, "02_generated/material_collection_form.md"), renderMaterialCollection(input, activeMissingItems), "utf8")
   await writeFile(join(workspacePath, "02_generated/task_summary.md"), renderTaskSummary(input, materials, activeMissingItems), "utf8")
   await writeFile(join(workspacePath, "02_generated/missing_materials.docx"), makeDocx(renderWordText(input, activeMissingItems)))
 }
 
-function renderStudentProfile(input: ApplicationTaskInput, materials: MaterialRecord[], missingItems: MissingItem[]) {
-  return `# ${input.studentName} 申请档案
+function renderStudentProfile(input: ApplicationTaskInput, materials: MaterialRecord[]) {
+  return `# ${input.studentName} 学生核心档案
 
-## 任务基本信息
-
-- 学生姓名：${input.studentName}
-- 申请学校：${input.school}
-- 申请项目 / 专业：${input.program}
-- 申请类型：${input.applicationType}
-- 申请平台链接：${input.applicationUrl}
-- 截止日期：${input.deadline || "未填写"}
-- 输出语言：${input.outputLanguage === "en" ? "English" : "中文"}
-- 本次任务目标：${input.taskGoal || "全流程执行"}
-- 顾问备注：${input.notes || "无"}
+> 本文件只记录能够由材料或顾问确认的学生事实，可供同一学生的多所学校申请只读复用。学校、项目、截止日期、学校特定问题和文书答案必须保存在各学校任务中，不得写入本档案。
 
 ## 学生基本信息
 
@@ -1046,34 +1587,13 @@ function renderStudentProfile(input: ApplicationTaskInput, materials: MaterialRe
 
 待从成绩单和语言/标化成绩报告中提取。
 
-## 活动、奖项、文书与推荐信息
+## 活动、奖项与推荐人事实
 
-待从简历、文书和推荐材料中提取。推荐信邀请属于高风险动作，不能自动发送。
+待从简历和推荐材料中提取可跨学校复用的客观事实。学校特定文书观点和问题答案不得写入这里；推荐信邀请属于高风险动作，不能自动发送。
 
 ## 已有材料目录
 
 ${materials.map((item) => `- ${item.fileName} → ${item.classifiedPath}（${item.category}，${item.confidence}，${item.reason}）`).join("\n") || "- 暂未识别到材料"}
-
-## 缺失信息
-
-${missingItems
-  .filter((item) => item.type === "information")
-  .map((item) => `- ${item.name}：${item.whyNeeded}`)
-  .join("\n") || "- 暂无"}
-
-## 缺失材料
-
-${missingItems
-  .filter((item) => item.type === "material")
-  .map((item) => `- ${item.name}：${item.whyNeeded}`)
-  .join("\n") || "- 暂无"}
-
-## 不确定信息
-
-${missingItems
-  .filter((item) => item.type === "uncertain")
-  .map((item) => `- ${item.name}：${item.whyNeeded}`)
-  .join("\n") || "- 暂无"}
 
 ## 申请平台填写注意事项
 
@@ -1306,12 +1826,24 @@ async function readJson<T>(path: string, fallback: T): Promise<T> {
 }
 
 function makeTaskSlug(input: ApplicationTaskInput) {
+  if (input.batchWorkspacePath) {
+    return `${String(input.batchOrder || 0).padStart(2, "0")}-${slugPart(input.school)}-${slugPart(input.program)}`
+  }
   const raw = `${input.studentName}-${input.school}-${input.program}`
   return raw
     .normalize("NFKD")
     .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80)
+    .toLowerCase()
+}
+
+function slugPart(value: string) {
+  return value
+    .normalize("NFKD")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 50)
     .toLowerCase()
 }
 

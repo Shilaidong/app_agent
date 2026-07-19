@@ -1,12 +1,16 @@
 import { execFile } from "node:child_process"
-import { mkdir, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { copyFile } from "node:fs/promises"
+import { join } from "node:path"
 import { BrowserWindow, Notification, app, clipboard, dialog, ipcMain, shell } from "electron"
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 
 import type {
   ApplicationAgentChatItem,
+  ApplicationAgentRefillRequest,
+  ApplicationAgentRefillSession,
   ApplicationAgentSession,
+  ApplicationMaterialReviewInput,
+  ApplicationSelectionListInput,
   ApplicationTask,
   ApplicationTaskInput,
   InitStep,
@@ -17,20 +21,24 @@ import type {
   WslConfig,
 } from "../preload/types"
 import {
+  authorizeBrowserSafetyContinue,
   blockHighRiskAction,
   continueApplicationTask,
   createApplicationTask,
+  createApplicationTasksFromSelectionList,
   getApplicationTask,
   listApplicationTasks,
-  openApplicationPlatform,
-  runApplicationCommand,
+  pauseApplicationTask,
+  resumeApplicationTask,
+  submitApplicationMaterialReview,
 } from "./application-agent"
+import { previewSelectionList } from "./application-selection-list"
 import {
-  clearApplicationPlatformCredential,
-  getApplicationPlatformCredential,
-  saveApplicationPlatformCredential,
-} from "./application-credentials"
-import { hasOpenCodeGoApiKey, setOpenCodeGoApiKey } from "./opencode-go"
+  clearApplicationPlatformAccount,
+  getApplicationPlatformAccount,
+  saveApplicationPlatformAccount,
+} from "./application-accounts"
+import { hasOpenCodeGoApiKey } from "./opencode-go"
 import { getStore } from "./store"
 import { getTerraAuthStatus, loginTerraAdvisor, logoutTerraAdvisor } from "./terra-auth"
 import { setTitlebar, updateTitlebar } from "./windows"
@@ -38,6 +46,10 @@ import { setTitlebar, updateTitlebar } from "./windows"
 const pickerFilters = (ext?: string[]) => {
   if (!ext || ext.length === 0) return undefined
   return [{ name: "Files", extensions: ext }]
+}
+
+function selectionListTemplatePath() {
+  return join(app.getAppPath(), "resources", "templates", "terra-edu-selection-list-template.xlsx")
 }
 
 type Deps = {
@@ -61,6 +73,10 @@ type Deps = {
   installUpdate: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
   startApplicationAgentSession: (task: ApplicationTask) => Promise<ApplicationAgentSession>
+  startApplicationAgentRefillSession: (
+    input: ApplicationAgentRefillRequest,
+  ) => Promise<ApplicationAgentRefillSession>
+  resendApplicationAgentStartPrompt: (session: ApplicationAgentSession, task: ApplicationTask) => Promise<void>
   sendApplicationAgentPrompt: (session: ApplicationAgentSession, prompt: string) => Promise<void>
   getApplicationAgentMessages: (session: ApplicationAgentSession) => Promise<ApplicationAgentChatItem[]>
   findApplicationAgentSession: (workspacePath: string) => Promise<ApplicationAgentSession | null>
@@ -186,13 +202,18 @@ export function registerIpcHandlers(deps: Deps) {
     return { buffer, width: size.width, height: size.height }
   })
 
-  const showNotification = (title: string, body?: string) => {
+  const showNotification = (title: string, body?: string, urgent = false) => {
+    if (urgent && process.platform === "darwin") app.dock?.bounce("critical")
     if (!Notification.isSupported()) return
     new Notification({ title, body }).show()
   }
 
   ipcMain.on("show-notification", (_event: IpcMainEvent, title: string, body?: string) => {
     showNotification(title, body)
+  })
+
+  ipcMain.on("show-urgent-notification", (_event: IpcMainEvent, title: string, body?: string) => {
+    showNotification(title, body, true)
   })
 
   ipcMain.handle("get-window-count", () => BrowserWindow.getAllWindows().length)
@@ -232,8 +253,35 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("application-agent:create-task", (_event: IpcMainInvokeEvent, input: ApplicationTaskInput) =>
     createApplicationTask(input),
   )
+  ipcMain.handle("application-agent:preview-selection-list", (_event: IpcMainInvokeEvent, sourcePath: string) =>
+    previewSelectionList(sourcePath),
+  )
+  ipcMain.handle(
+    "application-agent:create-selection-list-tasks",
+    (_event: IpcMainInvokeEvent, input: ApplicationSelectionListInput) => createApplicationTasksFromSelectionList(input),
+  )
+  ipcMain.handle("application-agent:download-selection-list-template", async () => {
+    const destination = await dialog.showSaveDialog({
+      title: "下载选校清单模板",
+      defaultPath: join(app.getPath("downloads"), "Terra-Edu-选校清单模板.xlsx"),
+      filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
+    })
+    if (destination.canceled || !destination.filePath) return null
+    await copyFile(selectionListTemplatePath(), destination.filePath)
+    return destination.filePath
+  })
   ipcMain.handle("application-agent:start-session", (_event: IpcMainInvokeEvent, task: ApplicationTask) =>
     deps.startApplicationAgentSession(task),
+  )
+  ipcMain.handle(
+    "application-agent:start-refill-session",
+    (_event: IpcMainInvokeEvent, input: ApplicationAgentRefillRequest) =>
+      deps.startApplicationAgentRefillSession(input),
+  )
+  ipcMain.handle(
+    "application-agent:resend-start-prompt",
+    (_event: IpcMainInvokeEvent, session: ApplicationAgentSession, task: ApplicationTask) =>
+      deps.resendApplicationAgentStartPrompt(session, task),
   )
   ipcMain.handle(
     "application-agent:send-prompt",
@@ -255,80 +303,39 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("application-agent:continue-task", (_event: IpcMainInvokeEvent, workspacePath: string) =>
     continueApplicationTask(workspacePath),
   )
-  ipcMain.handle(
-    "application-agent:run-command",
-    (_event: IpcMainInvokeEvent, workspacePath: string, command: string) => runApplicationCommand(workspacePath, command),
+  ipcMain.handle("application-agent:pause-task", (_event: IpcMainInvokeEvent, workspacePath: string) =>
+    pauseApplicationTask(workspacePath),
   )
-  ipcMain.handle("application-agent:open-platform", (_event: IpcMainInvokeEvent, workspacePath: string) =>
-    openApplicationPlatform(workspacePath),
+  ipcMain.handle("application-agent:resume-task", (_event: IpcMainInvokeEvent, workspacePath: string) =>
+    resumeApplicationTask(workspacePath),
+  )
+  ipcMain.handle(
+    "application-agent:authorize-browser-safety-continue",
+    (
+      _event: IpcMainInvokeEvent,
+      workspacePath: string,
+      input: { decisionId: string; taskSpaceId: string },
+    ) => authorizeBrowserSafetyContinue(workspacePath, input),
+  )
+  ipcMain.handle(
+    "application-agent:submit-material-review",
+    (_event: IpcMainInvokeEvent, workspacePath: string, input: ApplicationMaterialReviewInput) =>
+      submitApplicationMaterialReview(workspacePath, input),
   )
   ipcMain.handle(
     "application-agent:block-high-risk-action",
     (_event: IpcMainInvokeEvent, workspacePath: string, action: string) => blockHighRiskAction(workspacePath, action),
   )
-  ipcMain.handle("application-agent:stop-automation", async (_event: IpcMainInvokeEvent, workspacePath?: string) => {
-    const stopped: string[] = []
-    for (const pattern of ["cua-driver", "CuaDriver.app/Contents/MacOS/cua-driver"]) {
-      await new Promise<void>((resolve) => {
-        execFile("pkill", ["-f", pattern], () => resolve())
-      })
-      stopped.push(pattern)
-    }
-    if (workspacePath) {
-      const now = new Date().toISOString()
-      await mkdir(join(workspacePath, "03_state"), { recursive: true })
-      await writeFile(
-        join(workspacePath, "03_state/cua_control.json"),
-        JSON.stringify(
-          {
-            stopped: true,
-            stoppedAt: now,
-            reason: "顾问手动停止浏览器自动化，释放页面控制。",
-            recentActions: [],
-            consecutiveFailures: 0,
-            updatedAt: now,
-          },
-          null,
-          2,
-        ) + "\n",
-        "utf8",
-      )
-      await mkdir(join(workspacePath, "04_logs"), { recursive: true })
-      await writeFile(
-        join(workspacePath, "04_logs/cua_log.md"),
-        "- " + now + " 顾问手动停止浏览器自动化，已尝试释放页面控制。\n",
-        { encoding: "utf8", flag: "a" },
-      )
-      await writeFile(
-        join(dirname(workspacePath), ".cua_global_stop.json"),
-        JSON.stringify({ stopped: true, stoppedAt: now, workspacePath }, null, 2) + "\n",
-        "utf8",
-      )
-    }
-    showNotification("申请 Agent 自动化已停止", "已尝试释放浏览器控制。需要继续时，请回到申请 Agent 点击继续填表。")
-    const win = BrowserWindow.getAllWindows().find((item) => !item.isDestroyed())
-    if (win) {
-      if (win.isMinimized()) win.restore()
-      win.show()
-      win.focus()
-    }
-    app.focus({ steal: true })
-    return { stopped }
-  })
-  ipcMain.handle("application-agent:get-platform-credential", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
-    getApplicationPlatformCredential(applicationUrl),
+  ipcMain.handle("application-agent:get-platform-account", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
+    getApplicationPlatformAccount(applicationUrl),
   )
   ipcMain.handle(
-    "application-agent:save-platform-credential",
-    (_event: IpcMainInvokeEvent, input: { applicationUrl: string; username: string; password?: string; rememberPassword?: boolean }) =>
-      saveApplicationPlatformCredential(input),
+    "application-agent:save-platform-account",
+    (_event: IpcMainInvokeEvent, input: { applicationUrl: string; username: string }) => saveApplicationPlatformAccount(input),
   )
-  ipcMain.handle("application-agent:clear-platform-credential", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
-    clearApplicationPlatformCredential(applicationUrl),
+  ipcMain.handle("application-agent:clear-platform-account", (_event: IpcMainInvokeEvent, applicationUrl: string) =>
+    clearApplicationPlatformAccount(applicationUrl),
   )
-  ipcMain.handle("application-agent:set-go-api-key", (_event: IpcMainInvokeEvent, key: string | null) => {
-    setOpenCodeGoApiKey(key)
-  })
   ipcMain.handle("application-agent:has-go-api-key", () => hasOpenCodeGoApiKey())
   ipcMain.handle("terra-auth:status", () => getTerraAuthStatus())
   ipcMain.handle("terra-auth:login", (_event: IpcMainInvokeEvent, email: string, password: string) =>

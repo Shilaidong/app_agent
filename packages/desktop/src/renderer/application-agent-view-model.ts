@@ -34,7 +34,6 @@ export function defaultTaskInput(): ApplicationTaskInput {
     notes: "",
     loginMethod: "顾问手动登录",
     platformUsername: "",
-    rememberPlatformPassword: true,
     outputLanguage: "zh",
     allowUpload: true,
     taskGoal: "全流程执行",
@@ -68,16 +67,23 @@ export function isSameApplicationTaskInput(a: ApplicationTaskInput, b: Applicati
 }
 
 export function groupedTasks(tasks: ApplicationTask[]) {
-  const map = new Map<string, ApplicationTask[]>()
+  const map = new Map<string, { student: string; items: ApplicationTask[] }>()
   for (const item of tasks.filter((task) => task.input.studentName.trim() && (task.input.school.trim() || task.input.program.trim()))) {
     const student = item.input.studentName.trim()
-    map.set(student, [...(map.get(student) ?? []), item])
+    const key = taskGroupKey(item)
+    const group = map.get(key)
+    map.set(key, { student, items: [...(group?.items ?? []), item] })
   }
   return Array.from(map.entries())
-    .map(([student, items]) => ({
-      student,
-      latestUpdatedAt: Math.max(...items.map((item) => new Date(item.updatedAt).getTime())),
-      items: items.sort((a, b) => {
+    .map(([key, group]) => ({
+      key,
+      student: group.student,
+      latestUpdatedAt: Math.max(...group.items.map((item) => new Date(item.updatedAt).getTime())),
+      items: group.items.sort((a, b) => {
+        if (a.input.batchId && a.input.batchId === b.input.batchId) {
+          const batchOrder = (a.input.batchOrder ?? Number.MAX_SAFE_INTEGER) - (b.input.batchOrder ?? Number.MAX_SAFE_INTEGER)
+          if (batchOrder !== 0) return batchOrder
+        }
         const schoolOrder = (a.input.school || a.input.program).localeCompare(b.input.school || b.input.program, "zh-Hans")
         if (schoolOrder !== 0) return schoolOrder
         const programOrder = (a.input.program || "").localeCompare(b.input.program || "", "zh-Hans")
@@ -90,6 +96,10 @@ export function groupedTasks(tasks: ApplicationTask[]) {
       if (studentOrder !== 0) return studentOrder
       return b.latestUpdatedAt - a.latestUpdatedAt
     })
+}
+
+export function taskGroupKey(task: ApplicationTask) {
+  return task.input.batchWorkspacePath?.trim() || `legacy:${normalizeTaskComparable(task.input.studentName)}`
 }
 
 export function mergeAgentMessages(current: ApplicationAgentChatItem[], next: ApplicationAgentChatItem[]) {

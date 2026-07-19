@@ -6,7 +6,7 @@ Terra-Edu Application Agent 是一个独立的 macOS 桌面申请助理，基于
 
 ## 当前版本
 
-- 最新 Release：[Terra-Edu Application Agent v1.0.3](https://github.com/Shilaidong/app_agent/releases/tag/v1.0.3)
+- 最新 Release：[Terra-Edu Application Agent v1.0.14](https://github.com/Shilaidong/app_agent/releases/tag/v1.0.14)
 - 支持平台：macOS Apple Silicon
 - 交付文件：`terra-edu-application-agent-mac-arm64.dmg` 和 `terra-edu-application-agent-mac-arm64.zip`
 - 构建方式：GitHub Actions 只构建 macOS arm64
@@ -105,7 +105,7 @@ https://github.com/Shilaidong/app_agent/releases
 为了让客户“点开即用”，当前 direct-distribution build 会把必要运行配置一起打进桌面包，包括：
 
 - Supabase 登录和 AI 额度所需的 public config
-- 默认 OpenCode Go 模型路由
+- 默认 OpenCode Go `qwen3.7-plus` 多模态模型路由
 - 随包 ego-lite 浏览器
 - 申请 Agent 的 Prompt、Skills、Commands 和 Custom Tools
 
@@ -123,7 +123,7 @@ https://github.com/Shilaidong/app_agent/releases
 
 ## ego-lite 浏览器
 
-当前版本内置 ego-lite `0.4.2.15`，并禁用自动替换和自动更新。这样做是为了让申请平台填写行为稳定、可复现。
+当前版本内置并固定 ego-lite `0.4.4.15`，保留 Citro 官方签名，同时禁用自动替换和自动更新。这样既使用已验证的新版本能力，也避免浏览器身份变化造成登录态、钥匙串权限或填表行为漂移。
 
 开发时请不要让 Agent 或用户自动安装新版 ego-lite，也不要把系统浏览器临时替换进来。升级浏览器应作为单独版本变更测试。
 

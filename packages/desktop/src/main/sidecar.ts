@@ -1,5 +1,9 @@
 import { drizzle } from "drizzle-orm/node-sqlite/driver"
+import { existsSync, mkdirSync } from "node:fs"
 import * as http from "node:http"
+import { homedir } from "node:os"
+import { dirname, join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import * as tls from "node:tls"
 
 type NodeHttpWithEnvProxy = typeof http & {
@@ -24,7 +28,13 @@ type StopCommand = { type: "stop" }
 type SidecarCommand = StartCommand | StopCommand
 
 type SidecarMessage =
-  | { type: "sqlite"; progress: { type: "InProgress"; value: number } | { type: "Done" } }
+  | {
+      type: "sqlite"
+      progress:
+        | { type: "Stage"; stage: "copying_legacy_data" | "migrating_data" | "starting_server" }
+        | { type: "InProgress"; value: number }
+        | { type: "Done" }
+    }
   | { type: "ready" }
   | { type: "stopped" }
   | { type: "error"; error: { message: string; stack?: string } }
@@ -54,6 +64,10 @@ parentPort.on("message", (event) => {
 async function start(command: StartCommand) {
   try {
     prepareSidecarEnv(command.password, command.userDataPath)
+    if (shouldCopyLegacyDatabase()) {
+      parentPort.postMessage({ type: "sqlite", progress: { type: "Stage", stage: "copying_legacy_data" } })
+      copyLegacyDatabase()
+    }
     ensureLoopbackNoProxy()
     useSystemCertificates()
     useEnvProxy()
@@ -61,6 +75,7 @@ async function start(command: StartCommand) {
     await Log.init({ level: "WARN" })
 
     if (command.needsMigration) {
+      parentPort.postMessage({ type: "sqlite", progress: { type: "Stage", stage: "migrating_data" } })
       await JsonMigration.run(drizzle({ client: Database.Client().$client }), {
         progress: (event: { current: number; total: number }) => {
           parentPort.postMessage({
@@ -72,9 +87,9 @@ async function start(command: StartCommand) {
           })
         },
       })
-      parentPort.postMessage({ type: "sqlite", progress: { type: "Done" } })
     }
 
+    parentPort.postMessage({ type: "sqlite", progress: { type: "Stage", stage: "starting_server" } })
     listener = await Server.listen({
       port: command.port,
       hostname: command.hostname,
@@ -82,6 +97,7 @@ async function start(command: StartCommand) {
       password: command.password,
       cors: ["oc://renderer"],
     })
+    parentPort.postMessage({ type: "sqlite", progress: { type: "Done" } })
     parentPort.postMessage({ type: "ready" })
   } catch (error) {
     parentPort.postMessage({ type: "error", error: serializeError(error) })
@@ -105,6 +121,34 @@ function prepareSidecarEnv(password: string, userDataPath: string) {
     OPENCODE_SERVER_PASSWORD: password,
     XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
   })
+}
+
+function copyLegacyDatabase() {
+  if (!shouldCopyLegacyDatabase()) return
+
+  const { source, target } = legacyDatabasePaths()
+
+  mkdirSync(dirname(target), { recursive: true })
+  const database = new DatabaseSync(source, { readOnly: true })
+  try {
+    database.exec("PRAGMA busy_timeout = 5000")
+    database.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`)
+  } finally {
+    database.close()
+  }
+}
+
+function shouldCopyLegacyDatabase() {
+  if (process.env.OPENCODE_DB) return false
+  const { source, target } = legacyDatabasePaths()
+  return existsSync(source) && !existsSync(target) && source !== target
+}
+
+function legacyDatabasePaths() {
+  return {
+    source: join(process.env.TERRA_EDU_LEGACY_XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opencode", "opencode.db"),
+    target: join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opencode", "opencode.db"),
+  }
 }
 
 function ensureLoopbackNoProxy() {

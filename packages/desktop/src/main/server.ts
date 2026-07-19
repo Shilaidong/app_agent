@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, utilityProcess } from "electron"
@@ -22,6 +23,7 @@ export type SidecarListener = { stop: () => Promise<void> }
 
 const SIDECAR_SERVICE_NAME = "opencode server"
 const SIDECAR_START_STALL_TIMEOUT = 60_000
+const SIDECAR_MIGRATION_STALL_TIMEOUT = 10 * 60_000
 const SIDECAR_STOP_TIMEOUT = 6_000
 
 type SpawnLocalServerOptions = {
@@ -58,12 +60,27 @@ export function setWslConfig(config: WslConfig) {
 
 export function preferAppEnv(userDataPath: string) {
   const shell = process.platform === "win32" ? null : getUserShell()
-  Object.assign(process.env, {
-    ...(shell ? loadShellEnv(shell) : null),
+  const shellEnv = shell ? loadShellEnv(shell) : undefined
+  const common = {
+    ...shellEnv,
     OPENCODE_EXPERIMENTAL_ICON_DISCOVERY: "true",
     OPENCODE_EXPERIMENTAL_FILEWATCHER: "true",
     OPENCODE_CLIENT: "desktop",
-    XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
+  }
+
+  if (process.env.OPENCODE_DB === ":memory:") {
+    Object.assign(process.env, common)
+    return
+  }
+
+  const legacyDataHome = shellEnv?.XDG_DATA_HOME ?? process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share")
+  Object.assign(process.env, {
+    ...common,
+    TERRA_EDU_LEGACY_XDG_DATA_HOME: legacyDataHome,
+    XDG_DATA_HOME: join(userDataPath, "data"),
+    XDG_CONFIG_HOME: join(userDataPath, "config"),
+    XDG_CACHE_HOME: join(userDataPath, "cache"),
+    XDG_STATE_HOME: join(userDataPath, "state"),
   })
 }
 
@@ -111,16 +128,16 @@ export async function spawnLocalServer(
       reject(error)
     }
 
-    const refreshTimeout = () => {
+    const refreshTimeout = (timeoutMs = SIDECAR_START_STALL_TIMEOUT) => {
       clearTimeout(timeout)
       timeout = setTimeout(() => {
-        fail(new Error(`Sidecar did not become ready within ${SIDECAR_START_STALL_TIMEOUT}ms: ${sidecar}`))
-      }, SIDECAR_START_STALL_TIMEOUT)
+        fail(new Error(`Sidecar did not become ready within ${timeoutMs}ms: ${sidecar}`))
+      }, timeoutMs)
     }
 
     const onMessage = (message: SidecarMessage) => {
       if (message.type === "sqlite") {
-        refreshTimeout()
+        refreshTimeout(SIDECAR_MIGRATION_STALL_TIMEOUT)
         options.onSqliteProgress?.(message.progress)
         return
       }
@@ -234,6 +251,8 @@ function createSidecarEnv(): Record<string, string> {
   )
   const goAuth = openCodeGoAuthContent()
   if (goAuth && !env.OPENCODE_AUTH_CONTENT) env.OPENCODE_AUTH_CONTENT = goAuth
+  if (app.isPackaged) env.OPENCODE_RIPGREP_PATH = join(process.resourcesPath, "vendor", "ripgrep", "rg")
+  env.OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL = "1"
   delete env.DEBUG
   if (process.platform === "linux") delete env.LD_PRELOAD
   return env

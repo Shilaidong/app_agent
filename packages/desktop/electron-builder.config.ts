@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { existsSync, lstatSync, readdirSync, statSync } from "node:fs"
+import { existsSync, readdirSync, statSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
@@ -9,16 +9,6 @@ import type { Configuration } from "electron-builder"
 const execFileAsync = promisify(execFile)
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const signScript = path.join(rootDir, "script", "sign-windows.ps1")
-
-type PackContext = {
-  appOutDir: string
-  electronPlatformName?: string
-  packager: {
-    appInfo: {
-      productFilename: string
-    }
-  }
-}
 
 async function signWindows(configuration: { path: string }) {
   if (process.platform !== "win32") return
@@ -41,57 +31,64 @@ function walkFiles(base: string): string[] {
   })
 }
 
-function walkDirectories(base: string): string[] {
-  if (!existsSync(base)) return []
-  return readdirSync(base, { withFileTypes: true }).flatMap((entry) => {
-    const full = path.join(base, entry.name)
-    if (!entry.isDirectory()) return []
-    return [full, ...walkDirectories(full)]
-  })
-}
-
 function isExecutableCode(file: string) {
   const stat = statSync(file)
   const basename = path.basename(file)
   return (
     (stat.mode & 0o111) !== 0 ||
-    basename.endsWith(".dylib") ||
+    basename.includes(".dylib") ||
     basename.endsWith(".so") ||
     basename.endsWith(".node") ||
     basename === "ego Framework"
   )
 }
 
-async function adHocSign(target: string) {
-  await execFileAsync("codesign", ["--sign", "-", "--force", "--timestamp=none", target])
+async function adHocSign(target: string, options: string[] = []) {
+  await execFileAsync("codesign", ["--sign", "-", "--force", "--timestamp=none", ...options, target])
 }
 
-async function signBundledEgoLite(context: PackContext) {
+async function signBundledTerraTools(app: string) {
   if (process.platform !== "darwin") return
-  if (context.electronPlatformName && context.electronPlatformName !== "darwin") return
 
-  const app = path.join(
-    context.appOutDir,
-    `${context.packager.appInfo.productFilename}.app`,
-    "Contents/Resources/vendor/ego-lite/ego lite.app",
-  )
-  if (!existsSync(app)) return
-
-  const files = walkFiles(app)
+  const resources = path.join(app, "Contents/Resources/vendor")
+  const ripgrep = path.join(resources, "ripgrep/rg")
+  if (!existsSync(ripgrep)) throw new Error(`Missing bundled Terra-Edu tool: ${ripgrep}`)
+  if ((statSync(ripgrep).mode & 0o111) === 0) throw new Error(`Bundled Terra-Edu tool is not executable: ${ripgrep}`)
+  await adHocSign(ripgrep)
+  const paddleOcr = path.join(resources, "terra-paddleocr")
+  const files = walkFiles(paddleOcr)
     .filter(isExecutableCode)
     .sort((a, b) => b.length - a.length)
-  const bundles = walkDirectories(app)
-    .filter((directory) => directory.endsWith(".app") || directory.endsWith(".framework"))
-    .filter((directory) => !lstatSync(directory).isSymbolicLink())
-    .sort((a, b) => b.length - a.length)
+  if (files.length === 0) throw new Error(`Missing bundled Terra-Edu PaddleOCR tool: ${paddleOcr}`)
+  for (const file of files) await adHocSign(file)
+}
 
-  for (const file of files) {
-    await adHocSign(file)
-  }
-  for (const bundle of bundles) {
-    await adHocSign(bundle)
-  }
-  await adHocSign(app)
+async function signTerraRuntimeCode(app: string) {
+  const frameworks = path.join(app, "Contents/Frameworks")
+  if (!existsSync(frameworks)) throw new Error(`Missing Electron runtime frameworks: ${frameworks}`)
+
+  const targets = readdirSync(frameworks, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && (entry.name.endsWith(".app") || entry.name.endsWith(".framework") || entry.name.endsWith(".xpc")))
+    .map((entry) => path.join(frameworks, entry.name))
+    .sort()
+
+  for (const target of targets) await adHocSign(target)
+}
+
+async function signMacApplication(configuration: { app: string }) {
+  if (process.platform !== "darwin") return
+
+  await signBundledTerraTools(configuration.app)
+  await signTerraRuntimeCode(configuration.app)
+  // The bundled Ego Lite runtime keeps Citro's notarized signature so macOS
+  // recognises its existing encrypted browser storage. Deep-signing would
+  // replace that identity and trigger a Keychain access prompt.
+  await adHocSign(configuration.app, [
+    "--options",
+    "runtime",
+    "--entitlements",
+    path.join(rootDir, "packages/desktop/resources/entitlements.plist"),
+  ])
 }
 
 const channel = (() => {
@@ -99,6 +96,8 @@ const channel = (() => {
   if (raw === "dev" || raw === "beta" || raw === "prod") return raw
   return "dev"
 })()
+
+const macTarget = process.env.TERRA_EDU_MAC_TARGET === "zip" ? ["zip"] : ["dmg", "zip"]
 
 const getBase = (): Configuration => ({
   artifactName: "terra-edu-application-agent-${os}-${arch}.${ext}",
@@ -112,6 +111,16 @@ const getBase = (): Configuration => ({
       from: "resources/private/",
       to: "private/",
       filter: ["opencode-go-key.txt", "supabase-public.json"],
+    },
+    {
+      from: "resources/vendor/ripgrep/",
+      to: "vendor/ripgrep/",
+      filter: ["rg"],
+    },
+    {
+      from: "resources/vendor/terra-paddleocr/",
+      to: "vendor/terra-paddleocr/",
+      filter: ["**/*"],
     },
     {
       from: "native/",
@@ -134,12 +143,12 @@ const getBase = (): Configuration => ({
     entitlements: "resources/entitlements.plist",
     entitlementsInherit: "resources/entitlements.plist",
     notarize: false,
-    target: ["dmg", "zip"],
+    sign: signMacApplication,
+    target: macTarget,
   },
   dmg: {
     sign: true,
   },
-  afterPack: signBundledEgoLite,
   protocols: {
     name: "Terra-Edu Application Agent",
     schemes: ["terra-application-agent"],

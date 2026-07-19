@@ -218,6 +218,33 @@ describe("tool.read external_directory permission", () => {
     }),
   )
 
+  it.live("uses directory-relative path for read permission in non-git projects", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const allowed = path.join(dir, "03_state", "task_state.json")
+      const denied = path.join(dir, "03_state", "filling_attempts.json")
+      yield* put(allowed, "{}")
+      yield* put(denied, "[]")
+
+      const { items, next } = asks()
+      yield* exec(dir, { filePath: allowed }, next)
+      yield* exec(dir, { filePath: denied }, next)
+      const reads = items.filter((item) => item.permission === "read")
+      expect(reads.map((item) => item.patterns)).toEqual([
+        [path.join("03_state", "task_state.json")],
+        [path.join("03_state", "filling_attempts.json")],
+      ])
+      const rules = Permission.fromConfig({
+        read: {
+          "*": "deny",
+          "03_state/task_state.json": "allow",
+        },
+      })
+      expect(Permission.evaluate("read", reads[0].patterns[0], rules).action).toBe("allow")
+      expect(Permission.evaluate("read", reads[1].patterns[0], rules).action).toBe("deny")
+    }),
+  )
+
   it.live("asks for directory-scoped external_directory permission when reading external directory", () =>
     Effect.gen(function* () {
       const outer = yield* tmpdirScoped()
