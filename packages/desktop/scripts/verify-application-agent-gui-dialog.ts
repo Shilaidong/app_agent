@@ -587,16 +587,17 @@ cliLog('TERRA_EGO_VISUAL_SCREENSHOT_WRITTEN')
   }
   console.log("TERRA_EGO_VISUAL_SCREENSHOT_VERIFIED")
 
+  // Post-navigation dialog cases must not reuse a document that went through temporary
+  // alert capture. Even after restore, a non-modal wrapper can swallow later alerts.
+  // Reload with the fixture's skip flag so onclick uses a true native dialog.
+  const cleanDialogUrl = `${sourceUrl}${sourceUrl.includes("?") ? "&" : "?"}skip-navigation-alert=1`
   runWrapperRound(
     "top-level alert",
     `${observePageAction}
 await useOrCreateTaskSpace(${taskId})
+await gotoAndWait(${JSON.stringify(cleanDialogUrl)}, { timeout: 30, settle: 1 })
 const before = await pageInfo()
-if (!before || before.dialog || before.url !== ${JSON.stringify(sourceUrl)}) throw new Error('top-level alert round did not begin with a clear page')
-// Initial navigation alert capture temporarily wraps window.alert. If restore was
-// incomplete, later clicks are swallowed without a native dialog. Force native alert
-// before the post-navigation alert cases.
-await js("(() => { for (const key of Object.getOwnPropertyNames(globalThis)) { if (!key.startsWith('__terraInitialAlertState_')) continue; try { globalThis[key]?.restore?.() } catch {} } const frame = document.createElement('iframe'); frame.style.display = 'none'; document.documentElement.appendChild(frame); globalThis.alert = frame.contentWindow.alert.bind(frame.contentWindow); frame.remove(); return typeof globalThis.alert })()")
+if (!before || before.dialog || !String(before.url || '').includes('skip-navigation-alert')) throw new Error('top-level alert round did not begin on the clean fixture page: ' + JSON.stringify(before))
 let result = await observePageAction(
   () => js("document.querySelector('#alert-trigger').click()"),
   { actionTimeoutMs: 12000, settleMs: 2500, pageInfoTimeoutMs: 2000 },
