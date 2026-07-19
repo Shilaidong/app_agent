@@ -595,11 +595,14 @@ cliLog('TERRA_EGO_VISUAL_SCREENSHOT_WRITTEN')
     "top-level alert",
     `${observePageAction}
 await useOrCreateTaskSpace(${taskId})
+// Fresh document without temporary alert capture. Do not open the alert via Runtime.evaluate
+// js()/element.click(): Chromium often suppresses JS dialogs from evaluated scripts, so the
+// click must be a real page interaction helper for pageInfo to report dialog.
 await gotoAndWait(${JSON.stringify(cleanDialogUrl)}, { timeout: 30, settle: 1 })
 const before = await pageInfo()
 if (!before || before.dialog || !String(before.url || '').includes('skip-navigation-alert')) throw new Error('top-level alert round did not begin on the clean fixture page: ' + JSON.stringify(before))
 let result = await observePageAction(
-  () => js("document.querySelector('#alert-trigger').click()"),
+  () => click('#alert-trigger', { label: 'open alert fixture' }),
   { actionTimeoutMs: 12000, settleMs: 2500, pageInfoTimeoutMs: 2000 },
 )
 if (result.kind !== 'dialog') {
