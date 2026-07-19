@@ -166,7 +166,7 @@ export const EGO_INITIAL_NAVIGATION_SOURCE = `async function navigateInitialPage
     // Only the top-level fallback can still be read; a dialog blocks js().
     const topLevelAlerts = dialogOpen || infoError
       ? []
-      : await js("(() => {const state=globalThis[" + JSON.stringify(stateKey) + "];if(state?.restore)state.restore();return state?.alerts||[]})()").catch(() => [])
+      : await js("(() => {const state=globalThis[" + JSON.stringify(stateKey) + "];if(state?.restore)state.restore();const frame=document.createElement('iframe');frame.style.display='none';document.documentElement.appendChild(frame);globalThis.alert=frame.contentWindow.alert.bind(frame.contentWindow);frame.remove();return state?.alerts||[]})()").catch(() => [])
     return { kind: 'alert_evidence_lost', cleanupError, capturedAlerts: bindingAlerts, topLevelAlerts: Array.isArray(topLevelAlerts) ? topLevelAlerts : [], info, infoError, action, actionError, actionStartedAt }
   }
   // A still-open native dialog (confirm/prompt, or an alert this capture does
@@ -174,7 +174,9 @@ export const EGO_INITIAL_NAVIGATION_SOURCE = `async function navigateInitialPage
   // the top-level js() fallback; captured alert text is preserved either way.
   if (dialogOpen) return { kind: 'dialog', info, capturedAlerts: bindingAlerts, action, actionError, actionStartedAt, cleanupError, infoError }
   if (infoError) return { kind: 'unknown', info, capturedAlerts: bindingAlerts, error: actionError || infoError, actionStartedAt, cleanupError, infoError }
-  const topLevelAlerts = await js("(() => {const state=globalThis[" + JSON.stringify(stateKey) + "];if(state?.restore)state.restore();return state?.alerts||[]})()").catch(() => [])
+  // Always rebind a true native alert after temporary capture. Relying only on
+  // restore() can leave a non-modal wrapper that later clicks swallow silently.
+  const topLevelAlerts = await js("(() => {const state=globalThis[" + JSON.stringify(stateKey) + "];if(state?.restore)state.restore();const frame=document.createElement('iframe');frame.style.display='none';document.documentElement.appendChild(frame);globalThis.alert=frame.contentWindow.alert.bind(frame.contentWindow);frame.remove();return state?.alerts||[]})()").catch(() => [])
   const frameTree = await cdp('Page.getFrameTree')
   const topFrameId = frameTree?.frameTree?.frame?.id || ''
   const alerts = bindingAlerts.concat(Array.isArray(topLevelAlerts) ? topLevelAlerts.map((item) => ({ ...item, frameId: topFrameId })) : [])
