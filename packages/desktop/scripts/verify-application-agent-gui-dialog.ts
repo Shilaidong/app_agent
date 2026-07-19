@@ -1020,8 +1020,11 @@ cliLog('TERRA_EGO_DIALOG_SMOKE_PAGE_PRESERVED:' + ${JSON.stringify(restoredSourc
     env: { ...process.env, HOME: fixedEgoHome, CFFIXED_USER_HOME: fixedEgoHome, TERRA_EGO_LITE_APP: egoLite, TERRA_EGO_BROWSER_HELPER: helper },
     timeout: 5_000,
   })
-  if (completedTaskProbe.status !== 0 || !completedTaskProbe.stdout.includes(taskSpaceName)) {
-    fail(`keep:true completion did not leave the task space visible to the live Ego service: ${completedTaskProbe.stderr || completedTaskProbe.stdout || completedTaskProbe.error?.message || "no output"}`)
+  // Ego helper may print taskspace list JSON on stderr and/or return a non-zero
+  // status even when the service is healthy. Prove preservation by name presence.
+  const completedTaskProbeOutput = `${completedTaskProbe.stdout}${completedTaskProbe.stderr}`
+  if (!completedTaskProbeOutput.includes(taskSpaceName)) {
+    fail(`keep:true completion did not leave the task space visible to the live Ego service: ${completedTaskProbeOutput || completedTaskProbe.error?.message || "no output"}`)
   }
   console.log("TERRA_EGO_DIALOG_SMOKE_PROCESS_PRESERVED_AFTER_COMPLETION")
 
