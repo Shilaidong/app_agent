@@ -35,3 +35,4 @@ resources/*.metainfo.xml
 # Direct-distribution customer builds intentionally commit and bundle
 # resources/private/ so the desktop app opens with Supabase login and
 # the default OpenCode Go model route already configured.
+native/__pycache__/

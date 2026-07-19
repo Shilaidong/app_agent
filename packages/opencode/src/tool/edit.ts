@@ -95,9 +95,12 @@ export const EditTool = Tool.define(
                 contentOld = source.text
                 contentNew = next.text
                 diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
+                // Non-git projects use the global project with `/` as worktree. Permission
+                // rules from their local config are still scoped to the active directory.
+                const permissionRoot = instance.worktree === "/" ? instance.directory : instance.worktree
                 yield* ctx.ask({
                   permission: "edit",
-                  patterns: [path.relative(instance.worktree, filePath)],
+                  patterns: [path.relative(permissionRoot, filePath)],
                   always: ["*"],
                   metadata: {
                     filepath: filePath,
@@ -138,9 +141,12 @@ export const EditTool = Tool.define(
                   normalizeLineEndings(contentNew),
                 ),
               )
+              // Non-git projects use the global project with `/` as worktree. Permission
+              // rules from their local config are still scoped to the active directory.
+              const permissionRoot = instance.worktree === "/" ? instance.directory : instance.worktree
               yield* ctx.ask({
                 permission: "edit",
-                patterns: [path.relative(instance.worktree, filePath)],
+                patterns: [path.relative(permissionRoot, filePath)],
                 always: ["*"],
                 metadata: {
                   filepath: filePath,

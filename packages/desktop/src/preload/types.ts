@@ -122,6 +122,16 @@ export type BrowserSafetyStopSummary = {
   resumeAuthorizedAt?: string
 }
 
+export type ApplicationOcrProgress = {
+  phase: "running" | "done"
+  current: number
+  total: number
+  startedAt: string
+  avgSeconds: number
+  etaAt: string
+  finishedAt?: string
+}
+
 export type ApplicationTask = {
   id: string
   slug: string
@@ -150,6 +160,11 @@ export type ApplicationTask = {
   reusedExisting?: boolean
   sharedDossierStatus?: "preparing" | "prepared" | "ready"
   browserSafetyStop?: BrowserSafetyStopSummary
+  ocr?: ApplicationOcrProgress
+  materialReviewTampered?: boolean
+  materialReviewTamperMessage?: string
+  browserHandoffPending?: boolean
+  browserHandoffType?: string
 }
 
 export type ApplicationMaterialReviewInput = {
@@ -310,6 +325,11 @@ export type ElectronAPI = {
     input: { decisionId: string; taskSpaceId: string },
   ) => Promise<ApplicationTask>
   submitApplicationMaterialReview: (workspacePath: string, input: ApplicationMaterialReviewInput) => Promise<ApplicationTask>
+  repairApplicationSharedDossier: (workspacePath: string) => Promise<{
+    status: "prepared" | "ready"
+    sharedWorkspacePath: string
+    version: number
+  }>
   blockHighRiskAction: (workspacePath: string, action: string) => Promise<ApplicationTask>
   getApplicationPlatformAccount: (applicationUrl: string) => Promise<ApplicationPlatformAccount | null>
   saveApplicationPlatformAccount: (input: {

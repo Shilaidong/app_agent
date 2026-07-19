@@ -160,10 +160,20 @@ assert(source.includes("bash: {"), "Application Agent must explicitly allow Open
 assert(source.includes('"*": "deny"'), "Application Agent bash must default-deny")
 assert(source.includes('"PATH=\\"$PWD/.opencode/bin:$PATH\\" ego-browser nodejs*": "allow"'), "Application Agent bash must allow the workspace-prefixed Ego wrapper")
 assert(!source.includes('"ego-browser nodejs*": "allow"') && !source.includes('"*>*": "deny"'), "Application Agent must not allow unprefixed Ego or rely on broad output-redirection denies")
-for (const protectedPath of [".opencode/**", "03_state/application_progress.json", "03_state/task_state.json", "03_state/task_control.json", "03_state/agent_execution_audit.json", "03_state/material_review.json", "03_state/task_input.json"]) {
-  assert(opencodeSource.includes(`"${protectedPath}": "deny"`) && opencodeSource.includes(`"${protectedPath}": deny`), `Ordinary Agent edit permission must protect authoritative state: ${protectedPath}`)
+assert(opencodeSource.includes("function authoritativeEditDenyPatterns"), "Authoritative edit denials must expand relative/glob/absolute forms")
+for (const protectedPath of [".opencode/**", "03_state/application_progress.json", "03_state/task_state.json", "03_state/task_control.json", "03_state/agent_execution_audit.json", "03_state/material_review.json", "03_state/task_input.json", "03_state/.desktop_material_review_trust.json"]) {
+  assert(
+    opencodeSource.includes(`"${protectedPath}"`) || opencodeSource.includes(`'${protectedPath}'`),
+    `Ordinary Agent edit permission must protect authoritative state: ${protectedPath}`,
+  )
 }
 assert(opencodeSource.includes("OpenCode routes write/edit/patch through permission.edit"), "Protected write/edit/patch state must be enforced through OpenCode permission.edit")
+assert(opencodeSource.includes("MATERIAL_REVIEW_UNTRUSTED"), "prepare_ego_task must reject forged material reviews without desktop trust")
+assert(opencodeSource.includes("documentsGenerated") && opencodeSource.includes("publishWarning"), "Document generation must report publish failures without swallowing generated files")
+assert(opencodeSource.includes("task.ocr") && opencodeSource.includes("avgSeconds"), "OCR loop must write structured progress for the desktop UI")
+assert(opencodeSource.includes("--jsonl") && opencodeSource.includes("spawn(ocr"), "Materials OCR must prefer multi-file --jsonl batch mode with single-file fallback")
+assert(opencodeSource.includes("fillDatePickerByClicks") && opencodeSource.includes("EGO_FILL_DATE_PICKER_SOURCE"), "Managed browser policy must ship fillDatePickerByClicks")
+assert(readFileSync(join(root, "native/terra-paddleocr.py"), "utf8").includes("--jsonl"), "Bundled PaddleOCR source must accept multi-file --jsonl mode")
 assert(desktopServerSource.includes("OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL"), "Desktop sidecar must disable OpenCode project dependency auto-install")
 assert(desktopServerSource.includes("TERRA_EDU_LEGACY_XDG_DATA_HOME"), "Desktop must preserve the legacy OpenCode data location before isolation")
 assert(desktopServerSource.includes("XDG_DATA_HOME: join(userDataPath, \"data\")"), "Desktop must isolate OpenCode data by application")

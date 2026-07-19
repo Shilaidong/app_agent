@@ -190,10 +190,13 @@ export const ApplyPatchTool = Tool.define(
         }
       }
 
+      // Non-git projects use the global project with `/` as worktree. Permission
+      // rules from their local config are still scoped to the active directory.
+      const permissionRoot = instance.worktree === "/" ? instance.directory : instance.worktree
       // Build per-file metadata for UI rendering (used for both permission and result)
       const files = fileChanges.map((change) => ({
         filePath: change.filePath,
-        relativePath: path.relative(instance.worktree, change.movePath ?? change.filePath).replaceAll("\\", "/"),
+        relativePath: path.relative(permissionRoot, change.movePath ?? change.filePath).replaceAll("\\", "/"),
         type: change.type,
         patch: change.diff,
         additions: change.additions,
@@ -202,7 +205,7 @@ export const ApplyPatchTool = Tool.define(
       }))
 
       // Check permissions if needed
-      const relativePaths = fileChanges.map((c) => path.relative(instance.worktree, c.filePath).replaceAll("\\", "/"))
+      const relativePaths = fileChanges.map((c) => path.relative(permissionRoot, c.filePath).replaceAll("\\", "/"))
       yield* ctx.ask({
         permission: "edit",
         patterns: relativePaths,

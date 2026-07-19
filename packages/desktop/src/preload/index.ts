@@ -90,6 +90,8 @@ const api: ElectronAPI = {
     ipcRenderer.invoke("application-agent:authorize-browser-safety-continue", workspacePath, input),
   submitApplicationMaterialReview: (workspacePath, input) =>
     ipcRenderer.invoke("application-agent:submit-material-review", workspacePath, input),
+  repairApplicationSharedDossier: (workspacePath) =>
+    ipcRenderer.invoke("application-agent:repair-shared-dossier", workspacePath),
   blockHighRiskAction: (workspacePath, action) =>
     ipcRenderer.invoke("application-agent:block-high-risk-action", workspacePath, action),
   getApplicationPlatformAccount: (applicationUrl) => ipcRenderer.invoke("application-agent:get-platform-account", applicationUrl),

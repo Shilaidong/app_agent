@@ -23,6 +23,12 @@ import {
   browserSafetyStopSummary,
   type BrowserSafetyStopSummary,
 } from "./application-agent-browser-safety"
+import {
+  buildMaterialReviewTrust,
+  materialReviewTamperDetected,
+  materialReviewTrustPath,
+  type MaterialReviewTrust,
+} from "./application-agent-material-review-gate"
 
 export { buildApplicationAgentRefillPrompt, buildApplicationAgentStartPrompt } from "./application-agent-opencode"
 export { applicationRefillSessionTitle } from "./application-agent-refill"
@@ -52,6 +58,16 @@ export type ApplicationTaskInput = {
   taskGoal?: string
 }
 
+export type ApplicationOcrProgress = {
+  phase: "running" | "done"
+  current: number
+  total: number
+  startedAt: string
+  avgSeconds: number
+  etaAt: string
+  finishedAt?: string
+}
+
 export type ApplicationTask = {
   id: string
   slug: string
@@ -72,6 +88,11 @@ export type ApplicationTask = {
   reusedExisting?: boolean
   sharedDossierStatus?: "preparing" | "prepared" | "ready"
   browserSafetyStop?: BrowserSafetyStopSummary
+  ocr?: ApplicationOcrProgress
+  materialReviewTampered?: boolean
+  materialReviewTamperMessage?: string
+  browserHandoffPending?: boolean
+  browserHandoffType?: string
 }
 
 export type ApplicationMaterialReviewInput = {
@@ -482,16 +503,21 @@ export async function prepareApplicationAgentConfig(directory: string) {
 }
 
 export async function getApplicationTask(workspacePath: string): Promise<ApplicationTask> {
-  const [task, savedInput, missing, progress, control] = await Promise.all([
+  const [task, savedInput, missing, progress, control, materialReview, materialReviewTrust] = await Promise.all([
     readJson<Record<string, unknown>>(join(workspacePath, "03_state/task_state.json"), {}),
     readJson<ApplicationTaskInput | null>(join(workspacePath, "03_state/task_input.json"), null),
     readJson<unknown>(join(workspacePath, "03_state/missing_items.json"), null),
     readJson<unknown>(join(workspacePath, "03_state/application_progress.json"), null),
     readJson<{ paused?: boolean; updatedAt?: string }>(join(workspacePath, "03_state/task_control.json"), {}),
+    readJson<Record<string, unknown>>(join(workspacePath, "03_state/material_review.json"), {}),
+    readJson<MaterialReviewTrust | null>(materialReviewTrustPath(workspacePath), null),
   ])
   const canonicalInput = savedInput ? await canonicalTaskInput(workspacePath, savedInput) : undefined
   const totalFiles = (await scanTaskMaterials(workspacePath, canonicalInput)).length
   const normalized = normalizeTask(task, workspacePath, canonicalInput, summarizeMissingRaw(missing, totalFiles, progress))
+  if (task && typeof task === "object" && task.ocr && typeof task.ocr === "object") {
+    normalized.ocr = task.ocr as ApplicationOcrProgress
+  }
   if (canonicalInput?.sharedWorkspacePath) {
     const sharedState = await readJson<{ status?: string }>(
       join(canonicalInput.sharedWorkspacePath, "03_state", "shared_dossier_state.json"),
@@ -503,16 +529,41 @@ export async function getApplicationTask(workspacePath: string): Promise<Applica
   }
   const safety = browserSafetyStopSummary(progress)
   if (safety) normalized.browserSafetyStop = safety
-  if (!control.paused || normalized.status === "已暂停") return normalized
-  const updatedAt = stringValue(control.updatedAt) ?? normalized.updatedAt
-  return {
-    ...normalized,
-    updatedAt,
-    status: "已暂停",
-    progress: normalized.progress.at(-1)?.status === "已暂停"
-      ? normalized.progress
-      : [...normalized.progress, { at: updatedAt, status: "已暂停", message: STATUS_MESSAGES.已暂停 }],
+  if (progress && typeof progress === "object") {
+    const ego = (progress as { egoBrowser?: { handoffPending?: boolean; handoffAt?: string; handoffType?: string } }).egoBrowser
+    if (ego) {
+      const pending = ego.handoffPending === true || (Boolean(ego.handoffAt) && ego.handoffPending === undefined)
+      if (pending) {
+        normalized.browserHandoffPending = true
+        normalized.browserHandoffType = ego.handoffType || "browser_takeover"
+      }
+    }
   }
+  if (materialReviewTamperDetected(materialReview, materialReviewTrust)) {
+    normalized.materialReviewTampered = true
+    normalized.materialReviewTamperMessage =
+      "检测到材料审核记录可能被非桌面路径改写（缺少桌面授权校验）。任务已自动暂停；请顾问在材料确认面板重新确认，不要继续填表。"
+    if (!control.paused) {
+      await setTaskPaused(workspacePath, true, normalized.status === "已暂停" ? "可继续申请" : normalized.status)
+      await appendLog(workspacePath, "agent", normalized.materialReviewTamperMessage)
+    }
+  }
+  if (normalized.materialReviewTampered || control.paused) {
+    const updatedAt = stringValue(control.updatedAt) ?? normalized.updatedAt
+    return {
+      ...normalized,
+      updatedAt,
+      status: "已暂停",
+      progress: normalized.progress.at(-1)?.status === "已暂停"
+        ? normalized.progress
+        : [...normalized.progress, {
+          at: updatedAt,
+          status: "已暂停",
+          message: normalized.materialReviewTamperMessage || STATUS_MESSAGES.已暂停,
+        }],
+    }
+  }
+  return normalized
 }
 
 export async function continueApplicationTask(workspacePath: string): Promise<ApplicationTask> {
@@ -602,8 +653,9 @@ export async function submitApplicationMaterialReview(workspacePath: string, inp
     await cp(sharedProfilePath, sharedProfileCandidatePath, { force: true })
   }
   await updateSharedDossierAfterMaterialReview(task, input.mode, scope, submittedAt)
+  const reviewId = randomUUID()
   await writeJson(join(workspacePath, "03_state/material_review.json"), {
-    reviewId: randomUUID(),
+    reviewId,
     status: "approved",
     mode: input.mode,
     scope,
@@ -616,6 +668,10 @@ export async function submitApplicationMaterialReview(workspacePath: string, inp
     submittedAt,
     preparationCompleteAt: input.mode === "skip" ? submittedAt : undefined,
   })
+  await writeJson(
+    materialReviewTrustPath(workspacePath),
+    buildMaterialReviewTrust({ workspacePath, reviewId, submittedAt }),
+  )
   task.status = "可继续申请"
   task.updatedAt = new Date().toISOString()
   task.generatedFiles = generatedFiles(workspacePath)
@@ -665,6 +721,76 @@ async function updateSharedDossierAfterMaterialReview(
     updatedAt: submittedAt,
     note: "顾问已补充材料或文字；资料库负责人完成更新并重新生成文档后才会发布新版本。",
   })
+}
+
+/** Rebuild shared_dossier_state hashes/status for a batch that was corrupted or half-published. */
+export async function repairApplicationSharedDossier(workspacePath: string): Promise<{
+  status: "prepared" | "ready"
+  sharedWorkspacePath: string
+  version: number
+}> {
+  const task = await getApplicationTask(workspacePath)
+  const sharedWorkspacePath = task.input.sharedWorkspacePath
+  if (!sharedWorkspacePath) throw new Error("当前任务不是选校批次共享资料库任务，无法修复共享档案。")
+  const generated = join(sharedWorkspacePath, "02_generated")
+  const statePath = join(sharedWorkspacePath, "03_state", "shared_dossier_state.json")
+  const profile = join(generated, "student_profile.md")
+  const materialsIndex = join(sharedWorkspacePath, "03_state", "materials_index.json")
+  const ocrIndex = join(sharedWorkspacePath, "03_state", "ocr_index.json")
+  const materials = join(sharedWorkspacePath, "00_original_backup")
+  const classified = join(sharedWorkspacePath, "01_classified_materials")
+  const extractedText = join(sharedWorkspacePath, "03_state", "extracted_text")
+  const schoolProfile = join(workspacePath, "02_generated", "student_profile.md")
+  const schoolMaterialsIndex = join(workspacePath, "03_state", "materials_index.json")
+  if (!existsSync(profile) && existsSync(schoolProfile)) {
+    await mkdir(generated, { recursive: true })
+    await cp(schoolProfile, profile, { force: true })
+  }
+  if (!existsSync(materialsIndex) && existsSync(schoolMaterialsIndex)) {
+    await mkdir(join(sharedWorkspacePath, "03_state"), { recursive: true })
+    await cp(schoolMaterialsIndex, materialsIndex, { force: true })
+  }
+  if (!existsSync(profile) || !existsSync(materialsIndex)) {
+    throw new Error("共享档案仍缺少 student_profile.md 或 materials_index.json，无法修复。")
+  }
+  const review = await readJson<{ status?: string; mode?: string }>(join(workspacePath, "03_state/material_review.json"), {})
+  const trust = await readJson<MaterialReviewTrust | null>(materialReviewTrustPath(workspacePath), null)
+  const ready = review.status === "approved" && Boolean(trust?.reviewId) && (review.mode === "skip" || Boolean(review))
+  const previous = await readJson<Record<string, unknown>>(statePath, {})
+  const now = new Date().toISOString()
+  const hashTree = async (root: string) => {
+    const files = existsSync(root) ? await scanFiles(root) : []
+    const records = await Promise.all(
+      files.sort().map(async (file) => relative(root, file).replaceAll("\\", "/") + "\0" + await fileSha256(file)),
+    )
+    return createHash("sha256").update(records.join("\n")).digest("hex")
+  }
+  const hashes = {
+    studentProfileSha256: await fileSha256(profile),
+    materialsIndexSha256: await fileSha256(materialsIndex),
+    ocrIndexSha256: existsSync(ocrIndex) ? await fileSha256(ocrIndex) : "",
+    rawMaterialsSha256: await hashTree(materials),
+    classifiedMaterialsSha256: await hashTree(classified),
+    extractedTextSha256: await hashTree(extractedText),
+  }
+  const status = ready ? "ready" as const : "prepared" as const
+  const version = Math.max(1, Number(previous.version || 0) + 1)
+  await writeJson(statePath, {
+    ...previous,
+    status,
+    version,
+    ownerTaskId: previous.ownerTaskId || task.id,
+    profilePath: profile,
+    materialsIndexPath: materialsIndex,
+    ocrIndexPath: ocrIndex,
+    hashes,
+    preparedAt: previous.preparedAt || now,
+    publishedAt: status === "ready" ? now : "",
+    updatedAt: now,
+    repairedAt: now,
+  })
+  await appendLog(workspacePath, "agent", "已修复学生共享档案状态为 " + status + "（version " + version + "）。")
+  return { status, sharedWorkspacePath, version }
 }
 
 export async function pauseApplicationTask(workspacePath: string): Promise<ApplicationTask> {
@@ -1560,7 +1686,7 @@ async function writeGeneratedDocuments(
   await writeFile(join(workspacePath, "02_generated/info_collection_form.md"), renderInfoCollection(input, activeMissingItems), "utf8")
   await writeFile(join(workspacePath, "02_generated/material_collection_form.md"), renderMaterialCollection(input, activeMissingItems), "utf8")
   await writeFile(join(workspacePath, "02_generated/task_summary.md"), renderTaskSummary(input, materials, activeMissingItems), "utf8")
-  await writeFile(join(workspacePath, "02_generated/missing_materials.docx"), makeDocx(renderWordText(input, activeMissingItems)))
+  await writeFile(join(workspacePath, "02_generated/missing_materials.docx"), makeDocx(renderWordChecklistData(input, activeMissingItems)))
 }
 
 function renderStudentProfile(input: ApplicationTaskInput, materials: MaterialRecord[]) {
@@ -1688,30 +1814,22 @@ ${records.map((item) => `- ${item.fileName} → ${item.classifiedPath}（${item.
 `
 }
 
-function renderWordText(input: ApplicationTaskInput, missingItems: MissingItem[]) {
+function renderWordChecklistData(input: ApplicationTaskInput, missingItems: MissingItem[]) {
   const includedItems = missingItems.filter((item) => item.addedToWordList !== false)
-  const lines = [
-    `${input.studentName} 补充材料清单`,
-    "",
-    `申请学校：${input.school}`,
-    `申请项目：${input.program}`,
-    "",
-    "请按以下要求补充材料或信息。补齐后请发给顾问，或放入指定补充材料文件夹。",
-    "",
-  ]
-  if (includedItems.length === 0) {
-    lines.push("当前没有需要补充的材料或信息。")
-  } else {
-    includedItems.forEach((item, index) => {
-      lines.push(`${index + 1}. ${item.name}`)
-      lines.push(`需要原因：${item.whyNeeded}`)
-      lines.push(`准备方式：${item.prepareFrom}`)
-      lines.push(`格式要求：${item.formatRequirement}`)
-      lines.push("")
-    })
+  return {
+    title: `${input.studentName} 补充材料清单`,
+    school: input.school,
+    program: input.program,
+    intro: "请按以下要求补充材料或信息。补齐后请发给顾问，或放入指定补充材料文件夹。",
+    rows: includedItems.map((item, index) => ({
+      index: String(index + 1),
+      name: item.name,
+      whyNeeded: item.whyNeeded,
+      prepareFrom: item.prepareFrom,
+      formatRequirement: item.formatRequirement,
+    })),
+    footer: "说明：最终提交申请、付款和推荐信邀请需由顾问人工确认完成。",
   }
-  lines.push("说明：最终提交申请、付款和推荐信邀请需由顾问人工确认完成。")
-  return lines.join("\n")
 }
 
 function initialApplicationProgress(): ApplicationProgress {
@@ -1860,15 +1978,57 @@ function escapeXml(value: string) {
     .replace(/'/g, "&apos;")
 }
 
-function makeDocx(text: string): Buffer {
+function paragraphXml(text: string, bold = false) {
+  const run = bold
+    ? `<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`
+    : `<w:r><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`
+  return `<w:p>${run}</w:p>`
+}
+
+function cellXml(text: string, width: number, header = false) {
+  return `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/>${header ? `<w:shd w:val="clear" w:color="auto" w:fill="E8F0E9"/>` : ""}</w:tcPr>${paragraphXml(text, header)}</w:tc>`
+}
+
+function makeDocx(checklist: {
+  title: string
+  school: string
+  program: string
+  intro: string
+  rows: Array<{ index: string; name: string; whyNeeded: string; prepareFrom: string; formatRequirement: string }>
+  footer: string
+}): Buffer {
+  const widths = [700, 2200, 2800, 2800, 2200]
+  const headers = ["序号", "缺失项", "为什么需要", "如何准备", "文件格式"]
+  let table = `<w:tbl><w:tblPr><w:tblW w:w="10700" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="B7C8B8"/><w:left w:val="single" w:sz="4" w:color="B7C8B8"/><w:bottom w:val="single" w:sz="4" w:color="B7C8B8"/><w:right w:val="single" w:sz="4" w:color="B7C8B8"/><w:insideH w:val="single" w:sz="4" w:color="B7C8B8"/><w:insideV w:val="single" w:sz="4" w:color="B7C8B8"/></w:tblBorders></w:tblPr><w:tr>${headers.map((header, index) => cellXml(header, widths[index], true)).join("")}</w:tr>`
+  if (checklist.rows.length === 0) {
+    table += `<w:tr>${cellXml("—", widths[0])}${cellXml("当前没有需要补充的材料或信息。", widths[1] + widths[2] + widths[3] + widths[4])}</w:tr>`
+  } else {
+    for (const row of checklist.rows) {
+      table += `<w:tr>${[
+        cellXml(row.index, widths[0]),
+        cellXml(row.name, widths[1]),
+        cellXml(row.whyNeeded, widths[2]),
+        cellXml(row.prepareFrom, widths[3]),
+        cellXml(row.formatRequirement, widths[4]),
+      ].join("")}</w:tr>`
+    }
+  }
+  table += "</w:tbl>"
+  const body = [
+    paragraphXml(checklist.title, true),
+    paragraphXml(`申请学校：${checklist.school}`),
+    paragraphXml(`申请项目：${checklist.program}`),
+    paragraphXml(checklist.intro),
+    paragraphXml(""),
+    table,
+    paragraphXml(""),
+    paragraphXml(checklist.footer),
+  ].join("")
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
-    ${text
-      .split("\n")
-      .map((line) => `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>`)
-      .join("\n")}
-    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+    ${body}
+    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080"/></w:sectPr>
   </w:body>
 </w:document>`
   return zipStore({

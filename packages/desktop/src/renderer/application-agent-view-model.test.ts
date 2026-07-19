@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { ApplicationTask } from "../preload/types"
-import { groupedTasks, taskGroupKey } from "./application-agent-view-model"
+import { deriveComposerRuntimeState, groupedTasks, taskGroupKey } from "./application-agent-view-model"
 
 describe("application task grouping", () => {
   test("groups schools by student workspace and keeps batch order", () => {
@@ -28,6 +28,44 @@ describe("application task grouping", () => {
 
     expect(taskGroupKey(first)).toBe("legacy:张三")
     expect(groupedTasks([first, second])).toHaveLength(1)
+  })
+})
+
+describe("composer runtime chip", () => {
+  test("prioritizes safety stop over working status", () => {
+    const current = task("张三", "HKU")
+    current.status = "正在填写申请平台"
+    current.browserSafetyStop = {
+      kind: "cleanup_failed",
+      taskSpaceId: "1",
+      active: true,
+      decisionId: "d1",
+      recordedAt: new Date().toISOString(),
+    }
+    expect(deriveComposerRuntimeState({ task: current }).kind).toBe("safety_stop")
+  })
+
+  test("shows OCR detail while reading files", () => {
+    const current = task("张三", "HKU")
+    current.status = "正在读取文件"
+    current.ocr = {
+      phase: "running",
+      current: 3,
+      total: 22,
+      startedAt: new Date().toISOString(),
+      avgSeconds: 35,
+      etaAt: new Date().toISOString(),
+    }
+    const state = deriveComposerRuntimeState({ task: current })
+    expect(state.kind).toBe("working")
+    expect(state.detail).toContain("OCR 3/22")
+  })
+
+  test("exposes browser handoff waiting state", () => {
+    const current = task("张三", "HKU")
+    current.status = "等待顾问接管浏览器"
+    current.browserHandoffPending = true
+    expect(deriveComposerRuntimeState({ task: current }).kind).toBe("browser_handoff")
   })
 })
 

@@ -61,10 +61,21 @@ describe("shared student dossier tools", () => {
       ownerTaskId: "owner-task",
     })
 
+    const reviewId = "desktop-review-owner"
+    const submittedAt = new Date().toISOString()
     await writeJson(join(ownerWorkspace, "03_state/material_review.json"), {
+      reviewId,
       status: "approved",
       mode: "skip",
-      submittedAt: new Date().toISOString(),
+      submittedAt,
+      preparationCompleteAt: submittedAt,
+    })
+    await writeJson(join(ownerWorkspace, "03_state/.desktop_material_review_trust.json"), {
+      reviewId,
+      approvedBy: "desktop_submitApplicationMaterialReview",
+      submittedAt,
+      workspacePath: ownerWorkspace,
+      writtenAt: submittedAt,
     })
     await ownerTools.documents.execute(
       { input: { action: "generate_all" } },
@@ -78,6 +89,18 @@ describe("shared student dossier tools", () => {
       { input: { action: "prepare_ego_task" } },
       { directory: ownerWorkspace, agent: "application-agent" },
     )).toContain("task=owner-task")
+
+    await writeJson(join(ownerWorkspace, "03_state/material_review.json"), {
+      status: "approved",
+      approvedBy: "consultant",
+      submittedAt: "2026-07-19T17:34:12.000Z",
+    })
+    await expect(
+      ownerTools.cua.execute(
+        { input: { action: "prepare_ego_task", taskSpaceId: "1" } },
+        { directory: ownerWorkspace, agent: "application-agent" },
+      ),
+    ).rejects.toThrow(/MATERIAL_REVIEW_UNTRUSTED|材料确认/)
 
     const readerTools = await generatedTools(readerWorkspace, layout.sharedWorkspacePath)
     const readerInitialization = JSON.parse(await readerTools.workspace.execute(

@@ -29,6 +29,7 @@ import {
   getApplicationTask,
   listApplicationTasks,
   pauseApplicationTask,
+  repairApplicationSharedDossier,
   resumeApplicationTask,
   submitApplicationMaterialReview,
 } from "./application-agent"
@@ -321,6 +322,9 @@ export function registerIpcHandlers(deps: Deps) {
     "application-agent:submit-material-review",
     (_event: IpcMainInvokeEvent, workspacePath: string, input: ApplicationMaterialReviewInput) =>
       submitApplicationMaterialReview(workspacePath, input),
+  )
+  ipcMain.handle("application-agent:repair-shared-dossier", (_event: IpcMainInvokeEvent, workspacePath: string) =>
+    repairApplicationSharedDossier(workspacePath),
   )
   ipcMain.handle(
     "application-agent:block-high-risk-action",

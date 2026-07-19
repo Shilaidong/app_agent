@@ -34,6 +34,7 @@ import {
   applicationTypes,
   base64Encode,
   defaultTaskInput,
+  deriveComposerRuntimeState,
   groupedTasks,
   isSameApplicationTaskInput,
   mergeAgentMessages,
@@ -612,6 +613,13 @@ function ApplicationAgentShell(props: {
     return `${quota.creditsRemaining} / ${quota.creditsTotal} credits`
   })
   const supplementalFolderName = createMemo(() => supplementalFolder().split("/").filter(Boolean).at(-1) || "")
+  const composerRuntime = createMemo(() =>
+    deriveComposerRuntimeState({
+      task: task(),
+      messages: agentMessages(),
+      questionPending: agentMessages().some((item) => Boolean(item.question) && item.status !== "completed"),
+    }),
+  )
 
   const persistActiveSession = (session: ApplicationAgentSession) => {
     localStorage.setItem(activeApplicationSessionKey, JSON.stringify({ ...session, savedAt: Date.now() }))
@@ -1676,6 +1684,35 @@ function ApplicationAgentShell(props: {
                   <dt>状态</dt>
                   <dd><span class="status-pill">{currentTask().status}</span></dd>
                 </dl>
+                <Show when={currentTask().materialReviewTampered}>
+                  <div class="ocr-progress-panel ocr-progress-panel-danger" aria-live="polite">
+                    <strong>材料审核校验失败</strong>
+                    <p>{currentTask().materialReviewTamperMessage || "材料审核记录不可信，任务已暂停。"}</p>
+                  </div>
+                </Show>
+                <Show when={currentTask().status === "正在读取文件" && currentTask().ocr?.phase === "running" && (currentTask().ocr?.total || 0) > 0}>
+                  <div class="ocr-progress-panel" aria-live="polite">
+                    <div class="ocr-progress-heading">
+                      <strong>OCR 扫描中</strong>
+                      <span>
+                        {currentTask().ocr!.current}/{currentTask().ocr!.total}
+                      </span>
+                    </div>
+                    <div class="ocr-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={currentTask().ocr!.total} aria-valuenow={currentTask().ocr!.current}>
+                      <div
+                        class="ocr-progress-bar-fill"
+                        style={{ width: `${Math.min(100, Math.round((currentTask().ocr!.current / Math.max(1, currentTask().ocr!.total)) * 100))}%` }}
+                      />
+                    </div>
+                    <p>
+                      约 {currentTask().ocr!.avgSeconds} 秒/份
+                      {currentTask().ocr!.etaAt
+                        ? ` · 预计 ${new Date(currentTask().ocr!.etaAt).toLocaleTimeString()} 左右完成`
+                        : ""}
+                      。CPU 升高属正常，请保持应用打开。
+                    </p>
+                  </div>
+                </Show>
 	              </section>
               <section class="side-section task-switcher">
 	                <h2>申请列表</h2>
@@ -1696,6 +1733,27 @@ function ApplicationAgentShell(props: {
                       title="当前学校完成或暂停后，才会启动下一所学校"
                       onClick={switchToNextBatchTask}
                     >进入下一所学校</button>
+                    <Show when={currentTask().input.sharedWorkspacePath && currentTask().sharedDossierStatus !== "ready"}>
+                      <button
+                        type="button"
+                        disabled={busy()}
+                        title="当共享档案卡在未 ready 状态时，重算 hashes 并按材料审核结果修复"
+                        onClick={async () => {
+                          setBusy(true)
+                          setError(null)
+                          try {
+                            const result = await window.api.repairApplicationSharedDossier(currentTask().workspacePath)
+                            const latest = await window.api.getApplicationTask(currentTask().workspacePath)
+                            setTask(latest)
+                            setRestoreNotice(`共享档案已修复为 ${result.status}（version ${result.version}）`)
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : String(err))
+                          } finally {
+                            setBusy(false)
+                          }
+                        }}
+                      >修复共享档案</button>
+                    </Show>
                   </div>
                 </section>
               </Show>
@@ -1920,6 +1978,19 @@ function ApplicationAgentShell(props: {
                       </Show>
                     </div>
                     <div class="agent-chat-input">
+                      <button
+                        type="button"
+                        class={`composer-runtime-chip composer-runtime-${composerRuntime().kind}`}
+                        disabled={busy() || !composerRuntime().canTogglePause}
+                        title={composerRuntime().detail}
+                        onClick={() => {
+                          if (!composerRuntime().canTogglePause) return
+                          void toggleTaskPause()
+                        }}
+                      >
+                        <strong>{composerRuntime().label}</strong>
+                        <small>{composerRuntime().detail}</small>
+                      </button>
                       <textarea
                         value={agentInput()}
                         onInput={(event) => setAgentInput(event.currentTarget.value)}
