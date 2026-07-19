@@ -51,9 +51,12 @@ export const WriteTool = Tool.define(
           const contentNew = next.text
 
           const diff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, contentNew))
+          // Non-git projects use the global project with `/` as worktree. Permission
+          // rules from their local config are still scoped to the active directory.
+          const permissionRoot = instance.worktree === "/" ? instance.directory : instance.worktree
           yield* ctx.ask({
             permission: "edit",
-            patterns: [path.relative(instance.worktree, filepath)],
+            patterns: [path.relative(permissionRoot, filepath)],
             always: ["*"],
             metadata: {
               filepath,

@@ -106,6 +106,26 @@ async function writeJson(path: string, value: unknown) {
   await writeFile(path, JSON.stringify(value, null, 2) + "\n", "utf8")
 }
 
+async function writeDesktopApprovedMaterialReview(workspace: string, overrides: Record<string, unknown> = {}) {
+  const reviewId = String(overrides.reviewId || "desktop-e2e-review")
+  const submittedAt = String(overrides.submittedAt || new Date().toISOString())
+  await writeJson(join(workspace, "03_state/material_review.json"), {
+    reviewId,
+    status: "approved",
+    mode: "skip",
+    submittedAt,
+    preparationCompleteAt: submittedAt,
+    ...overrides,
+  })
+  await writeJson(join(workspace, "03_state/.desktop_material_review_trust.json"), {
+    reviewId,
+    approvedBy: "desktop_submitApplicationMaterialReview",
+    submittedAt,
+    workspacePath: workspace,
+    writtenAt: submittedAt,
+  })
+}
+
 async function createFixture(workspace: string) {
   await Promise.all(requiredDirectories.filter((item) => !item.startsWith(".opencode")).map((item) => mkdir(join(workspace, item), { recursive: true })))
   await writeFile(join(workspace, "00_original_backup/fixture-id.pdf"), "fixture identity material\n", "utf8")
@@ -184,7 +204,7 @@ async function createFixture(workspace: string) {
     updatedAt: "2026-07-17T00:00:00.000Z",
     reason: "legacy workspace remains paused until the consultant explicitly resumes it",
   })
-  await writeJson(join(workspace, "03_state/material_review.json"), { status: "approved", mode: "skip" })
+  await writeDesktopApprovedMaterialReview(workspace)
   await writeJson(join(workspace, "03_state/agent_execution_audit.json"), [
     { tool: "application-agent_workspace", context: { directory: workspace } },
     { tool: "application-agent_materials", context: { directory: workspace } },
@@ -282,11 +302,14 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(isRecord(applicationAgent.permission) && isRecord(applicationAgent.permission.read) && applicationAgent.permission.read["*"] === "allow", "Ordinary application-agent must retain read access to authoritative state.")
   assert(isRecord(applicationAgent.permission.edit), "Ordinary application-agent must define edit protection.")
   const applicationAgentMarkdown = readText(join(workspace, ".opencode/agents/application-agent.md"))
-  for (const protectedPath of [".opencode/**", "03_state/application_progress.json", "03_state/task_state.json", "03_state/task_control.json", "03_state/agent_execution_audit.json", "03_state/material_review.json", "03_state/task_input.json"]) {
+  for (const protectedPath of [".opencode/**", "03_state/application_progress.json", "03_state/task_state.json", "03_state/task_control.json", "03_state/agent_execution_audit.json", "03_state/material_review.json", "03_state/task_input.json", "03_state/.desktop_material_review_trust.json"]) {
     assert(config.permission.edit[protectedPath] === "deny", `Top-level permission.edit must protect ${protectedPath}.`)
     assert(applicationAgent.permission.edit[protectedPath] === "deny", `Ordinary application-agent permission.edit must protect ${protectedPath}.`)
+  }
+  for (const protectedPath of [".opencode/**", "03_state/application_progress.json", "03_state/task_state.json", "03_state/task_control.json", "03_state/agent_execution_audit.json", "03_state/material_review.json", "03_state/task_input.json"]) {
     assert(applicationAgentMarkdown.includes(`    "${protectedPath}": deny`), `Agent Markdown permission.edit must protect ${protectedPath}.`)
   }
+  assert(readText(join(workspace, ".opencode/tools/application-agent.ts")).includes("MATERIAL_REVIEW_UNTRUSTED"), "Generated CUA tools must reject forged material reviews.")
 
   for (const skill of skills) {
     const body = readText(join(workspace, ".opencode/skills", skill, "SKILL.md"))
@@ -530,7 +553,7 @@ async function verifyCuaStateTransitions(workspace: string) {
   const stoppedLegacyControlWrapper = spawnSync(join(workspace, ".opencode/bin/ego-browser"), [], { cwd: workspace, encoding: "utf8" })
   assert(stoppedLegacyControlWrapper.status === 127, "A pending material review must block before ego lite starts.")
   assert(stoppedLegacyControlWrapper.stderr.includes("material review is pending"), "cua_control.stopped must not gate a resumed task before the material-review check.")
-  await writeJson(join(workspace, "03_state/material_review.json"), { status: "approved", mode: "skip" })
+  await writeDesktopApprovedMaterialReview(workspace)
   await writeJson(join(workspace, "03_state/application_progress.json"), {
     currentPage: "Fixture application form",
     currentUrl: "https://fixture.example/application",

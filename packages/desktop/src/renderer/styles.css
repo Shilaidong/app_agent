@@ -887,6 +887,51 @@ button {
   font-size: 12px;
 }
 
+.ocr-progress-panel {
+  margin-top: 12px;
+  border-radius: 12px;
+  background: #f3f7f1;
+  border: 1px solid #d5e5d6;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.ocr-progress-panel-danger {
+  background: #fdf2f0;
+  border-color: #f0c8c0;
+}
+
+.ocr-progress-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #2f5d3e;
+  font-size: 13px;
+}
+
+.ocr-progress-panel p,
+.ocr-progress-panel-danger p {
+  margin: 0;
+  color: #5c665e;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ocr-progress-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: #dfe9dd;
+  overflow: hidden;
+}
+
+.ocr-progress-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5d9a68, #3f7d4d);
+  transition: width 0.35s ease;
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -23,6 +23,12 @@ import {
   browserSafetyStopSummary,
   type BrowserSafetyStopSummary,
 } from "./application-agent-browser-safety"
+import {
+  buildMaterialReviewTrust,
+  materialReviewTamperDetected,
+  materialReviewTrustPath,
+  type MaterialReviewTrust,
+} from "./application-agent-material-review-gate"
 
 export { buildApplicationAgentRefillPrompt, buildApplicationAgentStartPrompt } from "./application-agent-opencode"
 export { applicationRefillSessionTitle } from "./application-agent-refill"
@@ -52,6 +58,16 @@ export type ApplicationTaskInput = {
   taskGoal?: string
 }
 
+export type ApplicationOcrProgress = {
+  phase: "running" | "done"
+  current: number
+  total: number
+  startedAt: string
+  avgSeconds: number
+  etaAt: string
+  finishedAt?: string
+}
+
 export type ApplicationTask = {
   id: string
   slug: string
@@ -72,6 +88,9 @@ export type ApplicationTask = {
   reusedExisting?: boolean
   sharedDossierStatus?: "preparing" | "prepared" | "ready"
   browserSafetyStop?: BrowserSafetyStopSummary
+  ocr?: ApplicationOcrProgress
+  materialReviewTampered?: boolean
+  materialReviewTamperMessage?: string
 }
 
 export type ApplicationMaterialReviewInput = {
@@ -482,16 +501,21 @@ export async function prepareApplicationAgentConfig(directory: string) {
 }
 
 export async function getApplicationTask(workspacePath: string): Promise<ApplicationTask> {
-  const [task, savedInput, missing, progress, control] = await Promise.all([
+  const [task, savedInput, missing, progress, control, materialReview, materialReviewTrust] = await Promise.all([
     readJson<Record<string, unknown>>(join(workspacePath, "03_state/task_state.json"), {}),
     readJson<ApplicationTaskInput | null>(join(workspacePath, "03_state/task_input.json"), null),
     readJson<unknown>(join(workspacePath, "03_state/missing_items.json"), null),
     readJson<unknown>(join(workspacePath, "03_state/application_progress.json"), null),
     readJson<{ paused?: boolean; updatedAt?: string }>(join(workspacePath, "03_state/task_control.json"), {}),
+    readJson<Record<string, unknown>>(join(workspacePath, "03_state/material_review.json"), {}),
+    readJson<MaterialReviewTrust | null>(materialReviewTrustPath(workspacePath), null),
   ])
   const canonicalInput = savedInput ? await canonicalTaskInput(workspacePath, savedInput) : undefined
   const totalFiles = (await scanTaskMaterials(workspacePath, canonicalInput)).length
   const normalized = normalizeTask(task, workspacePath, canonicalInput, summarizeMissingRaw(missing, totalFiles, progress))
+  if (task && typeof task === "object" && task.ocr && typeof task.ocr === "object") {
+    normalized.ocr = task.ocr as ApplicationOcrProgress
+  }
   if (canonicalInput?.sharedWorkspacePath) {
     const sharedState = await readJson<{ status?: string }>(
       join(canonicalInput.sharedWorkspacePath, "03_state", "shared_dossier_state.json"),
@@ -503,16 +527,31 @@ export async function getApplicationTask(workspacePath: string): Promise<Applica
   }
   const safety = browserSafetyStopSummary(progress)
   if (safety) normalized.browserSafetyStop = safety
-  if (!control.paused || normalized.status === "已暂停") return normalized
-  const updatedAt = stringValue(control.updatedAt) ?? normalized.updatedAt
-  return {
-    ...normalized,
-    updatedAt,
-    status: "已暂停",
-    progress: normalized.progress.at(-1)?.status === "已暂停"
-      ? normalized.progress
-      : [...normalized.progress, { at: updatedAt, status: "已暂停", message: STATUS_MESSAGES.已暂停 }],
+  if (materialReviewTamperDetected(materialReview, materialReviewTrust)) {
+    normalized.materialReviewTampered = true
+    normalized.materialReviewTamperMessage =
+      "检测到材料审核记录可能被非桌面路径改写（缺少桌面授权校验）。任务已自动暂停；请顾问在材料确认面板重新确认，不要继续填表。"
+    if (!control.paused) {
+      await setTaskPaused(workspacePath, true, normalized.status === "已暂停" ? "可继续申请" : normalized.status)
+      await appendLog(workspacePath, "agent", normalized.materialReviewTamperMessage)
+    }
   }
+  if (normalized.materialReviewTampered || control.paused) {
+    const updatedAt = stringValue(control.updatedAt) ?? normalized.updatedAt
+    return {
+      ...normalized,
+      updatedAt,
+      status: "已暂停",
+      progress: normalized.progress.at(-1)?.status === "已暂停"
+        ? normalized.progress
+        : [...normalized.progress, {
+          at: updatedAt,
+          status: "已暂停",
+          message: normalized.materialReviewTamperMessage || STATUS_MESSAGES.已暂停,
+        }],
+    }
+  }
+  return normalized
 }
 
 export async function continueApplicationTask(workspacePath: string): Promise<ApplicationTask> {
@@ -602,8 +641,9 @@ export async function submitApplicationMaterialReview(workspacePath: string, inp
     await cp(sharedProfilePath, sharedProfileCandidatePath, { force: true })
   }
   await updateSharedDossierAfterMaterialReview(task, input.mode, scope, submittedAt)
+  const reviewId = randomUUID()
   await writeJson(join(workspacePath, "03_state/material_review.json"), {
-    reviewId: randomUUID(),
+    reviewId,
     status: "approved",
     mode: input.mode,
     scope,
@@ -616,6 +656,10 @@ export async function submitApplicationMaterialReview(workspacePath: string, inp
     submittedAt,
     preparationCompleteAt: input.mode === "skip" ? submittedAt : undefined,
   })
+  await writeJson(
+    materialReviewTrustPath(workspacePath),
+    buildMaterialReviewTrust({ workspacePath, reviewId, submittedAt }),
+  )
   task.status = "可继续申请"
   task.updatedAt = new Date().toISOString()
   task.generatedFiles = generatedFiles(workspacePath)
@@ -665,6 +709,76 @@ async function updateSharedDossierAfterMaterialReview(
     updatedAt: submittedAt,
     note: "顾问已补充材料或文字；资料库负责人完成更新并重新生成文档后才会发布新版本。",
   })
+}
+
+/** Rebuild shared_dossier_state hashes/status for a batch that was corrupted or half-published. */
+export async function repairApplicationSharedDossier(workspacePath: string): Promise<{
+  status: "prepared" | "ready"
+  sharedWorkspacePath: string
+  version: number
+}> {
+  const task = await getApplicationTask(workspacePath)
+  const sharedWorkspacePath = task.input.sharedWorkspacePath
+  if (!sharedWorkspacePath) throw new Error("当前任务不是选校批次共享资料库任务，无法修复共享档案。")
+  const generated = join(sharedWorkspacePath, "02_generated")
+  const statePath = join(sharedWorkspacePath, "03_state", "shared_dossier_state.json")
+  const profile = join(generated, "student_profile.md")
+  const materialsIndex = join(sharedWorkspacePath, "03_state", "materials_index.json")
+  const ocrIndex = join(sharedWorkspacePath, "03_state", "ocr_index.json")
+  const materials = join(sharedWorkspacePath, "00_original_backup")
+  const classified = join(sharedWorkspacePath, "01_classified_materials")
+  const extractedText = join(sharedWorkspacePath, "03_state", "extracted_text")
+  const schoolProfile = join(workspacePath, "02_generated", "student_profile.md")
+  const schoolMaterialsIndex = join(workspacePath, "03_state", "materials_index.json")
+  if (!existsSync(profile) && existsSync(schoolProfile)) {
+    await mkdir(generated, { recursive: true })
+    await cp(schoolProfile, profile, { force: true })
+  }
+  if (!existsSync(materialsIndex) && existsSync(schoolMaterialsIndex)) {
+    await mkdir(join(sharedWorkspacePath, "03_state"), { recursive: true })
+    await cp(schoolMaterialsIndex, materialsIndex, { force: true })
+  }
+  if (!existsSync(profile) || !existsSync(materialsIndex)) {
+    throw new Error("共享档案仍缺少 student_profile.md 或 materials_index.json，无法修复。")
+  }
+  const review = await readJson<{ status?: string; mode?: string }>(join(workspacePath, "03_state/material_review.json"), {})
+  const trust = await readJson<MaterialReviewTrust | null>(materialReviewTrustPath(workspacePath), null)
+  const ready = review.status === "approved" && Boolean(trust?.reviewId) && (review.mode === "skip" || Boolean(review))
+  const previous = await readJson<Record<string, unknown>>(statePath, {})
+  const now = new Date().toISOString()
+  const hashTree = async (root: string) => {
+    const files = existsSync(root) ? await scanFiles(root) : []
+    const records = await Promise.all(
+      files.sort().map(async (file) => relative(root, file).replaceAll("\\", "/") + "\0" + await fileSha256(file)),
+    )
+    return createHash("sha256").update(records.join("\n")).digest("hex")
+  }
+  const hashes = {
+    studentProfileSha256: await fileSha256(profile),
+    materialsIndexSha256: await fileSha256(materialsIndex),
+    ocrIndexSha256: existsSync(ocrIndex) ? await fileSha256(ocrIndex) : "",
+    rawMaterialsSha256: await hashTree(materials),
+    classifiedMaterialsSha256: await hashTree(classified),
+    extractedTextSha256: await hashTree(extractedText),
+  }
+  const status = ready ? "ready" as const : "prepared" as const
+  const version = Math.max(1, Number(previous.version || 0) + 1)
+  await writeJson(statePath, {
+    ...previous,
+    status,
+    version,
+    ownerTaskId: previous.ownerTaskId || task.id,
+    profilePath: profile,
+    materialsIndexPath: materialsIndex,
+    ocrIndexPath: ocrIndex,
+    hashes,
+    preparedAt: previous.preparedAt || now,
+    publishedAt: status === "ready" ? now : "",
+    updatedAt: now,
+    repairedAt: now,
+  })
+  await appendLog(workspacePath, "agent", "已修复学生共享档案状态为 " + status + "（version " + version + "）。")
+  return { status, sharedWorkspacePath, version }
 }
 
 export async function pauseApplicationTask(workspacePath: string): Promise<ApplicationTask> {

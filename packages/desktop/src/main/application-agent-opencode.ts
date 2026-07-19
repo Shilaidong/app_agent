@@ -1293,6 +1293,23 @@ function rejectPreparationMutationForRefill(ctx: ToolContext, operation: string)
   )
 }
 
+function materialReviewTrustPath(workspace: string) {
+  return join(workspace, "03_state", ".desktop_material_review_trust.json")
+}
+
+function materialReviewPrepareError(review: Record<string, any> | null | undefined, trust: Record<string, any> | null | undefined) {
+  if (!review || review.status !== "approved") {
+    return "材料确认或补充内容同步尚未完成。请停止，不要启动 ego-browser；等待 material_review.json 记录 preparationCompleteAt。"
+  }
+  if (!String(review.reviewId || "").trim() || !String(review.mode || "").trim() || !String(review.submittedAt || "").trim()) {
+    return "MATERIAL_REVIEW_UNTRUSTED: material_review.json 缺少桌面审核 schema（reviewId/mode/submittedAt），疑似非桌面写入。"
+  }
+  if (!trust?.reviewId || trust.reviewId !== review.reviewId || trust.approvedBy !== "desktop_submitApplicationMaterialReview") {
+    return "MATERIAL_REVIEW_UNTRUSTED: 材料审核未通过桌面授权记录校验。Agent 不得自行伪造 material_review.json；请顾问在材料确认面板重新确认。"
+  }
+  return undefined
+}
+
 async function materialReviewPreparationComplete(workspace: string, materialReview: Record<string, any>) {
   if (Date.parse(String(materialReview.preparationCompleteAt || ""))) return true
   if (materialReview.mode === "skip") return true
@@ -1366,7 +1383,11 @@ async function sharedDossierAccess(task: any) {
   const shared = sharedStudentDossier(task)
   if (!shared) return undefined
   const state = await readJson(shared.manifest, {})
-  if (state.status === "ready") return { shared, state, role: "reader" as const }
+  // Only "ready" with hashes is consumable by later schools. Forged statuses like
+  // "published" must not unlock shared reuse.
+  if (state.status === "ready" && state.hashes && typeof state.hashes === "object") {
+    return { shared, state, role: "reader" as const }
+  }
   if (String(state.ownerTaskId || "") === String(task.id || "")) {
     return { shared, state, role: "owner" as const }
   }
@@ -1435,18 +1456,34 @@ async function publishSharedDossier(workspace: string, task: any, ready: boolean
     return { sharedWorkspacePath: access.shared.workspace, preparedAt: access.state.preparedAt || access.state.updatedAt || "", publishedAt: "", hashes: access.state.hashes || {} }
   }
   const materialReview = ready ? await readJson(join(workspace, "03_state", "material_review.json"), {}) : {}
-  const localProfile = ready && materialReview.scope === "student" && existsSync(String(materialReview.sharedProfileCandidatePath || ""))
+  const candidateProfile = ready && materialReview.scope === "student" && existsSync(String(materialReview.sharedProfileCandidatePath || ""))
     ? String(materialReview.sharedProfileCandidatePath)
-    : join(workspace, "02_generated", "student_profile.md")
+    : ""
+  const localProfile = join(workspace, "02_generated", "student_profile.md")
+  const sharedProfile = access.shared.profile
+  // Batch owner agents often write profile under shared/02_generated; accept that source when school-local is missing.
+  const profileSource = existsSync(candidateProfile)
+    ? candidateProfile
+    : existsSync(localProfile)
+      ? localProfile
+      : existsSync(sharedProfile)
+        ? sharedProfile
+        : ""
   const localMaterialsIndex = join(workspace, "03_state", "materials_index.json")
-  if (!existsSync(localProfile) || !existsSync(localMaterialsIndex)) {
+  // Prefer already-published shared materials index; only seed it from school-local when missing.
+  const materialsSource = existsSync(access.shared.materialsIndex)
+    ? access.shared.materialsIndex
+    : existsSync(localMaterialsIndex)
+      ? localMaterialsIndex
+      : ""
+  if (!profileSource || !materialsSource) {
     throw new Error("STUDENT_DOSSIER_INCOMPLETE: 发布共享档案前必须生成 student_profile.md 和 materials_index.json。")
   }
   await mkdir(access.shared.generated, { recursive: true })
   const stagedProfile = join(access.shared.generated, ".student_profile.md.staged-" + process.pid + "-" + Date.now())
-  await cp(localProfile, stagedProfile, { force: true })
+  await cp(profileSource, stagedProfile, { force: true })
   await rename(stagedProfile, access.shared.profile)
-  if (!existsSync(access.shared.materialsIndex)) await cp(localMaterialsIndex, access.shared.materialsIndex, { force: true })
+  if (!existsSync(access.shared.materialsIndex)) await cp(materialsSource, access.shared.materialsIndex, { force: true })
   if (!existsSync(access.shared.ocrIndex) && existsSync(join(workspace, "03_state", "ocr_index.json"))) {
     await cp(join(workspace, "03_state", "ocr_index.json"), access.shared.ocrIndex, { force: true })
   }
@@ -2352,13 +2389,60 @@ export const materials = {
       const resultStore = schoolOverlay ? overlayOcrPath : shared?.indexPath || join(workspace, "03_state", "ocr_index.json")
       const previous = await readJson<Array<{ file: string; output: string; textLength: number; error: string; sourceSha256?: string }>>(resultStore, [])
       const results = [...previous]
-      await appendLog(workspace, "agent", "已启动随包 PaddleOCR，正在逐份扫描 " + candidates.length + " 份 PDF/图片材料。大型扫描件通常需要 3–8 分钟，请保持应用打开。")
-      await saveTask(workspace, task, "正在读取文件", "PaddleOCR 正在逐份扫描 " + candidates.length + " 份材料；大型扫描件通常需要 3–8 分钟，请保持应用打开。")
+      const ocrStartedAt = Date.now()
+      const totalCandidates = candidates.length
+      const etaMinutes = Math.max(1, Math.ceil((totalCandidates * 35) / 60))
+      await appendLog(
+        workspace,
+        "agent",
+        "已启动随包 PaddleOCR，正在逐份扫描 " + totalCandidates + " 份 PDF/图片材料。约 35 秒/份，合计预计 " + etaMinutes + "–" + (etaMinutes + 2) + " 分钟；CPU 升高属正常，请保持应用打开。",
+      )
+      task.ocr = {
+        phase: "running",
+        current: 0,
+        total: totalCandidates,
+        startedAt: new Date(ocrStartedAt).toISOString(),
+        avgSeconds: 35,
+        etaAt: new Date(ocrStartedAt + totalCandidates * 35_000).toISOString(),
+      }
+      await saveTask(
+        workspace,
+        task,
+        "正在读取文件",
+        "PaddleOCR 正在扫描 0/" + totalCandidates + " 份材料（预计约 " + etaMinutes + " 分钟，CPU 高属正常）。",
+      )
+      let processedNew = 0
       for (const [index, file] of candidates.entries()) {
         await ensureTaskIsActive(workspace)
         const sourceSha256 = await hashFile(file)
-        if (results.some((item) => item.sourceSha256 === sourceSha256)) continue
-        await saveTask(workspace, task, "正在读取文件", "PaddleOCR 正在扫描第 " + (index + 1) + "/" + candidates.length + " 份材料；大型扫描件通常需要 3–8 分钟。")
+        if (results.some((item) => item.sourceSha256 === sourceSha256)) {
+          task.ocr = {
+            phase: "running",
+            current: index + 1,
+            total: totalCandidates,
+            startedAt: new Date(ocrStartedAt).toISOString(),
+            avgSeconds: processedNew > 0 ? Math.max(1, Math.round((Date.now() - ocrStartedAt) / 1000 / processedNew)) : 35,
+            etaAt: new Date(Date.now() + Math.max(0, totalCandidates - index - 1) * 35_000).toISOString(),
+          }
+          continue
+        }
+        const elapsedSeconds = Math.max(1, Math.round((Date.now() - ocrStartedAt) / 1000))
+        const avgSeconds = processedNew > 0 ? Math.max(1, Math.round(elapsedSeconds / processedNew)) : 35
+        const remaining = totalCandidates - index
+        task.ocr = {
+          phase: "running",
+          current: index + 1,
+          total: totalCandidates,
+          startedAt: new Date(ocrStartedAt).toISOString(),
+          avgSeconds,
+          etaAt: new Date(Date.now() + remaining * avgSeconds * 1000).toISOString(),
+        }
+        await saveTask(
+          workspace,
+          task,
+          "正在读取文件",
+          "PaddleOCR 正在扫描第 " + (index + 1) + "/" + totalCandidates + " 份材料（约 " + avgSeconds + " 秒/份，预计剩余 " + Math.max(1, Math.ceil((remaining * avgSeconds) / 60)) + " 分钟）。",
+        )
         const output = join(outputDir, sourceSha256 + ".txt")
         const result = await execFileAsync(ocr, [file], { maxBuffer: 16 * 1024 * 1024 }).then(
           ({ stdout, stderr }) => ({ text: stdout.trim(), error: stderr.trim() }),
@@ -2372,6 +2456,7 @@ export const materials = {
           error: result.error,
           sourceSha256,
         })
+        processedNew += 1
       }
       await writeJson(resultStore, results)
       const baseResults = schoolOverlay && sharedAccess ? await readJson(sharedAccess.shared.ocrIndex, []) : []
@@ -2387,6 +2472,15 @@ export const materials = {
       }
       const completed = combinedResults.filter((result: any) => result.textLength > 0)
       const failed = combinedResults.filter((result: any) => result.error || result.textLength === 0)
+      task.ocr = {
+        phase: "done",
+        current: totalCandidates,
+        total: totalCandidates,
+        startedAt: new Date(ocrStartedAt).toISOString(),
+        avgSeconds: processedNew > 0 ? Math.max(1, Math.round((Date.now() - ocrStartedAt) / 1000 / processedNew)) : 35,
+        etaAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+      }
       await appendLog(workspace, "agent", "已使用随包 PaddleOCR 提取或复用 " + completed.length + "/" + combinedResults.length + " 份扫描材料文字。")
       await saveTask(workspace, task, "正在读取文件", "已完成扫描材料 OCR：成功 " + completed.length + " 份，失败或无文字 " + failed.length + " 份。")
       await appendAudit(workspace, "materials", action, "completed", "ocr " + completed.length + "/" + combinedResults.length)
@@ -2550,13 +2644,20 @@ export const documents = {
     }
     const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
     const reviewComplete = materialReview.status === "approved" && await materialReviewPreparationComplete(workspace, materialReview)
-    const sharedPublication = materialReview.status !== "approved"
-      ? await publishSharedDossier(workspace, task, false)
-      : reviewComplete && materialReview.scope === "student"
-        ? await publishSharedDossier(workspace, task, true)
-        : reviewComplete
-          ? await finalizePreparedSharedDossier(task)
-          : undefined
+    let sharedPublication: Awaited<ReturnType<typeof publishSharedDossier>> | Awaited<ReturnType<typeof finalizePreparedSharedDossier>> | undefined
+    let publishWarning = ""
+    try {
+      sharedPublication = materialReview.status !== "approved"
+        ? await publishSharedDossier(workspace, task, false)
+        : reviewComplete && materialReview.scope === "student"
+          ? await publishSharedDossier(workspace, task, true)
+          : reviewComplete
+            ? await finalizePreparedSharedDossier(task)
+            : undefined
+    } catch (error) {
+      // Document generation already succeeded above; do not swallow that success into a tool failure.
+      publishWarning = error instanceof Error ? error.message : String(error)
+    }
     if (reviewComplete && !materialReview.preparationCompleteAt) {
       await writeJson(join(workspace, "03_state/material_review.json"), {
         ...materialReview,
@@ -2581,22 +2682,35 @@ export const documents = {
         ? "材料整理、缺失项和阶段总结已完成。请在申请 Agent 的材料确认面板决定是否补充，再进入浏览器。"
         : reviewAwaitingApplication
           ? "补充内容尚未通过应用校验，暂不启动浏览器。"
-          : "已生成信息表、材料表、Word 缺失清单和阶段总结。",
+          : publishWarning
+            ? "已生成信息表、材料表、Word 缺失清单和阶段总结；共享档案发布未成功：" + publishWarning
+            : "已生成信息表、材料表、Word 缺失清单和阶段总结。",
     )
     await appendAudit(
       workspace,
       "documents",
       action,
       "completed",
-      sharedPublication
-        ? materialReview.status === "approved"
-          ? "generated school documents and published shared student dossier"
-          : "generated school documents and prepared shared student dossier for consultant review"
-        : "generated documents from missing_items.json",
+      publishWarning
+        ? "generated documents; shared dossier publish warning: " + publishWarning
+        : sharedPublication
+          ? materialReview.status === "approved"
+            ? "generated school documents and published shared student dossier"
+            : "generated school documents and prepared shared student dossier for consultant review"
+          : "generated documents from missing_items.json",
     )
-    return needsMaterialReview
-      ? "文档已生成到 02_generated，任务已停在材料确认关口。请等待顾问在桌面应用选择补充文件夹、填写文字补充或确认暂不补充；不要启动 ego-browser。"
-      : "文档已生成到 02_generated。Word 清单基于 03_state/missing_items.json。"
+    return JSON.stringify({
+      status: "completed",
+      documentsGenerated: true,
+      publishOk: !publishWarning,
+      publishWarning: publishWarning || undefined,
+      sharedPublication: sharedPublication || undefined,
+      message: needsMaterialReview
+        ? "文档已生成到 02_generated，任务已停在材料确认关口。请等待顾问在桌面应用选择补充文件夹、填写文字补充或确认暂不补充；不要启动 ego-browser。"
+        : publishWarning
+          ? "文档已生成到 02_generated，但共享档案发布失败：" + publishWarning + "。请顾问修复共享档案后再进入后续学校。"
+          : "文档已生成到 02_generated。Word 清单基于 03_state/missing_items.json。",
+    }, null, 2)
   },
 }
 
@@ -3315,7 +3429,13 @@ export const cua = {
     }
     if (input.action === "prepare_ego_task") {
       const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
-      if (materialReview.status !== "approved" || !(await materialReviewPreparationComplete(workspace, materialReview))) {
+      const materialReviewTrust = await readJson(materialReviewTrustPath(workspace), null)
+      const untrustedReview = materialReviewPrepareError(materialReview, materialReviewTrust)
+      if (untrustedReview) {
+        await appendAudit(workspace, "cua", auditAction, "failed", untrustedReview, ctx)
+        throw new Error(untrustedReview)
+      }
+      if (!(await materialReviewPreparationComplete(workspace, materialReview))) {
         await appendAudit(workspace, "cua", auditAction, "failed", "material review has not been approved and fully applied", ctx)
         throw new Error("材料确认或补充内容同步尚未完成。请停止，不要启动 ego-browser；等待 material_review.json 记录 preparationCompleteAt。")
       }
@@ -4316,25 +4436,52 @@ function crc32(buffer: Buffer) {
 `
 }
 
+function authoritativeEditDenyPatterns(workspacePath: string, relativePaths: string[]) {
+  // Deny relative, **/prefixed, and absolute forms. Non-git workspaces may match
+  // permission checks against either workspace-relative or absolute-looking paths.
+  const entries = relativePaths.flatMap((relativePath) => {
+    const normalized = relativePath.replaceAll("\\", "/")
+    const absolute = join(workspacePath, normalized).replaceAll("\\", "/")
+    return [
+      [normalized, "deny"] as const,
+      ["**/" + normalized, "deny"] as const,
+      [absolute, "deny"] as const,
+    ]
+  })
+  return Object.fromEntries(entries)
+}
+
 export async function writeOpenCodeConfig(workspacePath: string, overrides?: OpenCodeResourceOverrides) {
   const base = join(workspacePath, ".opencode")
   // OpenCode routes write/edit/patch through permission.edit. These files are
   // authoritative tool/UI state, so the ordinary Agent may read but not forge them.
-  const authoritativeStateEditPermissions = {
-    ".opencode/**": "deny",
-    "03_state/application_progress.json": "deny",
-    "03_state/task_state.json": "deny",
-    "03_state/task_control.json": "deny",
-    "03_state/agent_execution_audit.json": "deny",
-    "03_state/material_review.json": "deny",
-    "03_state/task_input.json": "deny",
-  }
+  const authoritativeStateEditPermissions = authoritativeEditDenyPatterns(workspacePath, [
+    ".opencode/**",
+    "03_state/application_progress.json",
+    "03_state/task_state.json",
+    "03_state/task_control.json",
+    "03_state/agent_execution_audit.json",
+    "03_state/material_review.json",
+    "03_state/.desktop_material_review_trust.json",
+    "03_state/task_input.json",
+  ])
   const sharedReadPattern = overrides?.sharedWorkspacePath && existsSync(overrides.sharedWorkspacePath)
     ? relative(workspacePath, overrides.sharedWorkspacePath).replaceAll("\\", "/") + "/**"
     : ""
   const sharedExternalPattern = overrides?.sharedWorkspacePath && existsSync(overrides.sharedWorkspacePath)
     ? overrides.sharedWorkspacePath.replaceAll("\\", "/") + "/**"
     : ""
+  const sharedEditDeny = overrides?.sharedWorkspacePath && existsSync(overrides.sharedWorkspacePath)
+    ? {
+        ...authoritativeEditDenyPatterns(overrides.sharedWorkspacePath, [
+          "03_state/shared_dossier_state.json",
+          "02_generated/student_profile.md",
+          "03_state/materials_index.json",
+        ]),
+        ...(sharedReadPattern ? { [sharedReadPattern]: "deny" } : {}),
+        [overrides.sharedWorkspacePath.replaceAll("\\", "/") + "/03_state/shared_dossier_state.json"]: "deny",
+      }
+    : {}
   await mkdir(join(base, "agents"), { recursive: true })
   await mkdir(join(base, "bin"), { recursive: true })
   await mkdir(join(base, "commands"), { recursive: true })
@@ -4360,6 +4507,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
       edit: {
         "*": "allow",
         ...authoritativeStateEditPermissions,
+        ...sharedEditDeny,
         "../*": "deny",
       },
       external_directory: {
@@ -4397,8 +4545,8 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
         edit: {
           "*": "allow",
           ...authoritativeStateEditPermissions,
+          ...sharedEditDeny,
           "../*": "deny",
-          ...(sharedReadPattern ? { [sharedReadPattern]: "deny" } : {}),
         },
         external_directory: sharedExternalPattern
           ? { "*": "deny", [sharedExternalPattern]: "allow" }
@@ -4459,7 +4607,8 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
             "03_state/application_progress.json": "deny",
             "03_state/task_state.json": "deny",
             "06_new_materials/**": "deny",
-            ...(sharedReadPattern ? { [sharedReadPattern]: "deny" } : {}),
+            ...authoritativeStateEditPermissions,
+            ...sharedEditDeny,
           },
           external_directory: sharedExternalPattern
             ? { "*": "deny", [sharedExternalPattern]: "allow" }
@@ -4532,6 +4681,7 @@ ${sharedReadPattern ? `    "${sharedReadPattern}": allow\n` : ""}  edit:
     "03_state/task_control.json": deny
     "03_state/agent_execution_audit.json": deny
     "03_state/material_review.json": deny
+    "03_state/.desktop_material_review_trust.json": deny
     "03_state/task_input.json": deny
     "../*": deny
 ${sharedReadPattern ? `    "${sharedReadPattern}": deny\n` : ""}  external_directory:

@@ -490,10 +490,18 @@ async function seedWorkspace(workspacePath: string, options?: { taskSpaceId?: st
     writeJson(join(workspacePath, "03_state/missing_items.json"), []),
     writeJson(join(workspacePath, "03_state/agent_execution_audit.json"), []),
     writeJson(join(workspacePath, "03_state/material_review.json"), {
+      reviewId: "desktop-safety-review",
       status: "approved",
       mode: "skip",
       submittedAt: new Date().toISOString(),
       preparationCompleteAt: new Date().toISOString(),
+    }),
+    writeJson(join(workspacePath, "03_state/.desktop_material_review_trust.json"), {
+      reviewId: "desktop-safety-review",
+      approvedBy: "desktop_submitApplicationMaterialReview",
+      submittedAt: new Date().toISOString(),
+      workspacePath,
+      writtenAt: new Date().toISOString(),
     }),
     Bun.write(join(workspacePath, "04_logs/agent_log.md"), "# Agent 日志\n\n"),
     Bun.write(join(workspacePath, "04_logs/cua_log.md"), "# CUA 日志\n\n"),

@@ -122,6 +122,16 @@ export type BrowserSafetyStopSummary = {
   resumeAuthorizedAt?: string
 }
 
+export type ApplicationOcrProgress = {
+  phase: "running" | "done"
+  current: number
+  total: number
+  startedAt: string
+  avgSeconds: number
+  etaAt: string
+  finishedAt?: string
+}
+
 export type ApplicationTask = {
   id: string
   slug: string
@@ -150,6 +160,9 @@ export type ApplicationTask = {
   reusedExisting?: boolean
   sharedDossierStatus?: "preparing" | "prepared" | "ready"
   browserSafetyStop?: BrowserSafetyStopSummary
+  ocr?: ApplicationOcrProgress
+  materialReviewTampered?: boolean
+  materialReviewTamperMessage?: string
 }
 
 export type ApplicationMaterialReviewInput = {

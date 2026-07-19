@@ -1676,6 +1676,35 @@ function ApplicationAgentShell(props: {
                   <dt>状态</dt>
                   <dd><span class="status-pill">{currentTask().status}</span></dd>
                 </dl>
+                <Show when={currentTask().materialReviewTampered}>
+                  <div class="ocr-progress-panel ocr-progress-panel-danger" aria-live="polite">
+                    <strong>材料审核校验失败</strong>
+                    <p>{currentTask().materialReviewTamperMessage || "材料审核记录不可信，任务已暂停。"}</p>
+                  </div>
+                </Show>
+                <Show when={currentTask().status === "正在读取文件" && currentTask().ocr?.phase === "running" && (currentTask().ocr?.total || 0) > 0}>
+                  <div class="ocr-progress-panel" aria-live="polite">
+                    <div class="ocr-progress-heading">
+                      <strong>OCR 扫描中</strong>
+                      <span>
+                        {currentTask().ocr!.current}/{currentTask().ocr!.total}
+                      </span>
+                    </div>
+                    <div class="ocr-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={currentTask().ocr!.total} aria-valuenow={currentTask().ocr!.current}>
+                      <div
+                        class="ocr-progress-bar-fill"
+                        style={{ width: `${Math.min(100, Math.round((currentTask().ocr!.current / Math.max(1, currentTask().ocr!.total)) * 100))}%` }}
+                      />
+                    </div>
+                    <p>
+                      约 {currentTask().ocr!.avgSeconds} 秒/份
+                      {currentTask().ocr!.etaAt
+                        ? ` · 预计 ${new Date(currentTask().ocr!.etaAt).toLocaleTimeString()} 左右完成`
+                        : ""}
+                      。CPU 升高属正常，请保持应用打开。
+                    </p>
+                  </div>
+                </Show>
 	              </section>
               <section class="side-section task-switcher">
 	                <h2>申请列表</h2>
