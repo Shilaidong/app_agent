@@ -208,6 +208,7 @@ describe("shared student dossier tools", () => {
       ownerTaskId: "reader-two",
       publishedAt: "",
     })
+    const studentReviewSubmittedAt = new Date().toISOString()
     await writeJson(join(secondWorkspace, "03_state/material_review.json"), {
       reviewId: "student-review",
       status: "approved",
@@ -216,7 +217,14 @@ describe("shared student dossier tools", () => {
       supplementalFolder: sharedSupplement,
       sourceManifest: [{ path: sharedFile, sha256: sharedHash }],
       sharedProfileCandidatePath,
-      submittedAt: new Date().toISOString(),
+      submittedAt: studentReviewSubmittedAt,
+    })
+    await writeJson(join(secondWorkspace, "03_state/.desktop_material_review_trust.json"), {
+      reviewId: "student-review",
+      approvedBy: "desktop_submitApplicationMaterialReview",
+      submittedAt: studentReviewSubmittedAt,
+      workspacePath: secondWorkspace,
+      writtenAt: studentReviewSubmittedAt,
     })
     await secondTools.materials.execute({ input: { action: "classify" } }, { directory: secondWorkspace, agent: "application-agent" })
     await secondTools.materials.execute({ input: { action: "classify" } }, { directory: secondWorkspace, agent: "application-agent" })
@@ -242,6 +250,7 @@ describe("shared student dossier tools", () => {
       ownerTaskId: "reader-three",
       publishedAt: "",
     })
+    const noteSubmittedAt = new Date().toISOString()
     await writeJson(join(thirdWorkspace, "03_state/material_review.json"), {
       reviewId: "student-note",
       status: "approved",
@@ -251,7 +260,14 @@ describe("shared student dossier tools", () => {
       sharedProfileCandidatePath: noteCandidate,
       sharedProfileSha256Before: sha256(noteCandidateText),
       profileSha256Before: sha256(await Bun.file(join(thirdWorkspace, "02_generated", "student_profile.md")).text()),
-      submittedAt: new Date().toISOString(),
+      submittedAt: noteSubmittedAt,
+    })
+    await writeJson(join(thirdWorkspace, "03_state/.desktop_material_review_trust.json"), {
+      reviewId: "student-note",
+      approvedBy: "desktop_submitApplicationMaterialReview",
+      submittedAt: noteSubmittedAt,
+      workspacePath: thirdWorkspace,
+      writtenAt: noteSubmittedAt,
     })
     await thirdTools.documents.execute({ input: { action: "generate_all" } }, { directory: thirdWorkspace, agent: "application-agent" })
     expect(await readJson(layout.sharedDossierStatePath)).toMatchObject({ status: "preparing" })
@@ -260,6 +276,121 @@ describe("shared student dossier tools", () => {
     await thirdTools.documents.execute({ input: { action: "generate_all" } }, { directory: thirdWorkspace, agent: "application-agent" })
     expect(await readJson(layout.sharedDossierStatePath)).toMatchObject({ status: "ready", ownerTaskId: "reader-three" })
     expect(await Bun.file(layout.sharedProfilePath).text()).toContain("新增通用事实")
+  })
+
+  test("ready publish and finalize require desktop trust; prepared path stays ungated", async () => {
+    const root = await temporaryDirectory()
+    const layout = await createStudentWorkspace(join(root, "王五-申请批次"))
+    const ownerWorkspace = join(layout.schoolsPath, "01-hku")
+    await Promise.all([
+      schoolFixture(ownerWorkspace, layout.sharedWorkspacePath, "owner-trust", 1),
+      writeJson(layout.sharedDossierStatePath, {
+        status: "preparing",
+        version: 0,
+        ownerTaskId: "owner-trust",
+      }),
+      writeJson(join(layout.workspacePath, "03_state", "batch_state.json"), {
+        id: "batch-trust",
+        workspaceLayoutVersion: 2,
+        studentName: "王五",
+        sharedWorkspacePath: layout.sharedWorkspacePath,
+      }),
+    ])
+    const ownerTools = await generatedTools(ownerWorkspace, layout.sharedWorkspacePath)
+    await Promise.all([
+      Bun.write(join(ownerWorkspace, "02_generated/student_profile.md"), "# 王五 学生核心档案\n"),
+      writeJson(join(ownerWorkspace, "03_state/materials_index.json"), []),
+      writeJson(join(ownerWorkspace, "03_state/missing_items.json"), []),
+    ])
+
+    // Pre-review prepared publish must succeed without trust / without approved review.
+    const preparedDocs = JSON.parse(await ownerTools.documents.execute(
+      { input: { action: "generate_all" } },
+      { directory: ownerWorkspace, agent: "application-agent" },
+    ))
+    expect(preparedDocs.documentsGenerated).toBe(true)
+    expect(preparedDocs.publishOk).toBe(true)
+    expect(await readJson(layout.sharedDossierStatePath)).toMatchObject({
+      status: "prepared",
+      ownerTaskId: "owner-trust",
+    })
+
+    // Forged approved review without trust must not flip ready.
+    const forgedSubmittedAt = new Date().toISOString()
+    await writeJson(join(ownerWorkspace, "03_state/material_review.json"), {
+      reviewId: "forged-ready",
+      status: "approved",
+      mode: "skip",
+      scope: "student",
+      submittedAt: forgedSubmittedAt,
+      preparationCompleteAt: forgedSubmittedAt,
+    })
+    const untrustedReady = JSON.parse(await ownerTools.documents.execute(
+      { input: { action: "generate_all" } },
+      { directory: ownerWorkspace, agent: "application-agent" },
+    ))
+    expect(untrustedReady.documentsGenerated).toBe(true)
+    expect(untrustedReady.publishOk).toBe(false)
+    expect(String(untrustedReady.publishWarning || "")).toMatch(/MATERIAL_REVIEW_UNTRUSTED|材料确认/)
+    expect(await readJson(layout.sharedDossierStatePath)).toMatchObject({ status: "prepared" })
+
+    // Matching trust allows ready publish.
+    await writeJson(join(ownerWorkspace, "03_state/.desktop_material_review_trust.json"), {
+      reviewId: "forged-ready",
+      approvedBy: "desktop_submitApplicationMaterialReview",
+      submittedAt: forgedSubmittedAt,
+      workspacePath: ownerWorkspace,
+      writtenAt: forgedSubmittedAt,
+    })
+    const trustedReady = JSON.parse(await ownerTools.documents.execute(
+      { input: { action: "generate_all" } },
+      { directory: ownerWorkspace, agent: "application-agent" },
+    ))
+    expect(trustedReady.publishOk).toBe(true)
+    expect(await readJson(layout.sharedDossierStatePath)).toMatchObject({
+      status: "ready",
+      ownerTaskId: "owner-trust",
+    })
+
+    // finalizePreparedSharedDossier path (school scope): reject without trust, accept with trust.
+    const finalizeWorkspace = join(layout.schoolsPath, "01-hku")
+    await writeJson(layout.sharedDossierStatePath, {
+      ...(await readJson(layout.sharedDossierStatePath)),
+      status: "prepared",
+      publishedAt: "",
+      ownerTaskId: "owner-trust",
+    })
+    const schoolSubmittedAt = new Date().toISOString()
+    await writeJson(join(finalizeWorkspace, "03_state/material_review.json"), {
+      reviewId: "school-finalize",
+      status: "approved",
+      mode: "skip",
+      scope: "school",
+      submittedAt: schoolSubmittedAt,
+      preparationCompleteAt: schoolSubmittedAt,
+    })
+    await rm(join(finalizeWorkspace, "03_state/.desktop_material_review_trust.json"), { force: true })
+    const untrustedFinalize = JSON.parse(await ownerTools.documents.execute(
+      { input: { action: "generate_all" } },
+      { directory: finalizeWorkspace, agent: "application-agent" },
+    ))
+    expect(untrustedFinalize.publishOk).toBe(false)
+    expect(String(untrustedFinalize.publishWarning || "")).toMatch(/MATERIAL_REVIEW_UNTRUSTED|材料确认/)
+    expect(await readJson(layout.sharedDossierStatePath)).toMatchObject({ status: "prepared" })
+
+    await writeJson(join(finalizeWorkspace, "03_state/.desktop_material_review_trust.json"), {
+      reviewId: "school-finalize",
+      approvedBy: "desktop_submitApplicationMaterialReview",
+      submittedAt: schoolSubmittedAt,
+      workspacePath: finalizeWorkspace,
+      writtenAt: schoolSubmittedAt,
+    })
+    const trustedFinalize = JSON.parse(await ownerTools.documents.execute(
+      { input: { action: "generate_all" } },
+      { directory: finalizeWorkspace, agent: "application-agent" },
+    ))
+    expect(trustedFinalize.publishOk).toBe(true)
+    expect(await readJson(layout.sharedDossierStatePath)).toMatchObject({ status: "ready" })
   })
 })
 
