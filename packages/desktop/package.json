@@ -2,7 +2,7 @@
   "name": "@terra-edu/application-agent-desktop",
   "private": true,
   "description": "Terra-Edu independent application automation Agent desktop app.",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "type": "module",
   "license": "MIT",
   "homepage": "https://terra-edu.local/application-agent",
