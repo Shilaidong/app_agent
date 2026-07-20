@@ -78,6 +78,12 @@ async function failAfterRuntimeSetup(message: string): Promise<never> {
 
 if (!existsSync(sourceEgoLite)) fail("packaged ego lite source is missing")
 
+const EGO_BROWSER_SERVICE_LABEL = "com.citrolabs.ego.lite.ego-browser"
+const mayPurgeResiduals =
+  process.env.CI === "true" ||
+  process.env.GITHUB_ACTIONS === "true" ||
+  process.env.TERRA_EDU_GUI_SMOKE_PURGE_RESIDUALS === "1"
+
 function pids(pattern: string) {
   const result = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" })
   return new Set(
@@ -100,19 +106,81 @@ function egoAppPids() {
   return pids("ego lite.app/Contents/")
 }
 
-function hasEgoBrowserService() {
-  const user = spawnSync("/usr/bin/id", ["-u"], { encoding: "utf8" })
-  if (user.status !== 0) fail(`could not read the macOS user ID: ${user.stderr || user.error?.message || "unknown error"}`)
-  return spawnSync("/bin/launchctl", ["print", `gui/${user.stdout.trim()}`], { encoding: "utf8", timeout: 5_000 }).stdout.includes(
-    "com.citrolabs.ego.lite.ego-browser",
-  )
+function egoHelperPids() {
+  return pids("/Helpers/ego-browser")
 }
 
-const existingBundledAppPids = bundledAppPids()
-const existingBundledRuntimePids = bundledRuntimePids()
-if (existingBundledAppPids.size > 0 || existingBundledRuntimePids.size > 0 || egoAppPids().size > 0 || hasEgoBrowserService()) {
+function macUid() {
+  const user = spawnSync("/usr/bin/id", ["-u"], { encoding: "utf8" })
+  if (user.status !== 0) fail(`could not read the macOS user ID: ${user.stderr || user.error?.message || "unknown error"}`)
+  return user.stdout.trim()
+}
+
+// Print the exact service target. Do not substring-search the whole gui domain:
+// macOS error text for a missing service also contains the label.
+function hasEgoBrowserService() {
+  const printed = spawnSync("/bin/launchctl", ["print", `gui/${macUid()}/${EGO_BROWSER_SERVICE_LABEL}`], {
+    encoding: "utf8",
+    timeout: 5_000,
+  })
+  const text = `${printed.stdout}${printed.stderr}`
+  if (/Could not find service/i.test(text) || /no such process/i.test(text)) return false
+  return text.includes("= {") || /state\s*=/.test(text)
+}
+
+function describeEgoResiduals() {
+  const samples = (set: Set<number>) =>
+    [...set]
+      .slice(0, 8)
+      .map((pid) => {
+        const ps = spawnSync("/bin/ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 2_000 })
+        return `${pid}:${(ps.stdout || "").trim() || "?"}`
+      })
+      .join(" | ")
+  const app = egoAppPids()
+  const helper = egoHelperPids()
+  const service = hasEgoBrowserService()
+  return `bundledApp=${[...bundledAppPids()].join(",") || "none"}; bundledRuntime=${[...bundledRuntimePids()].join(",") || "none"}; egoApp=${samples(app) || "none"}; egoHelper=${samples(helper) || "none"}; service=${service}`
+}
+
+function bootoutEgoBrowserService() {
+  const uid = macUid()
+  spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/${EGO_BROWSER_SERVICE_LABEL}`], { encoding: "utf8", timeout: 5_000 })
+  spawnSync("/bin/launchctl", ["kill", "SIGKILL", `gui/${uid}/${EGO_BROWSER_SERVICE_LABEL}`], { encoding: "utf8", timeout: 5_000 })
+}
+
+async function purgeDialogSmokeResiduals() {
+  bootoutEgoBrowserService()
+  for (let attempt = 1; attempt <= 24; attempt += 1) {
+    const victims = [...egoAppPids(), ...egoHelperPids(), ...bundledRuntimePids()]
+    for (const pid of victims) spawnSync("/bin/kill", ["-KILL", String(pid)], { encoding: "utf8" })
+    await Bun.sleep(250)
+    if (egoAppPids().size === 0 && egoHelperPids().size === 0 && bundledRuntimePids().size === 0 && !hasEgoBrowserService()) return true
+    if (attempt % 4 === 0) bootoutEgoBrowserService()
+  }
+  return egoAppPids().size === 0 && egoHelperPids().size === 0 && bundledRuntimePids().size === 0 && !hasEgoBrowserService()
+}
+
+let existingBundledAppPids = bundledAppPids()
+let existingBundledRuntimePids = bundledRuntimePids()
+let residualActive =
+  existingBundledAppPids.size > 0 || existingBundledRuntimePids.size > 0 || egoAppPids().size > 0 || egoHelperPids().size > 0 || hasEgoBrowserService()
+if (residualActive && mayPurgeResiduals) {
+  console.log(`GUI dialog smoke: purging pre-existing Ego residuals once (${describeEgoResiduals()})`)
+  const cleaned = await purgeDialogSmokeResiduals()
+  existingBundledAppPids = bundledAppPids()
+  existingBundledRuntimePids = bundledRuntimePids()
+  residualActive =
+    !cleaned ||
+    existingBundledAppPids.size > 0 ||
+    existingBundledRuntimePids.size > 0 ||
+    egoAppPids().size > 0 ||
+    egoHelperPids().size > 0 ||
+    hasEgoBrowserService()
+}
+if (residualActive) {
   fail(
-    "TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE: another Ego Lite browser service is active. The smoke test will not use, close, or replace it; close the other Ego Lite app before retrying this release check.",
+    `TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE: another Ego Lite browser service is active (${describeEgoResiduals()}). The smoke test will not use, close, or replace it; close the other Ego Lite app before retrying this release check.`,
   )
 }
 
