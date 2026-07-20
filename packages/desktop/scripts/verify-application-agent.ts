@@ -477,6 +477,20 @@ assert(
     !opencodeSource.includes("TERRA_EGO_NODE_PERMISSION_"),
   "The managed Ego wrapper must reject destructive closure while preserving a direct pinned-helper execution path",
 )
+assert(
+  opencodeSource.includes("TERRA_EGO_NODE_CAPABILITY_DENIED") &&
+    opencodeSource.includes("exit 85") &&
+    opencodeSource.includes("require[[:space:]]*") &&
+    opencodeSource.includes("(fs|child_process") &&
+    !opencodeSource.includes("grep -Eiq 'require'"),
+  "The managed Ego wrapper must reject dangerous Node require/import patterns with exit 85 without bare require greps",
+)
+assert(
+  opencodeSource.includes("if (ready)") &&
+    opencodeSource.includes("materialReviewPrepareError") &&
+    opencodeSource.includes("finalizePreparedSharedDossier(workspace, task)"),
+  "Ready shared-dossier publish and finalize must gate on desktop material-review trust",
+)
 assert(opencodeSource.includes("managedEgoBrowserSkill") && opencodeSource.includes("Never reload an application page") && opencodeSource.includes("never close tabs programmatically") && opencodeSource.includes("Further filling requires the advisor to choose 重新填写"), "Generated Ego guidance must retain the locked upstream APIs while removing conflicting reload, close, and post-completion reuse instructions")
 assert(opencodeSource.includes("READINESS_ATTEMPTS") && opencodeSource.includes('2>"$READINESS_STDERR"') && opencodeSource.includes("最后一次 taskspace list 退出码"), "The managed Ego wrapper must retry cold-start readiness and preserve the final real diagnostic")
 assert(mainSource.includes('egoBrowserSingleLaunchSentinel: join(runtimeRoot, "single-launch.claim")') && opencodeSource.includes("SINGLE_LAUNCH_SENTINEL"), "The packaged GUI smoke must compile an atomic one-launch guard into its isolated wrapper")

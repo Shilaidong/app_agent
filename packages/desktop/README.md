@@ -5,7 +5,7 @@
 ## 当前交付形态
 
 - App 名称：Terra-Edu Application Agent
-- 最新版本：`1.1.2`
+- 最新版本：`1.1.3`
 - 发布页：https://github.com/Shilaidong/app_agent/releases
 - 安装包：macOS arm64 DMG / ZIP
 - 签名：ad-hoc signing

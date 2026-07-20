@@ -413,6 +413,36 @@ if [ "\${1:-}" = "nodejs" ]; then
     printf '%s\\n' 'BROWSER_SAFETY_OBSERVATION_REQUIRED: after alert_evidence_lost recovery, only a pageInfo/list/snapshot observation round is allowed before any write, navigation, or control-change command.' >&2
     exit 84
   fi
+  # Text blacklist only (defense-in-depth / speed bump). Anchored require/import patterns
+  # avoid false positives on "required field" form text. Concatenation, encoding, and
+  # indirect module loading can still evade — this targets model shortcuts, not deliberate bypass.
+  # Do not switch to Node Permission Model here: Ego itself writes screenshots/profile/cache.
+  if /usr/bin/grep -Eiq "require[[:space:]]*\\([[:space:]]*['\\"](node:)?(fs|child_process|os|net|http|https|dgram|dns|tls|worker_threads|vm|cluster|module|v8|inspector|perf_hooks)" "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_NODE_CAPABILITY_DENIED: heredoc 禁止 require() 加载 fs/child_process 等危险 Node 内置模块（文本黑名单为纵深防御，非完整安全边界）。' >&2
+    exit 85
+  fi
+  if /usr/bin/grep -Eiq "import[[:space:]]*\\([[:space:]]*['\\"](node:)?(fs|child_process|os|net|http|https|dgram|dns|tls|worker_threads|vm|cluster|module|v8|inspector|perf_hooks)" "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_NODE_CAPABILITY_DENIED: heredoc 禁止 import() 动态加载 fs/child_process 等危险 Node 内置模块（文本黑名单为纵深防御，非完整安全边界）。' >&2
+    exit 85
+  fi
+  if /usr/bin/grep -Eiq 'process[[:space:]]*\\.[[:space:]]*binding|process[[:space:]]*\\.[[:space:]]*dlopen|module[[:space:]]*\\.[[:space:]]*constructor' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_NODE_CAPABILITY_DENIED: heredoc 禁止 process.binding / process.dlopen / module.constructor 等危险 Node 能力（文本黑名单为纵深防御，非完整安全边界）。' >&2
+    exit 85
+  fi
+  # require[^[:alnum:]_] avoids matching the substring "require" inside "required".
+  if /usr/bin/grep -Eiq 'Function[[:space:]]*\\(.*require[^[:alnum:]_]|return[[:space:]]+require[[:space:]]*\\(' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_NODE_CAPABILITY_DENIED: heredoc 禁止 Function()/return require 规避写法加载 Node 内置模块（文本黑名单为纵深防御，非完整安全边界）。' >&2
+    exit 85
+  fi
+  # Backtick module specifiers: shell single-quoted pattern so \` is a literal backtick (TS template escapes it).
+  if /usr/bin/grep -Eiq 'require[[:space:]]*\\([[:space:]]*\`(node:)?(fs|child_process|os|net|http|https|dgram|dns|tls|worker_threads|vm|cluster|module|v8|inspector|perf_hooks)' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_NODE_CAPABILITY_DENIED: heredoc 禁止 require() 以反引号加载 fs/child_process 等危险 Node 内置模块（文本黑名单为纵深防御，非完整安全边界）。' >&2
+    exit 85
+  fi
+  if /usr/bin/grep -Eiq 'import[[:space:]]*\\([[:space:]]*\`(node:)?(fs|child_process|os|net|http|https|dgram|dns|tls|worker_threads|vm|cluster|module|v8|inspector|perf_hooks)' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_NODE_CAPABILITY_DENIED: heredoc 禁止 import() 以反引号动态加载 fs/child_process 等危险 Node 内置模块（文本黑名单为纵深防御，非完整安全边界）。' >&2
+    exit 85
+  fi
 fi
 if [ -f "$WORKSPACE/03_state/material_review.json" ] && /usr/bin/grep -Eq '"status"[[:space:]]*:[[:space:]]*"pending"' "$WORKSPACE/03_state/material_review.json"; then
   die "Terra-Edu material review is pending. Ask the advisor to confirm materials in the desktop app before starting ego-browser."
@@ -1538,6 +1568,16 @@ async function publishSharedDossier(workspace: string, task: any, ready: boolean
   if (!ready && access.state.status === "prepared") {
     return { sharedWorkspacePath: access.shared.workspace, preparedAt: access.state.preparedAt || access.state.updatedAt || "", publishedAt: "", hashes: access.state.hashes || {} }
   }
+  // Trust only when making the dossier consumable (ready). prepared (ready=false) runs
+  // before consultant review and must stay ungated — documents tool calls it pre-approval.
+  // Hashes below only detect post-publish tamper: they are computed from content just copied
+  // in, so they cannot detect a forged pre-publish profile.
+  if (ready) {
+    const review = await readJson(join(workspace, "03_state", "material_review.json"), {})
+    const trust = await readJson(materialReviewTrustPath(workspace), null)
+    const untrusted = materialReviewPrepareError(review, trust)
+    if (untrusted) throw new Error(untrusted)
+  }
   const materialReview = ready ? await readJson(join(workspace, "03_state", "material_review.json"), {}) : {}
   const candidateProfile = ready && materialReview.scope === "student" && existsSync(String(materialReview.sharedProfileCandidatePath || ""))
     ? String(materialReview.sharedProfileCandidatePath)
@@ -1604,9 +1644,14 @@ async function publishSharedDossier(workspace: string, task: any, ready: boolean
   return { sharedWorkspacePath: access.shared.workspace, preparedAt, publishedAt: ready ? preparedAt : "", hashes }
 }
 
-async function finalizePreparedSharedDossier(task: any) {
+async function finalizePreparedSharedDossier(workspace: string, task: any) {
   const access = await sharedDossierAccess(task)
   if (!access || access.role !== "owner" || access.state.status !== "prepared") return undefined
+  // Flipping prepared → ready makes the dossier consumable by later schools; require desktop trust.
+  const review = await readJson(join(workspace, "03_state", "material_review.json"), {})
+  const trust = await readJson(materialReviewTrustPath(workspace), null)
+  const untrusted = materialReviewPrepareError(review, trust)
+  if (untrusted) throw new Error(untrusted)
   const publishedAt = new Date().toISOString()
   await writeAtomicJson(access.shared.manifest, {
     ...access.state,
@@ -2799,7 +2844,7 @@ export const documents = {
         : reviewComplete && materialReview.scope === "student"
           ? await publishSharedDossier(workspace, task, true)
           : reviewComplete
-            ? await finalizePreparedSharedDossier(task)
+            ? await finalizePreparedSharedDossier(workspace, task)
             : undefined
     } catch (error) {
       // Document generation already succeeded above; do not swallow that success into a tool failure.

@@ -549,6 +549,24 @@ async function verifyCuaStateTransitions(workspace: string) {
     const expectedMarker = input.includes("closeTab") ? "TERRA_EGO_UNSAFE_TASKSPACE_CLOSE" : "TERRA_EGO_UNSAFE_PAGE_RELOAD"
     assert(result.status === 81 && result.stderr.includes(expectedMarker), `Wrapper must reject direct and aliased application-page destruction paths before launching Ego: ${input}`)
   })
+  ;[
+    "const fs = require('fs')\nfs.writeFileSync('03_state/x.json', '{}')\n",
+    'const cp = require("child_process")\n',
+    "const mod = await import('fs')\n",
+    "const fs = require(`fs`)\n",
+    "const f = Function('return require')()('fs')\n",
+  ].forEach((input) => {
+    const result = spawnSync(wrapper, ["nodejs"], { cwd: workspace, encoding: "utf8", input })
+    assert(result.status === 85 && result.stderr.includes("TERRA_EGO_NODE_CAPABILITY_DENIED"), `Wrapper must reject dangerous Node capability use before launching Ego: ${input}`)
+  })
+  ;[
+    "const label = 'This is a required field'\n",
+    "const requiredFields = ['email']\ncliLog(requiredFields.join(','))\n",
+    'const f = new Function("return 1"); const t = "all required fields"\n',
+  ].forEach((input) => {
+    const result = spawnSync(wrapper, ["nodejs"], { cwd: workspace, encoding: "utf8", input })
+    assert(result.status !== 85 && !result.stderr.includes("TERRA_EGO_NODE_CAPABILITY_DENIED"), `Wrapper must not false-positive on form text containing required: ${input}`)
+  })
   await writeJson(join(workspace, "03_state/material_review.json"), { status: "pending", mode: "skip" })
   const stoppedLegacyControlWrapper = spawnSync(join(workspace, ".opencode/bin/ego-browser"), [], { cwd: workspace, encoding: "utf8" })
   assert(stoppedLegacyControlWrapper.status === 127, "A pending material review must block before ego lite starts.")

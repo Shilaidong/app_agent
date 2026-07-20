@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
@@ -26,6 +26,68 @@ const temporaryDirectories: string[] = []
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })))
+})
+
+describe("ego-browser nodejs capability blacklist", () => {
+  test("rejects require/import of fs and child_process with exit 85", async () => {
+    const fixture = await createSafetyFixture()
+    await writeOpenCodeConfig(fixture.workspacePath)
+
+    for (const script of [
+      "const fs = require('fs')\nfs.writeFileSync('03_state/x.json', '{}')\n",
+      'const cp = require("child_process")\n',
+      "const fs = require(\"node:fs\")\n",
+      "const mod = await import('fs')\n",
+      'const mod = await import("child_process")\n',
+      "process.binding('fs')\n",
+      "const r = module.constructor._load\n",
+      "const f = Function('return require')()('fs')\n",
+      "const fs = require(`fs`)\n",
+      "const mod = await import(`child_process`)\n",
+    ]) {
+      const result = await runWrapper(fixture.workspacePath, script)
+      expect(result.status).toBe(85)
+      expect(result.stderr).toContain("TERRA_EGO_NODE_CAPABILITY_DENIED")
+    }
+  })
+
+  test("does not false-positive on required field form text", async () => {
+    const fixture = await createSafetyFixture()
+    const helper = join(fixture.workspacePath, "ego-browser-helper-stub")
+    await writeFile(
+      helper,
+      `#!/bin/sh
+set -eu
+if [ "\${1:-}" = "taskspace" ] && [ "\${2:-}" = "list" ]; then
+  printf '%s\\n' '[]'
+  exit 0
+fi
+[ "\${1:-}" = "nodejs" ] || exit 64
+printf '%s\\n' 'STUB_OK'
+exit 0
+`,
+      "utf8",
+    )
+    await chmod(helper, 0o755)
+    await writeOpenCodeConfig(fixture.workspacePath, {
+      egoBrowserTestHelperPath: helper,
+      egoBrowserReadinessAttempts: 2,
+    })
+
+    for (const script of [
+      "const label = 'This is a required field'\ncliLog(label)\n",
+      "const requiredFields = ['email', 'phone']\ncliLog(JSON.stringify(requiredFields))\n",
+      "// requiredFields must not be empty; required field validation\nawait pageInfo()\n",
+      "const msg = 'Please complete all required fields before save'\n",
+      // R1: Function( + "required" must not match require[^[:alnum:]_]
+      'const f = new Function("return 1"); const t = "all required fields"\n',
+    ]) {
+      const result = await runWrapper(fixture.workspacePath, script)
+      expect(result.status).not.toBe(85)
+      expect(result.stderr).not.toContain("TERRA_EGO_NODE_CAPABILITY_DENIED")
+      expect(result.status).toBe(0)
+    }
+  })
 })
 
 describe("browser safety stop hard gates", () => {
