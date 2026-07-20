@@ -21,15 +21,37 @@ function escapeHtml(value: string) {
     .replaceAll("'", "&#39;")
 }
 
+const safeLinkProtocols = new Set(["http:", "https:", "mailto:", "tel:"])
+
+// Agent/scraped content is untrusted and the result is injected via innerHTML in the
+// renderer, so only allow known-safe URL schemes and reject javascript:/data:/etc.
+function sanitizeUrl(href: string) {
+  const trimmed = href.trim()
+  if (trimmed.startsWith("#") || trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../")) {
+    return trimmed
+  }
+  if (!URL.canParse(trimmed)) return "#"
+  return safeLinkProtocols.has(new URL(trimmed).protocol) ? trimmed : "#"
+}
+
 function renderTableCell(cell: Tokens.TableCell, parser?: { parseInline: (tokens: Token[]) => string }) {
   if (parser) return parser.parseInline(cell.tokens).replaceAll("\n", "<br>")
   return escapeHtml(cell.text.trim()).replaceAll("\n", "<br>")
 }
 
 renderer.link = ({ href, title, text }: Tokens.Link) => {
-  const titleAttr = title ? ` title="${title}"` : ""
-  return `<a href="${href}"${titleAttr} class="external-link" target="_blank" rel="noopener noreferrer">${text}</a>`
+  const titleAttr = title ? ` title="${escapeHtml(title)}"` : ""
+  return `<a href="${escapeHtml(sanitizeUrl(href))}"${titleAttr} class="external-link" target="_blank" rel="noopener noreferrer">${text}</a>`
 }
+
+renderer.image = ({ href, title, text }: Tokens.Image) => {
+  const titleAttr = title ? ` title="${escapeHtml(title)}"` : ""
+  return `<img src="${escapeHtml(sanitizeUrl(href))}" alt="${escapeHtml(text)}"${titleAttr}>`
+}
+
+// marked v15 passes raw HTML through untouched; escape it so untrusted markdown
+// cannot inject active markup (e.g. <img onerror>) into the renderer's innerHTML.
+renderer.html = ({ text }) => escapeHtml(text)
 
 renderer.table = function (token: Tokens.Table) {
   const headers = token.header.map((cell, index) => renderTableCell(cell, this.parser) || `字段 ${index + 1}`)
