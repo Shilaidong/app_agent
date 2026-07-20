@@ -118,13 +118,22 @@ export const layer = Layer.effect(
 
     const parseAuthContent = () => {
       try {
-        return JSON.parse(process.env.OPENCODE_AUTH_CONTENT ?? "")
-      } catch {}
+        return { ok: true as const, value: JSON.parse(process.env.OPENCODE_AUTH_CONTENT ?? "") }
+      } catch (cause) {
+        return { ok: false as const, cause }
+      }
     }
 
     const load: () => Effect.Effect<Writable, AuthError> = Effect.fnUntraced(function* () {
       if (process.env.OPENCODE_AUTH_CONTENT) {
-        const raw = parseAuthContent()
+        const parsed = parseAuthContent()
+        if (!parsed.ok) {
+          yield* Effect.logWarning("failed to parse OPENCODE_AUTH_CONTENT, ignoring env credentials").pipe(
+            Effect.annotateLogs({ cause: parsed.cause }),
+          )
+          return { version: 2, accounts: {}, active: {} }
+        }
+        const raw = parsed.value
         if (raw && typeof raw === "object") {
           if ("version" in raw && raw.version === 2) return raw as Writable
           return yield* writeMigrated(raw as Record<string, unknown>)

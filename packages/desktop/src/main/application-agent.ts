@@ -477,7 +477,9 @@ export async function listApplicationTasks(limit = 8): Promise<ApplicationTask[]
     try {
       const task = await getApplicationTask(workspacePath)
       if (isListableApplicationTask(task)) tasks.push(task)
-    } catch {}
+    } catch (error) {
+      console.warn("failed to read application task, skipping", workspacePath, error)
+    }
   }
   return tasks
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
