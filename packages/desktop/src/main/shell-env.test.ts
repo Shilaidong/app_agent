@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 
-import { isNushell, mergeShellEnv, parseShellEnv, resolveUserShell } from "./shell-env"
+import { getUserShell, isNushell, mergeShellEnv, parseShellEnv, resolveUserShell } from "./shell-env"
 
 describe("shell env", () => {
   test("parseShellEnv supports null-delimited pairs", () => {
@@ -46,5 +46,24 @@ describe("shell env", () => {
     expect(isNushell("/opt/homebrew/bin/nu")).toBe(true)
     expect(isNushell("C:\\Program Files\\nu.exe")).toBe(true)
     expect(isNushell("/bin/zsh")).toBe(false)
+  })
+
+  describe("getUserShell", () => {
+    const originalShell = process.env.SHELL
+
+    afterEach(() => {
+      if (originalShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = originalShell
+    })
+
+    test("prefers the SHELL environment variable", () => {
+      process.env.SHELL = "/usr/bin/fish"
+      expect(getUserShell()).toBe("/usr/bin/fish")
+    })
+
+    test("always resolves to a non-empty shell path", () => {
+      delete process.env.SHELL
+      expect(getUserShell().length).toBeGreaterThan(0)
+    })
   })
 })
