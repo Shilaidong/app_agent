@@ -1847,16 +1847,27 @@ function ApplicationAgentShell(props: {
                     </div>
                   </section>
                 </Show>
-                <Show when={currentTask().status === "等待顾问确认材料"}>
+                <Show when={currentTask().materialReviewNeedsConsultant || currentTask().status === "等待顾问确认材料" || currentTask().materialReview?.status === "pending"}>
                   <section class="material-review-gate" aria-live="polite">
                     <div class="material-review-heading">
                       <p>材料确认</p>
-                      <h2>确认后再启动申请平台</h2>
-                      <span>资料档案、缺失清单和阶段总结已生成。ego-lite 还没有启动。</span>
+                      <h2>
+                        {currentTask().materialReview?.status === "approved"
+                          ? "材料已确认，可开始填表"
+                          : "确认后再启动申请平台"}
+                      </h2>
+                      <span>
+                        {currentTask().materialReview?.status === "approved"
+                          ? "顾问已确认。若 Agent 仍卡在 preparationCompleteAt，请再点一次下方按钮写入同步完成标记。"
+                          : "资料档案、缺失清单和阶段总结已生成。未点确认前，面板会一直显示；与 Agent 聊天更新材料不会关掉本面板。ego-lite 还没有启动。"}
+                      </span>
                     </div>
                     <div class="material-review-summary">
                       <span>{taskCounts(currentTask()).totalFiles} 份已整理材料</span>
                       <span>{taskCounts(currentTask()).missingMaterials + taskCounts(currentTask()).missingInformation + taskCounts(currentTask()).uncertainItems} 项待处理</span>
+                      <Show when={currentTask().materialReview?.status}>
+                        <span>审核状态 {currentTask().materialReview?.status}</span>
+                      </Show>
                     </div>
                     <div class="material-review-actions">
                       <div class="material-review-folder">
@@ -1905,8 +1916,8 @@ function ApplicationAgentShell(props: {
                         >
                           把文字交给 AI 后开始填表
                         </button>
-                        <button type="button" disabled={busy()} onClick={() => void submitMaterialReview("skip")}>
-                          暂不补充，开始填表
+                        <button type="button" class="primary-action" disabled={busy()} onClick={() => void submitMaterialReview("skip")}>
+                          {currentTask().materialReview?.status === "approved" ? "确认同步完成并开始填表" : "暂不补充，开始填表"}
                         </button>
                       </div>
                     </div>

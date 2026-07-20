@@ -165,6 +165,16 @@ export type ApplicationTask = {
   materialReviewTamperMessage?: string
   browserHandoffPending?: boolean
   browserHandoffType?: string
+  materialReview?: {
+    status?: string
+    mode?: string
+    note?: string
+    summary?: string
+    submittedAt?: string
+    preparationCompleteAt?: string
+    reviewId?: string
+  }
+  materialReviewNeedsConsultant?: boolean
 }
 
 export type ApplicationMaterialReviewInput = {

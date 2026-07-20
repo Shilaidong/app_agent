@@ -1385,20 +1385,32 @@ async function materialReviewPreparationComplete(workspace: string, materialRevi
   if (Date.parse(String(materialReview.preparationCompleteAt || ""))) return true
   if (materialReview.mode === "skip") return true
   if (!Date.parse(String(materialReview.submittedAt || ""))) return false
-  if (!existsSync(join(workspace, "02_generated", "student_profile.md")) || !existsSync(join(workspace, "03_state", "missing_items.json"))) return false
   if (materialReview.mode === "note") {
+    // Note mode: consultant already authorized start. Complete when profile was updated after
+    // approval, or when there was no prior profile hash (common for school-local first notes).
     const profile = materialReview.scope === "student"
       ? String(materialReview.sharedProfileCandidatePath || "")
       : join(workspace, "02_generated", "student_profile.md")
     const before = String(materialReview.scope === "student" ? materialReview.sharedProfileSha256Before || "" : materialReview.profileSha256Before || "")
-    return Boolean(before) && Boolean(profile) && existsSync(profile) && before !== await hashFile(profile)
+    if (before && profile && existsSync(profile)) return before !== await hashFile(profile)
+    if (Date.parse(String(materialReview.noteAppliedAt || ""))) return true
+    return existsSync(join(workspace, "03_state", "missing_items.json"))
   }
+  if (!existsSync(join(workspace, "02_generated", "student_profile.md")) || !existsSync(join(workspace, "03_state", "missing_items.json"))) return false
   if (materialReview.mode !== "supplement_folder") return false
   const expected = Array.isArray(materialReview.sourceManifest)
     ? materialReview.sourceManifest.map((item: any) => String(item?.sha256 || "")).filter(Boolean)
     : []
   const applied = new Set(Array.isArray(materialReview.appliedSourceHashes) ? materialReview.appliedSourceHashes.map(String) : [])
   return expected.length > 0 && expected.every((hash: string) => applied.has(hash))
+}
+
+async function stampMaterialReviewPreparationComplete(workspace: string, materialReview: Record<string, any>) {
+  if (materialReview.status !== "approved" || Date.parse(String(materialReview.preparationCompleteAt || ""))) return materialReview
+  if (!(await materialReviewPreparationComplete(workspace, materialReview))) return materialReview
+  const next = { ...materialReview, preparationCompleteAt: new Date().toISOString(), noteAppliedAt: materialReview.noteAppliedAt || new Date().toISOString() }
+  await writeJson(join(workspace, "03_state", "material_review.json"), next)
+  return next
 }
 
 async function readJson(path: string, fallback: any) {
@@ -2708,14 +2720,22 @@ export const state = {
     const task = await loadTask(workspace)
     await appendAudit(workspace, "state", String(input.status || "update"), "started", input.message || "")
     const progress = ensureCuaProgress(await readJson(join(workspace, "03_state/application_progress.json"), {}))
+    const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
+    // Keep the desktop material-review panel sticky until the consultant clicks it.
+    if (materialReview.status === "pending" && input.status && input.status !== "等待顾问确认材料" && input.status !== "已暂停") {
+      await appendAudit(workspace, "state", String(input.status), "failed", "material review still pending", ctx)
+      throw new Error("MATERIAL_REVIEW_PANEL_REQUIRED: 材料确认面板仍在等待顾问点击，不能把状态改成 " + input.status + "。请保持“等待顾问确认材料”，并提醒顾问使用桌面确认面板。")
+    }
     if (input.status === "阶段性完成" && progress.egoBrowser?.preparedAt && !progress.egoBrowser?.completedAt) {
       await appendAudit(workspace, "state", String(input.status), "failed", "browser completion without successful complete_ego_task", ctx)
       throw new Error("BROWSER_COMPLETION_GATE_REQUIRED: ego-browser 已启动，但 complete_ego_task 尚未通过最新保存、页面/frame 观察、必填项和控制权门槛。不得仅凭历史 record_save_verified 把阶段标记为完成。")
     }
-    await saveTask(workspace, task, input.status, input.message)
+    const nextStatus = materialReview.status === "pending" ? "等待顾问确认材料" : input.status
+    await saveTask(workspace, task, nextStatus, input.message)
+    if (materialReview.status === "approved") await stampMaterialReviewPreparationComplete(workspace, materialReview)
     await appendLog(workspace, "agent", input.message)
-    await appendAudit(workspace, "state", String(input.status || "update"), "completed", input.message || "")
-    return "状态已更新：" + input.status
+    await appendAudit(workspace, "state", String(nextStatus || "update"), "completed", input.message || "")
+    return "状态已更新：" + nextStatus
   },
 }
 
@@ -2785,19 +2805,25 @@ export const documents = {
       // Document generation already succeeded above; do not swallow that success into a tool failure.
       publishWarning = error instanceof Error ? error.message : String(error)
     }
-    if (reviewComplete && !materialReview.preparationCompleteAt) {
-      await writeJson(join(workspace, "03_state/material_review.json"), {
+    let reviewAfterDocs = materialReview
+    if (materialReview.status === "approved") {
+      reviewAfterDocs = await stampMaterialReviewPreparationComplete(workspace, {
         ...materialReview,
-        preparationCompleteAt: new Date().toISOString(),
+        noteAppliedAt: materialReview.noteAppliedAt || new Date().toISOString(),
       })
     }
-    const needsMaterialReview = !progress.egoBrowser?.preparedAt && materialReview.status !== "approved"
-    const reviewAwaitingApplication = materialReview.status === "approved" && !reviewComplete
+    const reviewCompleteAfter = reviewAfterDocs.status === "approved" && await materialReviewPreparationComplete(workspace, reviewAfterDocs)
+    // Never clear an existing approved review back to pending. Sticky pending only when never approved.
+    const needsMaterialReview = !progress.egoBrowser?.preparedAt && reviewAfterDocs.status !== "approved"
+    const reviewAwaitingApplication = reviewAfterDocs.status === "approved" && !reviewCompleteAfter
     if (needsMaterialReview) {
+      const previousPending = reviewAfterDocs.status === "pending" ? reviewAfterDocs : {}
       await writeJson(join(workspace, "03_state/material_review.json"), {
+        ...previousPending,
         status: "pending",
-        requestedAt: new Date().toISOString(),
+        requestedAt: previousPending.requestedAt || new Date().toISOString(),
         summary: "材料、缺失项和顾问文档已生成。等待顾问决定补充文件夹、文字补充或暂不补充。",
+        updatedAt: new Date().toISOString(),
       })
     }
     await appendLog(workspace, "agent", "已根据 missing_items.json 生成申请文档。")
@@ -3555,13 +3581,14 @@ export const cua = {
       ].join("\\n")
     }
     if (input.action === "prepare_ego_task") {
-      const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
+      let materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
       const materialReviewTrust = await readJson(materialReviewTrustPath(workspace), null)
       const untrustedReview = materialReviewPrepareError(materialReview, materialReviewTrust)
       if (untrustedReview) {
         await appendAudit(workspace, "cua", auditAction, "failed", untrustedReview, ctx)
         throw new Error(untrustedReview)
       }
+      materialReview = await stampMaterialReviewPreparationComplete(workspace, materialReview)
       if (!(await materialReviewPreparationComplete(workspace, materialReview))) {
         await appendAudit(workspace, "cua", auditAction, "failed", "material review has not been approved and fully applied", ctx)
         throw new Error("材料确认或补充内容同步尚未完成。请停止，不要启动 ego-browser；等待 material_review.json 记录 preparationCompleteAt。")

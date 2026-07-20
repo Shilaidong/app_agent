@@ -68,6 +68,16 @@ export type ApplicationOcrProgress = {
   finishedAt?: string
 }
 
+export type ApplicationMaterialReviewSummary = {
+  status?: string
+  mode?: string
+  note?: string
+  summary?: string
+  submittedAt?: string
+  preparationCompleteAt?: string
+  reviewId?: string
+}
+
 export type ApplicationTask = {
   id: string
   slug: string
@@ -93,6 +103,8 @@ export type ApplicationTask = {
   materialReviewTamperMessage?: string
   browserHandoffPending?: boolean
   browserHandoffType?: string
+  materialReview?: ApplicationMaterialReviewSummary
+  materialReviewNeedsConsultant?: boolean
 }
 
 export type ApplicationMaterialReviewInput = {
@@ -539,6 +551,33 @@ export async function getApplicationTask(workspacePath: string): Promise<Applica
       }
     }
   }
+  const egoPrepared = Boolean(
+    progress &&
+      typeof progress === "object" &&
+      (progress as { egoBrowser?: { preparedAt?: string } }).egoBrowser?.preparedAt,
+  )
+  if (materialReview && typeof materialReview === "object") {
+    normalized.materialReview = {
+      status: stringValue(materialReview.status),
+      mode: stringValue(materialReview.mode),
+      note: stringValue(materialReview.note),
+      summary: stringValue(materialReview.summary),
+      submittedAt: stringValue(materialReview.submittedAt),
+      preparationCompleteAt: stringValue(materialReview.preparationCompleteAt),
+      reviewId: stringValue(materialReview.reviewId),
+    }
+    const pendingReview = materialReview.status === "pending"
+    const approvedAwaitingPrep =
+      materialReview.status === "approved" &&
+      !Date.parse(String(materialReview.preparationCompleteAt || "")) &&
+      !egoPrepared
+    normalized.materialReviewNeedsConsultant = pendingReview || approvedAwaitingPrep
+    // Sticky gate: while consultant has not finished the material-review panel path,
+    // surface the waiting status even if the agent rewrote task_state.status.
+    if (pendingReview && normalized.status !== "已暂停") {
+      normalized.status = "等待顾问确认材料"
+    }
+  }
   if (materialReviewTamperDetected(materialReview, materialReviewTrust)) {
     normalized.materialReviewTampered = true
     normalized.materialReviewTamperMessage =
@@ -613,7 +652,15 @@ export async function continueApplicationTask(workspacePath: string): Promise<Ap
 
 export async function submitApplicationMaterialReview(workspacePath: string, input: ApplicationMaterialReviewInput): Promise<ApplicationTask> {
   const task = await getApplicationTask(workspacePath)
-  if (task.status !== "等待顾问确认材料") {
+  const existingReview = await readJson<{ status?: string; preparationCompleteAt?: string }>(
+    join(workspacePath, "03_state/material_review.json"),
+    {},
+  )
+  const canSubmit =
+    task.status === "等待顾问确认材料" ||
+    existingReview.status === "pending" ||
+    (existingReview.status === "approved" && !Date.parse(String(existingReview.preparationCompleteAt || "")))
+  if (!canSubmit) {
     throw new Error("当前不在材料确认阶段，不能提交补充内容。")
   }
 
@@ -654,6 +701,10 @@ export async function submitApplicationMaterialReview(workspacePath: string, inp
   }
   await updateSharedDossierAfterMaterialReview(task, input.mode, scope, submittedAt)
   const reviewId = randomUUID()
+  // skip/note can proceed once the consultant has confirmed on desktop. supplement_folder
+  // still waits for materials tools to apply hashes before preparationCompleteAt is stamped.
+  const preparationCompleteAt =
+    input.mode === "skip" || input.mode === "note" ? submittedAt : undefined
   await writeJson(join(workspacePath, "03_state/material_review.json"), {
     reviewId,
     status: "approved",
@@ -666,7 +717,8 @@ export async function submitApplicationMaterialReview(workspacePath: string, inp
     sharedProfileCandidatePath: sharedProfileCandidatePath || undefined,
     sharedProfileSha256Before: sharedProfileCandidatePath ? await fileSha256(sharedProfileCandidatePath) : undefined,
     submittedAt,
-    preparationCompleteAt: input.mode === "skip" ? submittedAt : undefined,
+    preparationCompleteAt,
+    noteAppliedAt: input.mode === "note" ? submittedAt : undefined,
   })
   await writeJson(
     materialReviewTrustPath(workspacePath),
