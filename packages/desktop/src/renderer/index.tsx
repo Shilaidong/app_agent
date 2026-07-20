@@ -1309,6 +1309,31 @@ function ApplicationAgentShell(props: {
     void window.api.hasOpenCodeGoApiKey().then(setGoConfigured)
     void refreshAuthStatus()
     void loadApplicationTasks()
+    // Restore the last active session after an app restart so the material
+    // review panel buttons work without forcing the consultant to re-click the
+    // task. persistActiveSession writes this key on every task switch; read it
+    // back, find the sidecar session for that workspace, and reload the task.
+    try {
+      const stored = localStorage.getItem(activeApplicationSessionKey)
+      if (stored) {
+        const parsed = JSON.parse(stored) as { workspacePath?: string }
+        const workspacePath = parsed.workspacePath
+        if (workspacePath) {
+          void (async () => {
+            const session = await window.api.findApplicationAgentSession(workspacePath)
+            if (!session) return
+            const latestTask = await window.api.getApplicationTask(workspacePath).catch(() => null)
+            if (!latestTask) return
+            setOpenCodeSession(session)
+            setTask(latestTask)
+            setInput(latestTask.input)
+            void refreshAgentMessages(session)
+          })()
+        }
+      }
+    } catch {
+      // Corrupt localStorage entry is not fatal; ignore and let the consultant pick a task.
+    }
   })
 
   createEffect(() => {

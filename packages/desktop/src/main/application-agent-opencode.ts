@@ -4710,13 +4710,16 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
     : ""
   const sharedEditDeny = overrides?.sharedWorkspacePath && existsSync(overrides.sharedWorkspacePath)
     ? {
-        ...authoritativeEditDenyPatterns(overrides.sharedWorkspacePath, [
-          "03_state/shared_dossier_state.json",
-          "02_generated/student_profile.md",
-          "03_state/materials_index.json",
-        ]),
-        ...(sharedReadPattern ? { [sharedReadPattern]: "deny" } : {}),
+        // Deny the shared authoritative files only by their absolute shared path.
+        // The relative/glob forms (e.g. "02_generated/student_profile.md" and
+        // "**/02_generated/student_profile.md") are intentionally NOT used here:
+        // they would also match the school-local copy, which the owner school
+        // must be able to write. sharedReadPattern ("../../shared/**") already
+        // covers every relative access into the shared workspace.
         [overrides.sharedWorkspacePath.replaceAll("\\", "/") + "/03_state/shared_dossier_state.json"]: "deny",
+        [overrides.sharedWorkspacePath.replaceAll("\\", "/") + "/02_generated/student_profile.md"]: "deny",
+        [overrides.sharedWorkspacePath.replaceAll("\\", "/") + "/03_state/materials_index.json"]: "deny",
+        ...(sharedReadPattern ? { [sharedReadPattern]: "deny" } : {}),
       }
     : {}
   await mkdir(join(base, "agents"), { recursive: true })

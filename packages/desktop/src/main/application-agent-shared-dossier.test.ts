@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdtemp, mkdir, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { writeOpenCodeConfig } from "./application-agent-opencode"
@@ -391,6 +391,23 @@ describe("shared student dossier tools", () => {
     ))
     expect(trustedFinalize.publishOk).toBe(true)
     expect(await readJson(layout.sharedDossierStatePath)).toMatchObject({ status: "ready" })
+  })
+
+  test("owner school can write its local student_profile.md; shared path stays denied", async () => {
+    const root = await temporaryDirectory()
+    const layout = await createStudentWorkspace(join(root, "赵六-申请批次"))
+    const ownerWorkspace = join(layout.schoolsPath, "01-cuhk")
+    await schoolFixture(ownerWorkspace, layout.sharedWorkspacePath, "owner-profile", 1)
+    await writeOpenCodeConfig(ownerWorkspace, { sharedWorkspacePath: layout.sharedWorkspacePath })
+    const config = JSON.parse(await readFile(join(ownerWorkspace, ".opencode/opencode.json"), "utf8"))
+    const edit = config.permission.edit
+    // Shared absolute paths must stay denied so reader schools cannot forge the shared dossier.
+    expect(edit[layout.sharedWorkspacePath.replaceAll("\\", "/") + "/02_generated/student_profile.md"]).toBe("deny")
+    expect(edit[layout.sharedWorkspacePath.replaceAll("\\", "/") + "/03_state/materials_index.json"]).toBe("deny")
+    // School-local copies must NOT be denied: the owner school generates student_profile.md locally.
+    expect(edit["02_generated/student_profile.md"]).not.toBe("deny")
+    expect(edit["**/02_generated/student_profile.md"]).not.toBe("deny")
+    expect(edit["03_state/materials_index.json"]).not.toBe("deny")
   })
 })
 
