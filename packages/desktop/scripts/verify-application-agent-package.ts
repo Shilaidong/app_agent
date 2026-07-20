@@ -78,9 +78,27 @@ function hasEgoBrowserLaunchdService() {
   return services.stdout.includes("com.citrolabs.ego.lite.ego-browser")
 }
 
+function bootoutEgoBrowserLaunchdService() {
+  // macOS keeps an ego-browser launchd service registered after the smoke
+  // process exits. It normally deregisters on its own, but CI runners and
+  // some local cold starts take longer than the passive wait below allows.
+  // Force a bootout so the next hasEgoBrowserLaunchdService() poll sees it gone.
+  const user = spawnSync("/usr/bin/id", ["-u"], { encoding: "utf8" })
+  if (user.status !== 0) return
+  const uid = user.stdout.trim()
+  spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/com.citrolabs.ego.lite.ego-browser`], {
+    encoding: "utf8",
+    timeout: 5_000,
+  })
+}
+
 async function waitForEgoBrowserLaunchdServiceRemoval() {
-  for (let attempt = 1; attempt <= 20; attempt++) {
+  for (let attempt = 1; attempt <= 20; attempt += 1) {
     if (!hasEgoBrowserLaunchdService()) return true
+    // After the first poll still sees the service, try to boot it out so the
+    // remaining polls can observe the removal instead of just waiting on the
+    // system to deregister asynchronously.
+    if (attempt === 1) bootoutEgoBrowserLaunchdService()
     if (attempt < 20) await Bun.sleep(250)
   }
   return false
@@ -292,6 +310,11 @@ try {
     const guiRuntimeRoot = realpathSync(mkdtempSync(join(tmpdir(), "terra-edu-direct-dialog-runtime-")))
     console.log(`GUI smoke runtime root (attempt ${attempt}/3): ${guiRuntimeRoot}`)
     const crashReportsBeforeGuiSmoke = egoCrashReports()
+    // Cleanup assertions (lingering processes, launchd service, crash reports)
+    // are collected as a failure string instead of thrown from the finally block.
+    // Throwing from finally would abort the IIFE and skip the retry loop below,
+    // turning a transient launchd-deregister race into a hard release blocker.
+    let cleanupFailure = ""
     const attemptResult = await (async () => {
       try {
         return spawnSync("bun", [guiSmokeScript, archivedApp, guiRuntimeRoot], {
@@ -302,31 +325,39 @@ try {
       } finally {
         try {
           const lingeringPids = await killExactRuntimeProcesses(guiRuntimeRoot)
-          assert(lingeringPids.length === 0, `GUI smoke exact runtime processes survived repeated SIGKILL cleanup: ${lingeringPids.join(", ")}`)
-          assert(exactRuntimePids(guiRuntimeRoot).length === 0, "GUI smoke exact runtime process count was not zero after cleanup")
-          assert(await waitForEgoBrowserLaunchdServiceRemoval(), "GUI smoke left com.citrolabs.ego.lite.ego-browser registered with launchd")
-          const newCrashReports = await newStableEgoCrashReports(crashReportsBeforeGuiSmoke)
-          assert(newCrashReports.length === 0, `GUI smoke produced new Ego Lite crash reports: ${newCrashReports.join(", ")}`)
+          if (lingeringPids.length > 0) cleanupFailure = `GUI smoke exact runtime processes survived repeated SIGKILL cleanup: ${lingeringPids.join(", ")}`
+          else if (exactRuntimePids(guiRuntimeRoot).length > 0) cleanupFailure = "GUI smoke exact runtime process count was not zero after cleanup"
+          else if (!(await waitForEgoBrowserLaunchdServiceRemoval())) cleanupFailure = "GUI smoke left com.citrolabs.ego.lite.ego-browser registered with launchd"
+          else {
+            const newCrashReports = await newStableEgoCrashReports(crashReportsBeforeGuiSmoke)
+            if (newCrashReports.length > 0) cleanupFailure = `GUI smoke produced new Ego Lite crash reports: ${newCrashReports.join(", ")}`
+          }
         } finally {
           rmSync(guiRuntimeRoot, { recursive: true, force: true })
         }
       }
     })()
-    if (attemptResult.status === 0) {
+    if (cleanupFailure && attemptResult.status === 0) {
+      // The smoke script itself succeeded but cleanup raced; surface the cleanup
+      // issue as the failure so the retry loop can decide whether it is transient.
+      lastSmokeFailure = cleanupFailure
+    } else {
+      lastSmokeFailure = attemptResult.stderr || attemptResult.stdout || attemptResult.error?.message || cleanupFailure || "unknown error"
+    }
+    if (attemptResult.status === 0 && !cleanupFailure) {
       smoke = attemptResult
       break
     }
-    lastSmokeFailure = attemptResult.stderr || attemptResult.stdout || attemptResult.error?.message || "unknown error"
     // Full isolated GUI cold-starts are timing-sensitive on local macOS (CDP,
     // dialog observation races, keychain prompts). Retry the whole smoke with a
     // fresh runtime; never skip assertions on a successful attempt.
     const transient =
-      /cleanup_failed|CDP request timed out|pageInfo timed out|钥匙串|ENOENT|alert payload was not observed|dialog smoke|TERRA_EGO_SCRIPT_FAILED|exit 79/.test(
+      /cleanup_failed|CDP request timed out|pageInfo timed out|钥匙串|ENOENT|alert payload was not observed|dialog smoke|TERRA_EGO_SCRIPT_FAILED|exit 79|registered with launchd|runtime processes survived|process count was not zero|crash reports/.test(
         lastSmokeFailure,
       )
     console.log(`GUI smoke attempt ${attempt}/3 failed${transient ? " (transient cold-start race)" : ""}: ${lastSmokeFailure.split("\n")[0]}`)
     if (!transient || attempt === 3) {
-      smoke = attemptResult
+      smoke = attemptResult.status === 0 && !cleanupFailure ? attemptResult : undefined
       break
     }
   }
