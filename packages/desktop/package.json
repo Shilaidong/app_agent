@@ -17,6 +17,7 @@
     "verify:application-agent:e2e": "bun ./scripts/verify-application-agent-e2e.ts",
     "verify:application-agent:package": "bun ./scripts/verify-application-agent-package.ts",
     "verify:ego-runtime": "bun ./scripts/verify-ego-runtime.ts",
+    "verify:ego-blacklist-corpus": "bun ./scripts/verify-ego-nodejs-blacklist-corpus.ts",
     "update:ego-runtime-lock:owner": "bun ./scripts/update-ego-runtime-lock.ts",
     "release:mac": "bun ./scripts/release-mac.ts",
     "release:mac:free": "bun ./scripts/release-mac.ts",
