@@ -1,5 +1,6 @@
 import { basename } from "node:path"
 import XLSX from "xlsx"
+import { isRecord } from "./util"
 
 const REQUIRED_HEADERS = ["学校名称", "专业名称", "专业链接", "截止日期", "申请平台链接", "申请平台账号", "备注"] as const
 
@@ -113,10 +114,6 @@ function cellText(value: unknown) {
     if (value.result instanceof Date) return formatDate(value.result)
   }
   return ""
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
 }
 
 function formatDate(value: Date) {

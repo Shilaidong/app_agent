@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { readFile, readdir, stat } from "node:fs/promises"
+import { join } from "node:path"
 
 import type { ApplicationTask } from "./application-agent"
+import { readJson, writeJsonAtomic } from "./json-store"
+import { isRecord } from "./util"
 
 export type ApplicationRefillAttempt = {
   id: string
@@ -286,26 +288,6 @@ async function readAttempts(path: string) {
     })
   if (!Array.isArray(attempts)) throw new Error("重新填写记录格式异常，请联系技术人员检查 03_state/filling_attempts.json。")
   return attempts as ApplicationRefillAttempt[]
-}
-
-async function readJson<T>(path: string, fallback: T): Promise<T> {
-  return readFile(path, "utf8")
-    .then((contents) => JSON.parse(contents) as T)
-    .catch(() => fallback)
-}
-
-async function writeJsonAtomic(path: string, value: unknown) {
-  await mkdir(dirname(path), { recursive: true })
-  const temporaryPath = `${path}.${randomUUID()}.tmp`
-  await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8")
-  await rename(temporaryPath, path).catch(async (error) => {
-    await rm(temporaryPath, { force: true })
-    throw error
-  })
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value))
 }
 
 async function materialReviewPreparationComplete(workspacePath: string, materialReview: Record<string, unknown>) {

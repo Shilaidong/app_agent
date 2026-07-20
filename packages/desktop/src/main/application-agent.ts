@@ -18,6 +18,8 @@ import {
   type ApplicationRefillAttempt,
 } from "./application-agent-refill"
 import { previewSelectionList, type SelectionListRow } from "./application-selection-list"
+import { readJson, writeJson } from "./json-store"
+import { isRecord } from "./util"
 import {
   authorizeBrowserSafetyContinue as authorizeBrowserSafetyContinueState,
   browserSafetyStopSummary,
@@ -1715,10 +1717,6 @@ function firstText(record: Record<string, unknown>, keys: string[]) {
   return undefined
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value))
-}
-
 async function writeGeneratedDocuments(
   workspacePath: string,
   input: ApplicationTaskInput,
@@ -1980,19 +1978,6 @@ async function appendLog(workspacePath: string, kind: "agent" | "cua", message: 
   const path = join(workspacePath, "04_logs", kind === "agent" ? "agent_log.md" : "cua_log.md")
   const current = existsSync(path) ? await readFile(path, "utf8") : ""
   await writeFile(path, `${current}- ${new Date().toISOString()} ${redactSensitiveText(message)}\n`, "utf8")
-}
-
-async function writeJson(path: string, value: unknown) {
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8")
-}
-
-async function readJson<T>(path: string, fallback: T): Promise<T> {
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as T
-  } catch {
-    return fallback
-  }
 }
 
 function makeTaskSlug(input: ApplicationTaskInput) {

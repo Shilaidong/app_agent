@@ -1,6 +1,6 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { randomUUID } from "node:crypto"
+import { readJson, writeJsonAtomic } from "./json-store"
 
 export type BrowserSafetyStopSummary = {
   kind: "cleanup_failed" | "alert_evidence_lost"
@@ -84,22 +84,6 @@ export function browserSafetyStopSummary(progress: unknown): BrowserSafetyStopSu
     resolution: typeof record.resolution === "string" ? record.resolution : undefined,
     resumeAuthorizedAt: typeof record.resumeAuthorizedAt === "string" ? record.resumeAuthorizedAt : undefined,
   }
-}
-
-async function readJson<T>(path: string, fallback: T): Promise<T> {
-  return readFile(path, "utf8")
-    .then((contents) => JSON.parse(contents) as T)
-    .catch(() => fallback)
-}
-
-async function writeJsonAtomic(path: string, value: unknown) {
-  await mkdir(dirname(path), { recursive: true })
-  const temporaryPath = `${path}.${randomUUID()}.tmp`
-  await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8")
-  await rename(temporaryPath, path).catch(async (error) => {
-    await rm(temporaryPath, { force: true })
-    throw error
-  })
 }
 
 async function appendAgentLog(workspacePath: string, message: string) {
