@@ -67,6 +67,28 @@ async function killExactRuntimeProcesses(runtimeRoot: string) {
   return exactRuntimePids(runtimeRoot)
 }
 
+// The GUI smoke launches the Ego Lite bundled inside the archived app. Helper
+// processes spawned from it carry the archived ego lite path in their command
+// line but NOT the runtime root, so killExactRuntimeProcesses misses them. If
+// they survive into the next retry, the dialog script's external-service guard
+// rejects the attempt with TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE. Kill
+// every process whose command line references the archived ego lite bundle so
+// the next smoke attempt starts from a clean slate.
+async function killEgoLiteProcesses(egoLitePath: string) {
+  const pattern = egoLitePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/Contents/"
+  let emptyScans = 0
+  for (let attempt = 1; attempt <= 24; attempt += 1) {
+    const result = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" })
+    const pids = result.stdout.split("\n").map((value) => Number(value.trim())).filter((pid) => Number.isInteger(pid) && pid > 0)
+    pids.forEach((pid) => spawnSync("/bin/kill", ["-KILL", String(pid)], { encoding: "utf8" }))
+    await Bun.sleep(250)
+    emptyScans = pids.length === 0 ? emptyScans + 1 : 0
+    if (emptyScans >= 3) return []
+  }
+  const result = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" })
+  return result.stdout.split("\n").map((value) => Number(value.trim())).filter((pid) => Number.isInteger(pid) && pid > 0)
+}
+
 function hasEgoBrowserLaunchdService() {
   const user = spawnSync("/usr/bin/id", ["-u"], { encoding: "utf8" })
   assert(user.status === 0, `Could not read the macOS user ID: ${user.stderr || user.error?.message || "unknown error"}`)
@@ -325,12 +347,24 @@ try {
       } finally {
         try {
           const lingeringPids = await killExactRuntimeProcesses(guiRuntimeRoot)
-          if (lingeringPids.length > 0) cleanupFailure = `GUI smoke exact runtime processes survived repeated SIGKILL cleanup: ${lingeringPids.join(", ")}`
-          else if (exactRuntimePids(guiRuntimeRoot).length > 0) cleanupFailure = "GUI smoke exact runtime process count was not zero after cleanup"
-          else if (!(await waitForEgoBrowserLaunchdServiceRemoval())) cleanupFailure = "GUI smoke left com.citrolabs.ego.lite.ego-browser registered with launchd"
-          else {
-            const newCrashReports = await newStableEgoCrashReports(crashReportsBeforeGuiSmoke)
-            if (newCrashReports.length > 0) cleanupFailure = `GUI smoke produced new Ego Lite crash reports: ${newCrashReports.join(", ")}`
+          if (lingeringPids.length > 0) {
+            cleanupFailure = `GUI smoke exact runtime processes survived repeated SIGKILL cleanup: ${lingeringPids.join(", ")}`
+          } else {
+            // Also kill helper processes spawned from the archived ego lite bundle.
+            // They do not carry the runtime root in their command line, so the
+            // exact-runtime kill above misses them and the next smoke attempt would
+            // trip the external-service guard.
+            const lingeringEgoPids = await killEgoLiteProcesses(archivedEgoLite)
+            if (lingeringEgoPids.length > 0) {
+              cleanupFailure = `GUI smoke left ego lite helper processes alive: ${lingeringEgoPids.join(", ")}`
+            } else if (exactRuntimePids(guiRuntimeRoot).length > 0) {
+              cleanupFailure = "GUI smoke exact runtime process count was not zero after cleanup"
+            } else if (!(await waitForEgoBrowserLaunchdServiceRemoval())) {
+              cleanupFailure = "GUI smoke left com.citrolabs.ego.lite.ego-browser registered with launchd"
+            } else {
+              const newCrashReports = await newStableEgoCrashReports(crashReportsBeforeGuiSmoke)
+              if (newCrashReports.length > 0) cleanupFailure = `GUI smoke produced new Ego Lite crash reports: ${newCrashReports.join(", ")}`
+            }
           }
         } finally {
           rmSync(guiRuntimeRoot, { recursive: true, force: true })
@@ -352,7 +386,7 @@ try {
     // dialog observation races, keychain prompts). Retry the whole smoke with a
     // fresh runtime; never skip assertions on a successful attempt.
     const transient =
-      /cleanup_failed|CDP request timed out|pageInfo timed out|钥匙串|ENOENT|alert payload was not observed|dialog smoke|TERRA_EGO_SCRIPT_FAILED|exit 79|registered with launchd|runtime processes survived|process count was not zero|crash reports/.test(
+      /cleanup_failed|CDP request timed out|pageInfo timed out|钥匙串|ENOENT|alert payload was not observed|dialog smoke|TERRA_EGO_SCRIPT_FAILED|exit 79|registered with launchd|runtime processes survived|process count was not zero|crash reports|helper processes alive|EXTERNAL_SERVICE_ACTIVE/.test(
         lastSmokeFailure,
       )
     console.log(`GUI smoke attempt ${attempt}/3 failed${transient ? " (transient cold-start race)" : ""}: ${lastSmokeFailure.split("\n")[0]}`)
