@@ -77,6 +77,11 @@ writeFileSync(
     "- The app is not submitted to the Mac App Store.",
     "- Application materials stay in the local Terra-Edu Application Agent workspace unless the consultant intentionally uploads files through an application portal.",
     "",
+    // One-time 1.1.3 upgrade note; safe to remove from 1.2.0 onward.
+    "## Upgrade Notes",
+    "",
+    "- Upgrading from 1.1.0 or earlier: if a workspace had its materials confirmed on the older build, the consultant needs to confirm once more in the material review panel before that student's dossier can be shared with the rest of the batch. Until then a batch may stop at its second school reporting the shared dossier is not ready (STUDENT_DOSSIER_NOT_READY). This is expected behaviour, not a failure.",
+    "",
   ].join("\n"),
   "utf8",
 )
