@@ -45,20 +45,83 @@ function run(command: string, args: string[], label: string, timeout = 30_000) {
   return result.stdout
 }
 
-function exactRuntimePids(runtimeRoot: string) {
-  const escapedRuntimeRoot = runtimeRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const result = spawnSync("/usr/bin/pgrep", ["-f", `(${escapedRuntimeRoot}/|${escapedRuntimeRoot}([[:space:]]|$))`], { encoding: "utf8" })
-  assert(result.status === 0 || result.status === 1, `Could not inspect exact GUI smoke runtime processes: ${result.stderr || result.error?.message || "unknown error"}`)
+const EGO_BROWSER_SERVICE_LABEL = "com.citrolabs.ego.lite.ego-browser"
+// Patterns that the GUI dialog preflight treats as "another Ego is active".
+// Keep these aligned with verify-application-agent-gui-dialog.ts.
+const EGO_LITE_PROCESS_PATTERNS = ["ego lite.app/Contents/", "/Helpers/ego-browser"] as const
+// CI runners have no interactive Ego session worth protecting. Local package
+// verification still refuses to clobber a real consultant Ego unless explicitly opted in.
+const purgePackageSmokeResiduals =
+  process.env.CI === "true" ||
+  process.env.GITHUB_ACTIONS === "true" ||
+  process.env.TERRA_EDU_GUI_SMOKE_PURGE_RESIDUALS === "1"
+
+function macUid() {
+  const user = spawnSync("/usr/bin/id", ["-u"], { encoding: "utf8" })
+  assert(user.status === 0, `Could not read the macOS user ID: ${user.stderr || user.error?.message || "unknown error"}`)
+  return user.stdout.trim()
+}
+
+function pidsMatching(pattern: string) {
+  const result = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" })
+  assert(result.status === 0 || result.status === 1, `Could not inspect processes matching ${pattern}: ${result.stderr || result.error?.message || "unknown error"}`)
   return result.stdout
     .split("\n")
     .map((value) => Number(value.trim()))
     .filter((pid) => Number.isInteger(pid) && pid > 0)
 }
 
+function exactRuntimePids(runtimeRoot: string) {
+  const escapedRuntimeRoot = runtimeRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return pidsMatching(`(${escapedRuntimeRoot}/|${escapedRuntimeRoot}([[:space:]]|$))`)
+}
+
+function egoLiteResidualPids() {
+  return [...new Set(EGO_LITE_PROCESS_PATTERNS.flatMap((pattern) => pidsMatching(pattern)))]
+}
+
+// Prefer printing the exact service target. Grepping `launchctl print gui/<uid>`
+// for a substring is brittle: the domain dump is large and macOS error text for a
+// missing service also contains the label.
+function hasEgoBrowserLaunchdService() {
+  const printed = spawnSync("/bin/launchctl", ["print", `gui/${macUid()}/${EGO_BROWSER_SERVICE_LABEL}`], {
+    encoding: "utf8",
+    timeout: 5_000,
+  })
+  const text = `${printed.stdout}${printed.stderr}`
+  if (/Could not find service/i.test(text) || /no such process/i.test(text)) return false
+  return text.includes("= {") || /state\s*=/.test(text)
+}
+
+function citrolabsEgoLaunchdLabels() {
+  const domain = spawnSync("/bin/launchctl", ["print", `gui/${macUid()}`], {
+    encoding: "utf8",
+    timeout: 5_000,
+  })
+  if (domain.status !== 0) return [EGO_BROWSER_SERVICE_LABEL]
+  const labels = new Set<string>([EGO_BROWSER_SERVICE_LABEL])
+  for (const match of domain.stdout.matchAll(/\b(com\.citrolabs\.[A-Za-z0-9._-]*ego[A-Za-z0-9._-]*)\b/gi)) {
+    labels.add(match[1])
+  }
+  return [...labels]
+}
+
+function bootoutEgoLaunchdServices() {
+  const uid = macUid()
+  for (const label of citrolabsEgoLaunchdLabels()) {
+    spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf8", timeout: 5_000 })
+    spawnSync("/bin/launchctl", ["kill", "SIGKILL", `gui/${uid}/${label}`], { encoding: "utf8", timeout: 5_000 })
+  }
+}
+
+async function killPids(pids: number[]) {
+  for (const pid of pids) spawnSync("/bin/kill", ["-KILL", String(pid)], { encoding: "utf8" })
+}
+
 async function killExactRuntimeProcesses(runtimeRoot: string) {
   let emptyScans = 0
   for (let attempt = 1; attempt <= 24; attempt++) {
-    exactRuntimePids(runtimeRoot).forEach((pid) => spawnSync("/bin/kill", ["-KILL", String(pid)], { encoding: "utf8" }))
+    await killPids(exactRuntimePids(runtimeRoot))
     await Bun.sleep(250)
     const remaining = exactRuntimePids(runtimeRoot)
     emptyScans = remaining.length === 0 ? emptyScans + 1 : 0
@@ -67,61 +130,52 @@ async function killExactRuntimeProcesses(runtimeRoot: string) {
   return exactRuntimePids(runtimeRoot)
 }
 
-// The GUI smoke launches the Ego Lite bundled inside the archived app. Helper
-// processes spawned from it carry the archived ego lite path in their command
-// line but NOT the runtime root, so killExactRuntimeProcesses misses them. If
-// they survive into the next retry, the dialog script's external-service guard
-// rejects the attempt with TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE. Kill
-// every process whose command line references the archived ego lite bundle so
-// the next smoke attempt starts from a clean slate.
-async function killEgoLiteProcesses(egoLitePath: string) {
-  const pattern = egoLitePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/Contents/"
+// Kill every Ego Lite / helper process the dialog preflight recognizes — not just
+// the archived-zip path. Helpers may keep the dist/mac-arm64 vendor path, a
+// managed Application Support runtime, or only "ego-browser" on the command line.
+async function killAllEgoLiteProcesses() {
   let emptyScans = 0
   for (let attempt = 1; attempt <= 24; attempt += 1) {
-    const result = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" })
-    const pids = result.stdout.split("\n").map((value) => Number(value.trim())).filter((pid) => Number.isInteger(pid) && pid > 0)
-    pids.forEach((pid) => spawnSync("/bin/kill", ["-KILL", String(pid)], { encoding: "utf8" }))
+    const pids = egoLiteResidualPids()
+    await killPids(pids)
     await Bun.sleep(250)
     emptyScans = pids.length === 0 ? emptyScans + 1 : 0
     if (emptyScans >= 3) return []
   }
-  const result = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" })
-  return result.stdout.split("\n").map((value) => Number(value.trim())).filter((pid) => Number.isInteger(pid) && pid > 0)
+  return egoLiteResidualPids()
 }
 
-function hasEgoBrowserLaunchdService() {
-  const user = spawnSync("/usr/bin/id", ["-u"], { encoding: "utf8" })
-  assert(user.status === 0, `Could not read the macOS user ID: ${user.stderr || user.error?.message || "unknown error"}`)
-  const services = spawnSync("/bin/launchctl", ["print", `gui/${user.stdout.trim()}`], {
-    encoding: "utf8",
-    timeout: 5_000,
-  })
-  assert(services.status === 0, `Could not inspect the macOS GUI launchd domain: ${services.stderr || services.error?.message || "unknown error"}`)
-  return services.stdout.includes("com.citrolabs.ego.lite.ego-browser")
-}
-
-function bootoutEgoBrowserLaunchdService() {
-  // macOS keeps an ego-browser launchd service registered after the smoke
-  // process exits. It normally deregisters on its own, but CI runners and
-  // some local cold starts take longer than the passive wait below allows.
-  // Force a bootout so the next hasEgoBrowserLaunchdService() poll sees it gone.
-  const user = spawnSync("/usr/bin/id", ["-u"], { encoding: "utf8" })
-  if (user.status !== 0) return
-  const uid = user.stdout.trim()
-  spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/com.citrolabs.ego.lite.ego-browser`], {
-    encoding: "utf8",
-    timeout: 5_000,
-  })
+// Clear launchd first so KeepAlive cannot respawn helpers while we SIGKILL them,
+// then kill processes, then re-check. Used as CI pre-flight and post-attempt cleanup.
+async function purgeEgoSmokeResiduals(label: string) {
+  bootoutEgoLaunchdServices()
+  const lingeringRuntimeAgnostic = await killAllEgoLiteProcesses()
+  bootoutEgoLaunchdServices()
+  for (let attempt = 1; attempt <= 40; attempt += 1) {
+    const pids = egoLiteResidualPids()
+    const service = hasEgoBrowserLaunchdService()
+    if (pids.length === 0 && !service) {
+      if (attempt === 1) console.log(`GUI smoke residual purge (${label}): clean`)
+      else console.log(`GUI smoke residual purge (${label}): clean after ${attempt} polls`)
+      return { ok: true as const, pids, service: false }
+    }
+    if (service) bootoutEgoLaunchdServices()
+    if (pids.length > 0) await killPids(pids)
+    await Bun.sleep(250)
+  }
+  const pids = egoLiteResidualPids()
+  const service = hasEgoBrowserLaunchdService()
+  console.log(
+    `GUI smoke residual purge (${label}): incomplete (pids=${pids.join(",") || "none"}; service=${service}; priorAgnostic=${lingeringRuntimeAgnostic.join(",") || "none"})`,
+  )
+  return { ok: pids.length === 0 && !service, pids, service }
 }
 
 async function waitForEgoBrowserLaunchdServiceRemoval() {
-  for (let attempt = 1; attempt <= 20; attempt += 1) {
+  for (let attempt = 1; attempt <= 40; attempt += 1) {
     if (!hasEgoBrowserLaunchdService()) return true
-    // After the first poll still sees the service, try to boot it out so the
-    // remaining polls can observe the removal instead of just waiting on the
-    // system to deregister asynchronously.
-    if (attempt === 1) bootoutEgoBrowserLaunchdService()
-    if (attempt < 20) await Bun.sleep(250)
+    if (attempt === 1 || attempt % 4 === 0) bootoutEgoLaunchdServices()
+    if (attempt < 40) await Bun.sleep(250)
   }
   return false
 }
@@ -326,9 +380,23 @@ try {
   // this canonical root so timeout and failure paths receive the same cleanup.
   // Retry once or twice for known-transient Ego CDP/keychain cold-start races;
   // never treat those retries as a fake pass of product semantics.
+  //
+  // CI history (1.1.3–1.1.7): attempt 1 often dies in ~7s with EXTERNAL_SERVICE
+  // *before* Ego is launched. Residual processes under dist/mac-arm64 or a prior
+  // managed runtime are invisible to path-scoped cleanup of the extracted zip.
+  // On CI we therefore purge every Ego residual before each attempt.
   let smoke: ReturnType<typeof spawnSync> | undefined
   let lastSmokeFailure = ""
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (purgePackageSmokeResiduals) {
+      const preflight = await purgeEgoSmokeResiduals(`pre-attempt-${attempt}`)
+      if (!preflight.ok) {
+        lastSmokeFailure = `Could not clear Ego residuals before GUI smoke (pids=${preflight.pids.join(",") || "none"}; service=${preflight.service})`
+        console.log(`GUI smoke attempt ${attempt}/3 failed: ${lastSmokeFailure}`)
+        if (attempt === 3) break
+        continue
+      }
+    }
     const guiRuntimeRoot = realpathSync(mkdtempSync(join(tmpdir(), "terra-edu-direct-dialog-runtime-")))
     console.log(`GUI smoke runtime root (attempt ${attempt}/3): ${guiRuntimeRoot}`)
     const crashReportsBeforeGuiSmoke = egoCrashReports()
@@ -341,25 +409,25 @@ try {
       try {
         return spawnSync("bun", [guiSmokeScript, archivedApp, guiRuntimeRoot], {
           encoding: "utf8",
-          env: { ...process.env, TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT: guiRuntimeRoot },
+          env: {
+            ...process.env,
+            TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT: guiRuntimeRoot,
+            // Tell the child it may re-purge once if a race re-registers Ego
+            // between the parent preflight and the child's EXTERNAL guard.
+            ...(purgePackageSmokeResiduals ? { TERRA_EDU_GUI_SMOKE_PURGE_RESIDUALS: "1" } : {}),
+          },
           timeout: 420_000,
         })
       } finally {
         try {
-          // Boot out the launchd service FIRST so it cannot restart the ego
-          // browser while we are killing its processes. If we kill first, the
-          // service's keep-alive policy respawns ego and the next smoke attempt
-          // trips the external-service guard.
-          bootoutEgoBrowserLaunchdService()
+          // Boot out first so KeepAlive cannot respawn helpers mid-kill, then
+          // kill runtime-scoped and any remaining Ego Lite processes globally.
+          bootoutEgoLaunchdServices()
           const lingeringPids = await killExactRuntimeProcesses(guiRuntimeRoot)
           if (lingeringPids.length > 0) {
             cleanupFailure = `GUI smoke exact runtime processes survived repeated SIGKILL cleanup: ${lingeringPids.join(", ")}`
           } else {
-            // Also kill helper processes spawned from the archived ego lite bundle.
-            // They do not carry the runtime root in their command line, so the
-            // exact-runtime kill above misses them and the next smoke attempt would
-            // trip the external-service guard.
-            const lingeringEgoPids = await killEgoLiteProcesses(archivedEgoLite)
+            const lingeringEgoPids = await killAllEgoLiteProcesses()
             if (lingeringEgoPids.length > 0) {
               cleanupFailure = `GUI smoke left ego lite helper processes alive: ${lingeringEgoPids.join(", ")}`
             } else if (exactRuntimePids(guiRuntimeRoot).length > 0) {
@@ -391,7 +459,7 @@ try {
     // dialog observation races, keychain prompts). Retry the whole smoke with a
     // fresh runtime; never skip assertions on a successful attempt.
     const transient =
-      /cleanup_failed|CDP request timed out|pageInfo timed out|钥匙串|ENOENT|alert payload was not observed|dialog smoke|TERRA_EGO_SCRIPT_FAILED|exit 79|registered with launchd|runtime processes survived|process count was not zero|crash reports|helper processes alive|EXTERNAL_SERVICE_ACTIVE/.test(
+      /cleanup_failed|CDP request timed out|pageInfo timed out|钥匙串|ENOENT|alert payload was not observed|dialog smoke|TERRA_EGO_SCRIPT_FAILED|exit 79|registered with launchd|runtime processes survived|process count was not zero|crash reports|helper processes alive|EXTERNAL_SERVICE_ACTIVE|Could not clear Ego residuals/.test(
         lastSmokeFailure,
       )
     console.log(`GUI smoke attempt ${attempt}/3 failed${transient ? " (transient cold-start race)" : ""}: ${lastSmokeFailure.split("\n")[0]}`)
