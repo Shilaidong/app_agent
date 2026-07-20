@@ -346,6 +346,11 @@ try {
         })
       } finally {
         try {
+          // Boot out the launchd service FIRST so it cannot restart the ego
+          // browser while we are killing its processes. If we kill first, the
+          // service's keep-alive policy respawns ego and the next smoke attempt
+          // trips the external-service guard.
+          bootoutEgoBrowserLaunchdService()
           const lingeringPids = await killExactRuntimeProcesses(guiRuntimeRoot)
           if (lingeringPids.length > 0) {
             cleanupFailure = `GUI smoke exact runtime processes survived repeated SIGKILL cleanup: ${lingeringPids.join(", ")}`
