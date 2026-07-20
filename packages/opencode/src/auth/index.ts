@@ -58,7 +58,11 @@ export const layer = Layer.effect(
       if (process.env.OPENCODE_AUTH_CONTENT) {
         try {
           return JSON.parse(process.env.OPENCODE_AUTH_CONTENT)
-        } catch (err) {}
+        } catch (cause) {
+          yield* Effect.logWarning("failed to parse OPENCODE_AUTH_CONTENT, falling back to auth file").pipe(
+            Effect.annotateLogs({ cause }),
+          )
+        }
       }
 
       const data = (yield* fsys.readJson(file).pipe(Effect.orElseSucceed(() => ({})))) as Record<string, unknown>
