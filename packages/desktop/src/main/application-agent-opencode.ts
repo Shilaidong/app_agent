@@ -904,7 +904,7 @@ ${task.input.sharedWorkspacePath ? `- 学生共享资料库（只通过申请专
 你必须优先使用这些 OpenCode Custom Tools 完成可工具化步骤，不要只靠普通 shell 临时拼流程：
 
 - application-agent_workspace：创建学校工作区；单校任务复制原始材料，选校批次则检查并同步学生共享资料库。
-- application-agent_materials：调用随包 PaddleOCR 提取扫描 PDF/图片文字并分类材料；选校批次只允许资料库负责人执行一次，后续学校直接复用共享结果。
+- application-agent_materials：extract_text 用随包 PaddleOCR 提取扫描 PDF/图片，并用系统能力抽取 docx/xlsx/txt 等文本；classify 分类材料。选校批次只允许资料库负责人执行一次，后续学校直接复用共享结果。
 - application-agent_documents：从 missing_items.json 生成信息表、材料表、Word 清单和任务总结。
 - application-agent_state：按统一 task_state.json schema 更新状态、统计和进度。
 - ego-browser skill：macOS 申请平台填表的唯一浏览器自动化后端。通过 ego lite 的独立 task space 打开/复用申请平台，使用 snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace 完成真人式观察、填写、复查和保存。
@@ -1019,7 +1019,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 默认流程：
 1. 优先调用 OpenCode 内置 todowrite 创建 10 步计划，并在每个阶段更新进度；如果 todowrite 调用失败一次，用文字计划继续，不要阻塞工作区初始化。
 2. 调用 application-agent_workspace 创建/刷新学校工作区。单校任务复制原始资料；选校批次先检查学生共享资料库角色。
-3. 只有工具返回 ownerPreparation:true 或单校任务时，才调用 application-agent_materials extract_text 运行 PaddleOCR；reusedSharedDossier:true 时必须跳过。
+3. 只有工具返回 ownerPreparation:true 或单校任务时，才调用 application-agent_materials extract_text（PaddleOCR 扫描 PDF/图片 + 自动抽取 docx/xlsx/txt 等文本）；reusedSharedDossier:true 时必须跳过。ownerPreparation:true 后不得在只更新“正在读取文件”状态后结束回合，同一会话必须立刻调用 extract_text。
 4. 只有资料库负责人或单校任务调用 application-agent_materials classify；后续学校直接复用共享材料索引。
 5. 使用 webfetch 读取申请链接；信息不足时用 websearch 查找官方学校/项目要求，并调用 application-agent_requirements 落盘。
 6. 资料库负责人生成只含学生事实的 student_profile.md；后续学校只读复用，不得重新生成。
@@ -1091,8 +1091,8 @@ const SKILL_DEFINITIONS = [
     body: `执行步骤：
 1. 只读取 00_original_backup，不读取或修改原始学生文件夹。
 2. 列出所有文件路径、扩展名、大小和可能用途。
-3. 先调用 application-agent_materials，action 使用 extract_text；它会使用随包 PaddleOCR，并把 PDF/图片结果写入 03_state/extracted_text/ 和 ocr_index.json。
-4. 再对有文本层的 PDF、doc/docx、xlsx/csv、txt/md 提取文字摘要；OCR 失败必须记录失败原因，不要假装读懂。
+3. 先调用 application-agent_materials，action 使用 extract_text；它会用随包 PaddleOCR 处理 PDF/图片，并用系统能力抽取 docx/xlsx/txt/md/csv，统一写入 03_state/extracted_text/ 与 ocr_index.json。
+4. 生成档案前必须阅读 extracted_text 中与信息收集表、成绩、语言、简历相关的文本；OCR 或 office 抽取失败必须记录失败原因，不要假装读懂。
 5. 无法识别用途的材料标记为 needs_review。
 
 输出要求：
@@ -1107,6 +1107,7 @@ const SKILL_DEFINITIONS = [
 2. 检查工具返回的 reusedSharedDossier 和 ownerPreparation。reusedSharedDossier:true 时必须删除计划中的 OCR、分类和学生档案生成步骤；ownerPreparation:true 时才执行一次共享材料准备。
 3. 单校任务确认本地标准目录；批次任务确认共享材料只在 shared 目录，学校目录只保存学校状态和兼容快照。
 4. 调用 application-agent_state：首次整理更新为“正在读取文件”，复用共享档案更新为“正在检查缺失内容”。
+5. ownerPreparation:true 时，更新状态后不得结束本回合：必须继续调用 application-agent_materials extract_text。
 
 输出要求：
 - 告诉顾问学校工作区、学生共享资料库以及本次是首次整理还是直接复用。
@@ -1116,9 +1117,9 @@ const SKILL_DEFINITIONS = [
     name: "material-organization",
     description: "按身份、学术、语言、文书、推荐、财务、平台相关、其他、待确认分类材料。",
     body: `执行步骤：
-1. 调用 application-agent_materials，先用 extract_text 生成扫描材料文字，再用 classify 对 00_original_backup 中的文件分类。
+1. 调用 application-agent_materials，先用 extract_text 生成扫描 OCR + office/text 抽取结果，再用 classify 对 00_original_backup 中的文件分类。
 2. 如果 application-agent_workspace 已返回 reusedSharedDossier:true，禁止执行本 skill；直接读取同步后的 materials_index 和共享档案。
-3. 优先结合文件名、共享资料库 03_state/extracted_text/ 中的文字和文件内容判断用途。
+3. 优先结合文件名、共享资料库 03_state/extracted_text/ 中的文字（尤其是信息收集表）判断用途。
 4. 分类目录必须覆盖 identity、academic、language、essays、recommendation、financial、platform_related、other、needs_review。
 5. 不确定材料进入 needs_review，并在 missing_items.json 中加入“待确认材料用途”。
 6. 分类完成后调用 application-agent_state 更新为“正在生成学生资料”。
@@ -1131,16 +1132,18 @@ const SKILL_DEFINITIONS = [
     name: "student-profile-generation",
     description: "根据已有材料生成结构化 student_profile.md，作为后续填表核心资料库。",
     body: `执行步骤：
-1. 读取 03_state/materials_index.json、文本/OCR 提取结果、已有缺失项和任务输入。
+1. 读取 03_state/materials_index.json、03_state/ocr_index.json / extracted_text 提取结果、已有缺失项和任务输入。
 2. 如果 application-agent_workspace 已返回 reusedSharedDossier:true，禁止重新生成或改写 student_profile.md；只读使用工具同步的共享档案快照。
-3. 只有资料库负责人生成或更新 02_generated/student_profile.md。档案只包含可跨学校复用的学生事实：基本信息、联系方式、家庭信息、教育经历、成绩、语言成绩、活动、奖项、推荐人事实和材料证据路径。
-4. 学校、项目、截止日期、学校特定文书观点、学校问题答案、学校缺失项和浏览器状态严禁写入学生核心档案；它们分别保存在 task_input、application_requirements、missing_items 和 application_progress。
-5. 对无法确认的字段写“待确认”，不要编造。
-6. 生成后调用 application-agent_state 更新为“正在检查缺失内容”。
+3. 优先阅读文件名含“信息收集”的 extracted_text 或 materials_index 对应文本；其中邮箱、电话、姓名、生日、地址、语言成绩、推荐人事实优先采信，不要再 question 让顾问重复填写表内已有字段。
+4. 只有资料库负责人生成或更新 02_generated/student_profile.md。档案只包含可跨学校复用的学生事实：基本信息、联系方式、家庭信息、教育经历、成绩、语言成绩、活动、奖项、推荐人事实和材料证据路径。
+5. 学校、项目、截止日期、学校特定文书观点、学校问题答案、学校缺失项和浏览器状态严禁写入学生核心档案；它们分别保存在 task_input、application_requirements、missing_items 和 application_progress。
+6. 对无法确认的字段写“待确认”，不要编造。
+7. 生成后调用 application-agent_state 更新为“正在检查缺失内容”。
 
 输出要求：
 - 告诉顾问档案路径和主要已确认信息。
-- 明确列出仍不确定的关键字段。`,
+- 明确列出仍不确定的关键字段。
+- 若信息收集表已在 extracted_text 中，禁止因“读不了 docx”向顾问索要表内已有的 163 邮箱/姓名/生日。`,
   },
   {
     name: "application-target-analysis",
@@ -1282,7 +1285,7 @@ ${skill.body}
 - 启动和复杂流程必须使用 todowrite 管理 10 步计划，并在 application_progress.json 同步关键状态。
 - 申请学校、项目和平台要求必须优先用 webfetch/websearch 获取官方来源，再调用 application-agent_requirements 落盘。
 - 已有信息不要重复要求。
-- 遇到扫描 PDF 或图片材料，先调用 application-agent_materials 的 extract_text；失败要记录，不要猜。
+- 遇到扫描 PDF/图片或 docx/xlsx/txt 材料，先调用 application-agent_materials 的 extract_text；失败要记录，不要猜。信息收集表正文必须进入 student_profile。
 - 不确定内容必须使用 OpenCode question 询问顾问，给出 2-3 个清楚选项并允许自定义回复。
 - 最终提交、付款、推荐信邀请和不可逆确认必须停止并交给顾问。
 `
@@ -2342,6 +2345,10 @@ async function saveTask(workspace: string, task: any, status?: string, message?:
 
 function categoryFor(name: string) {
   const lower = name.toLowerCase()
+  // Student info-collection sheets are high-value source-of-truth for profile/login fields.
+  if (/信息收集|申请信息收集|info.?collection|application.?info.?form|student.?info.?form/.test(lower)) {
+    return ["identity", "命中学生信息收集表关键词"]
+  }
   if (/passport|护照|id card|身份证|identity/.test(lower)) return ["identity", "命中身份材料关键词"]
   if (/transcript|成绩|在读|毕业|degree|diploma|academic|school report|成绩单/.test(lower)) return ["academic", "命中学术材料关键词"]
   if (/toefl|ielts|duolingo|sat|act|gre|gmat|托福|雅思|多邻国|语言/.test(lower)) return ["language", "命中语言或标化关键词"]
@@ -2352,6 +2359,99 @@ function categoryFor(name: string) {
   const ext = extname(lower)
   if ([".pdf", ".doc", ".docx", ".xls", ".xlsx", ".jpg", ".jpeg", ".png", ".heic"].includes(ext)) return ["other", "文件类型常见，但文件名无法判断具体用途"]
   return ["needs_review", "文件类型或文件名无法确认用途"]
+}
+
+function isScanMaterialPath(file: string) {
+  return /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(file)
+}
+
+function isNativeTextMaterialPath(file: string) {
+  return /\.(docx|doc|xlsx|xls|txt|md|csv|rtf)$/i.test(file)
+}
+
+function decodeXmlTextEntities(value: string) {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_match, digits) => String.fromCharCode(Number(digits)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_match, hex) => String.fromCharCode(parseInt(hex, 16)))
+}
+
+async function extractNativeDocumentText(file: string) {
+  const ext = extname(file).toLowerCase()
+  if ([".txt", ".md", ".csv"].includes(ext)) {
+    try {
+      const text = (await readFile(file, "utf8")).replace(/^\uFEFF/, "").trim()
+      return { text: text, error: text ? "" : "empty text file", method: "utf8" }
+    } catch (error) {
+      return { text: "", error: error instanceof Error ? error.message : String(error), method: "utf8" }
+    }
+  }
+  if (process.platform === "darwin") {
+    const viaTextutil = await execFileAsync("/usr/bin/textutil", ["-convert", "txt", "-stdout", file], {
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 90_000,
+      encoding: "utf8",
+    }).then(
+      (result) => ({ text: String(result.stdout || "").trim(), error: String(result.stderr || "").trim(), method: "textutil" }),
+      (error) => ({ text: "", error: error instanceof Error ? error.message : String(error), method: "textutil" }),
+    )
+    if (viaTextutil.text) return viaTextutil
+  }
+  if (ext === ".docx") {
+    const viaUnzip = await execFileAsync("/usr/bin/unzip", ["-p", file, "word/document.xml"], {
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 60_000,
+      encoding: "utf8",
+    }).then(
+      (result) => {
+        const joined = Array.from(String(result.stdout || "").matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g), (match) => match[1]).join("")
+        const text = decodeXmlTextEntities(joined).replace(/\s+/g, " ").trim()
+        return { text: text, error: text ? "" : "docx had no extractable text nodes", method: "docx-xml" }
+      },
+      (error) => ({ text: "", error: error instanceof Error ? error.message : String(error), method: "docx-xml" }),
+    )
+    return viaUnzip
+  }
+  return { text: "", error: "native text extraction unsupported for " + ext, method: "none" }
+}
+
+async function appendNativeTextExtractions(input: {
+  files: string[]
+  results: Array<{ file: string; output: string; textLength: number; error: string; sourceSha256?: string; method?: string }>
+  outputDir: string
+  workspace: string
+  layoutVersion: number
+  onProgress?: (done: number, total: number, fileName: string) => Promise<void>
+}) {
+  const pending = [] as Array<{ file: string; sourceSha256: string }>
+  for (const file of input.files) {
+    if (!isNativeTextMaterialPath(file)) continue
+    const sourceSha256 = await hashFile(file)
+    if (input.results.some((item) => item.sourceSha256 === sourceSha256)) continue
+    pending.push({ file: file, sourceSha256: sourceSha256 })
+  }
+  let done = 0
+  for (const item of pending) {
+    await ensureTaskIsActive(input.workspace)
+    const extracted = await extractNativeDocumentText(item.file)
+    const output = join(input.outputDir, item.sourceSha256 + ".txt")
+    if (extracted.text) await writeFile(output, extracted.text + "\n", "utf8")
+    input.results.push({
+      file: input.layoutVersion === 2 ? item.file : relative(input.workspace, item.file),
+      output: input.layoutVersion === 2 ? output : relative(input.workspace, output),
+      textLength: extracted.text.length,
+      error: extracted.error,
+      sourceSha256: item.sourceSha256,
+      method: extracted.method,
+    })
+    done += 1
+    if (input.onProgress) await input.onProgress(done, pending.length, basename(item.file))
+  }
+  return { added: done, total: pending.length }
 }
 
 async function uniquePath(path: string) {
@@ -2465,7 +2565,7 @@ export const workspace = {
 }
 
 export const materials = {
-  description: "Extract text from scanned PDF/image materials with the bundled PaddleOCR, or classify backed-up materials and write materials_index files.",
+  description: "Extract text from scanned PDF/image materials with the bundled PaddleOCR and from office/text files (docx/xlsx/txt/md/csv), or classify backed-up materials and write materials_index files.",
   args: inputArg({
     action: { type: "string", enum: ["extract_text", "classify"], description: "Extract material text before classification, or classify all backed-up materials" },
   }, ["action"]),
@@ -2500,23 +2600,38 @@ export const materials = {
       if (!existsSync(ocr)) throw new Error("Terra-Edu bundled OCR wrapper is missing: " + ocr)
       const shared = schoolOverlay ? undefined : sharedOcrState(task)
       const localOutputDir = join(workspace, "03_state", "extracted_text")
+      const sourceRoot = hasSupplementalMaterials ? supplementalRoot : shared?.sourceDir || join(workspace, "00_original_backup")
+      const sourceFiles = await listFiles(sourceRoot)
+      const scanCandidates = sourceFiles.filter((file) => isScanMaterialPath(file))
+      const nativeCandidates = sourceFiles.filter((file) => isNativeTextMaterialPath(file))
+      const overlayOcrPath = join(workspace, "03_state", "school_ocr_overlay.json")
+      const resultStore = schoolOverlay ? overlayOcrPath : shared?.indexPath || join(workspace, "03_state", "ocr_index.json")
+      const layoutVersion = shared?.layoutVersion || 1
       if (shared && existsSync(shared.indexPath) && !hasSupplementalMaterials) {
         if (shared.layoutVersion === 1) {
           await cp(shared.outputDir, localOutputDir, { recursive: true, force: false, errorOnExist: false })
         }
-        const results = await readJson(shared.indexPath, [])
+        const results = await readJson(shared.indexPath, []) as Array<{ file: string; output: string; textLength: number; error: string; sourceSha256?: string; method?: string }>
+        await mkdir(shared.outputDir || localOutputDir, { recursive: true })
+        // Shared OCR reuse previously skipped office/text files. Always fill those gaps.
+        const native = await appendNativeTextExtractions({
+          files: nativeCandidates,
+          results: results,
+          outputDir: shared.outputDir || localOutputDir,
+          workspace: workspace,
+          layoutVersion: layoutVersion,
+        })
+        await writeJson(shared.indexPath, results)
         await writeJson(join(workspace, "03_state", "ocr_index.json"), results)
-        await appendLog(workspace, "agent", "已复用选校批次共享的 PaddleOCR 提取结果，无需重复 OCR。")
-        await saveTask(workspace, task, "正在读取文件", "已复用选校批次的扫描材料 OCR 结果。")
-        await appendAudit(workspace, "materials", action, "completed", "reused shared ocr " + results.length, ctx)
-        return JSON.stringify({ status: "completed", reusedSharedOcr: true, completed: results.length, files: results }, null, 2)
+        await appendLog(workspace, "agent", "已复用选校批次共享的文字提取结果，并补齐 " + native.added + " 份 office/text 材料。")
+        await saveTask(workspace, task, "正在读取文件", "已复用共享文字提取结果；office/text 新提取 " + native.added + " 份。")
+        await appendAudit(workspace, "materials", action, "completed", "reused shared ocr " + results.length + "; native " + native.added, ctx)
+        return JSON.stringify({ status: "completed", reusedSharedOcr: true, completed: results.length, nativeAdded: native.added, files: results }, null, 2)
       }
       const outputDir = shared?.outputDir || localOutputDir
       await mkdir(outputDir, { recursive: true })
-      const candidates = (await listFiles(hasSupplementalMaterials ? supplementalRoot : shared?.sourceDir || join(workspace, "00_original_backup"))).filter((file) => /\.(pdf|png|jpe?g|heic|tiff?)$/i.test(file))
-      const overlayOcrPath = join(workspace, "03_state", "school_ocr_overlay.json")
-      const resultStore = schoolOverlay ? overlayOcrPath : shared?.indexPath || join(workspace, "03_state", "ocr_index.json")
-      const previous = await readJson<Array<{ file: string; output: string; textLength: number; error: string; sourceSha256?: string }>>(resultStore, [])
+      const candidates = scanCandidates
+      const previous = await readJson(resultStore, []) as Array<{ file: string; output: string; textLength: number; error: string; sourceSha256?: string; method?: string }>
       const results = [...previous]
       const ocrStartedAt = Date.now()
       const totalCandidates = candidates.length
@@ -2524,7 +2639,7 @@ export const materials = {
       await appendLog(
         workspace,
         "agent",
-        "已启动随包 PaddleOCR，正在扫描 " + totalCandidates + " 份 PDF/图片材料。批量模式优先（模型只加载一次），预计约 " + etaMinutes + "–" + (etaMinutes + 2) + " 分钟；CPU 升高属正常，请保持应用打开。",
+        "已启动材料文字提取：PaddleOCR 扫描 " + totalCandidates + " 份 PDF/图片；随后提取 " + nativeCandidates.length + " 份 docx/xlsx/txt 等可解析文本材料。批量 OCR 优先（模型只加载一次），预计约 " + etaMinutes + "–" + (etaMinutes + 2) + " 分钟；CPU 升高属正常，请保持应用打开。",
       )
       task.ocr = {
         phase: "running",
@@ -2643,6 +2758,17 @@ export const materials = {
           await processOne(item, pending.length > 1 ? 35 : 20)
         }
       }
+      await saveTask(workspace, task, "正在读取文件", "扫描 OCR 完成，正在提取 docx/xlsx/txt 等文本材料…")
+      const native = await appendNativeTextExtractions({
+        files: nativeCandidates,
+        results: results,
+        outputDir: outputDir,
+        workspace: workspace,
+        layoutVersion: layoutVersion,
+        onProgress: async (done, total, fileName) => {
+          await saveTask(workspace, task, "正在读取文件", "文本材料提取 " + done + "/" + total + "：" + fileName)
+        },
+      })
       await writeJson(resultStore, results)
       const baseResults = schoolOverlay && sharedAccess ? await readJson(sharedAccess.shared.ocrIndex, []) : []
       const schoolOcrOverlay = !schoolOverlay ? await readJson(join(workspace, "03_state", "school_ocr_overlay.json"), []) : []
@@ -2666,10 +2792,10 @@ export const materials = {
         etaAt: new Date().toISOString(),
         finishedAt: new Date().toISOString(),
       }
-      await appendLog(workspace, "agent", "已使用随包 PaddleOCR 提取或复用 " + completed.length + "/" + combinedResults.length + " 份扫描材料文字。")
-      await saveTask(workspace, task, "正在读取文件", "已完成扫描材料 OCR：成功 " + completed.length + " 份，失败或无文字 " + failed.length + " 份。")
-      await appendAudit(workspace, "materials", action, "completed", "ocr " + completed.length + "/" + combinedResults.length)
-      return JSON.stringify({ status: "completed", completed: completed.length, failed: failed.length, files: combinedResults }, null, 2)
+      await appendLog(workspace, "agent", "已提取材料文字：扫描 OCR/复用 " + completed.length + "/" + combinedResults.length + " 份有文字；其中 office/text 新提取 " + native.added + " 份。")
+      await saveTask(workspace, task, "正在读取文件", "已完成材料文字提取：有文字 " + completed.length + " 份，失败或无文字 " + failed.length + " 份（含 office/text " + native.added + " 份）。")
+      await appendAudit(workspace, "materials", action, "completed", "ocr+native " + completed.length + "/" + combinedResults.length + "; nativeAdded " + native.added)
+      return JSON.stringify({ status: "completed", completed: completed.length, failed: failed.length, nativeAdded: native.added, files: combinedResults }, null, 2)
     }
 
     if (sharedAccess?.role === "owner" && existsSync(sharedAccess.shared.materialsIndex) && !hasSupplementalMaterials) {
