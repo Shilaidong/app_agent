@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
-import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
+import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID, resolveApplicationAgentModel } from "./application-agent-model"
 import type { ApplicationRefillAttempt, ApplicationTask } from "./application-agent"
 import egoRuntimeLock from "../../resources/ego-runtime.lock.json"
 
@@ -16,7 +16,7 @@ const EGO_BROWSER_PROTOCOL = `## ego-browser 通用观察协议
 
 - 每个 heredoc 只完成一个短回合：先观察、执行一个逻辑动作组、再验证并结束本回合。同一可见区块内 3–8 个普通纯文本字段必须作为短批次：连续 fillInput+Tab，最后统一 snapshot/读回；不要一字段一回合。选择、添加/删除、自动完成、日期选择器、上传、保存和导航必须各自单独复查，不要与下一项高风险动作串在同一批次。
 - 首次使用 task space 时记录返回的数值 task.id，并把它作为唯一可恢复的 taskSpaceId（调用 application-agent_cua 时传该 ID 的字符串形式）。已有保存 ID 的正常连续回合先用 listTaskSpaces 确认该空间仍为 agent ownership，再以该数值 ID 调用 useOrCreateTaskSpace(taskSpaceId)；不得再按名称匹配。若 listTaskSpaces 中已没有这个数值 ID，立即停止，用 retire_and_rebind_ego_task 记录缺失证据并让顾问明确选择“复用指定现有空间”或“新建替代空间”；确认前不得废弃、替换、新建或按名称猜测。主动调用 handOffTaskSpace 且确认 done:true 后，只有顾问明确回复继续，才可执行 \`await takeOverTaskSpace(taskSpaceId)\`；不要读取它的返回值，紧接着先调用 pageInfo()。若未主动交接却意外出现 user ownership、inactive、not assigned 或 user is controlling，立即停止浏览器命令并记录交接；顾问明确确认继续后按官方 API 执行 \`await claimTaskSpace(taskSpaceId)\`，紧接着也只调用 pageInfo()。绝不自动抢回控制。
-- 选定 task space 后，每个回合先调用 pageInfo()。首次新建的 task space 已选中一个可观察的空白标签页时，初次申请网址导航必须在这个相同 target 内调用 navigateInitialPageCapturingAlerts；不得用 openOrReuseTab 新建第二个 target。锁定版 Ego 的 Page.navigate 会被同步 load-time alert 阻塞，并在 helper 回合退出时自动消掉仍未处理的弹窗，所以绝不能假设下一回合还能读取该弹窗。navigateInitialPageCapturingAlerts 只在初次导航期间临时替换无选择分支的 window.alert，通过 Ego CDP binding 记录完整 message、URL 和 frameId，并以等价“确定”语义让导航继续；它绝不替换 confirm、prompt 或 beforeunload。返回 kind:alerts 时记录全部文案后立即结束本 heredoc，下一独立回合只复用同一 taskSpaceId 并调用 pageInfo；不得重试导航或刷新。返回 kind:cleanup_failed（contaminated:true）时，临时注入无法确认已移除，该 task space 视为污染：立即硬停止一切导航、填写和保存，不得重试清理；调用 application-agent_cua record_browser_safety_stop（safetyKind:cleanup_failed）结构化写入 progress.egoBrowser.safetyStop，并原样保留 cleanupError、infoError、capturedAlerts、最后 pageInfo 和 taskSpaceId；也可用 TERRA_EGO_TASKSPACE_CONTAMINATED: 前缀的 record_failure 兼容写入同一字段。污染空间不可恢复：顾问只能点击“重新填写”创建全新 taskSpaceId，不得 resume/takeOver/rebind existing，也不得把这次情况记为 record_blocker resolved。返回 kind:alert_evidence_lost 时，注入已清理、空间未被污染，但 iframe load-time alert 可能已被自动确认且文字丢失：同样立即硬停止，不得 snapshot、填写、保存、导航或重试；调用 record_browser_safety_stop（safetyKind:alert_evidence_lost）结构化写入 safetyStop（或 TERRA_EGO_ALERT_EVIDENCE_LOST: 前缀的 record_failure 兼容写入），并用 question 工具明确告知顾问本回合 iframe 弹窗文字可能丢失。顾问只能通过桌面“查看后继续当前空间”按钮授权同空间恢复，或点击“重新填写”；模型传入 consultantConfirmed:true 不能解除。授权后第一回合只能 record_observation，观察成功前禁止填写/保存/complete。这两种硬停止都由 CUA 与 ego-browser wrapper 读取同一 safetyStop 字段强制阻断，不得记为 record_blocker resolved。只有 pageInfo() 没有 dialog 时，才可调用 snapshotText、captureScreenshot、js、click、fillInput、导航或其他页面操作。普通表单优先用 snapshotText 的语义 workflow；语义信息不足时由你根据现场截图改用 visual workflow；DOM/CDP 仅用于有明确观察证据的窄范围操作，不得用它伪造填写结果或直接绕过正常提交。
+- 选定 task space 后，每个回合先调用 pageInfo()。同一稳定表单页连续填表时不要每填一个字段就重新 snapshot/观察；只在进入新页、保存前后、或 snapshotText 语义无法区分字段与错误时才观察。普通连续填表一个 heredoc 回合可连续填 3–8 个纯文本字段后统一读回一次，不要一字段一观察。首次新建的 task space 已选中一个可观察的空白标签页时，初次申请网址导航必须在这个相同 target 内调用 navigateInitialPageCapturingAlerts；不得用 openOrReuseTab 新建第二个 target。锁定版 Ego 的 Page.navigate 会被同步 load-time alert 阻塞，并在 helper 回合退出时自动消掉仍未处理的弹窗，所以绝不能假设下一回合还能读取该弹窗。navigateInitialPageCapturingAlerts 只在初次导航期间临时替换无选择分支的 window.alert，通过 Ego CDP binding 记录完整 message、URL 和 frameId，并以等价“确定”语义让导航继续；它绝不替换 confirm、prompt 或 beforeunload。返回 kind:alerts 时记录全部文案后立即结束本 heredoc，下一独立回合只复用同一 taskSpaceId 并调用 pageInfo；不得重试导航或刷新。返回 kind:cleanup_failed（contaminated:true）时，临时注入无法确认已移除，该 task space 视为污染：立即硬停止一切导航、填写和保存，不得重试清理；调用 application-agent_cua record_browser_safety_stop（safetyKind:cleanup_failed）结构化写入 progress.egoBrowser.safetyStop，并原样保留 cleanupError、infoError、capturedAlerts、最后 pageInfo 和 taskSpaceId；也可用 TERRA_EGO_TASKSPACE_CONTAMINATED: 前缀的 record_failure 兼容写入同一字段。污染空间不可恢复：顾问只能点击“重新填写”创建全新 taskSpaceId，不得 resume/takeOver/rebind existing，也不得把这次情况记为 record_blocker resolved。返回 kind:alert_evidence_lost 时，注入已清理、空间未被污染，但 iframe load-time alert 可能已被自动确认且文字丢失：同样立即硬停止，不得 snapshot、填写、保存、导航或重试；调用 record_browser_safety_stop（safetyKind:alert_evidence_lost）结构化写入 safetyStop（或 TERRA_EGO_ALERT_EVIDENCE_LOST: 前缀的 record_failure 兼容写入），并用 question 工具明确告知顾问本回合 iframe 弹窗文字可能丢失。顾问只能通过桌面“查看后继续当前空间”按钮授权同空间恢复，或点击“重新填写”；模型传入 consultantConfirmed:true 不能解除。授权后第一回合只能 record_observation，观察成功前禁止填写/保存/complete。这两种硬停止都由 CUA 与 ego-browser wrapper 读取同一 safetyStop 字段强制阻断，不得记为 record_blocker resolved。只有 pageInfo() 没有 dialog 时，才可调用 snapshotText、captureScreenshot、js、click、fillInput、导航或其他页面操作。普通表单优先用 snapshotText 的语义 workflow；语义信息不足时由你根据现场截图改用 visual workflow；DOM/CDP 仅用于有明确观察证据的窄范围操作，不得用它伪造填写结果或直接绕过正常提交。
 - 如果 pageInfo() 返回 dialog，先记录完整 dialog 信息和最近一次顶层页面证据；此时不得调用 snapshotText、captureScreenshot、js、点击/输入/上传/导航等任何页面操作，或任何 CDP 命令，唯一例外是 Page.handleJavaScriptDialog。type 为 alert 时使用 accept:true 关闭、调用 application-agent_cua record_blocker（blockerDisposition: resolved）后立刻结束本 heredoc；type 为 beforeunload 时一律 accept:false、记录 resolved 后结束本 heredoc，下一回合先确认 URL 未变化；所有 confirm 或 prompt 都必须 handOffTaskSpace，确认返回 done:true 后以真实 taskSpaceId、顶层 URL、标题和证据记录 blockerDisposition: handoff 并等待顾问，不得由 Agent 猜测选项或 prompt 文本。
 - iframe 原生 alert 会阻塞触发它的 click/save Promise，但 Ego 仍能通过 pageInfo() 返回完整 dialog。任何保存、继续、选择、导航、上传等可能改变页面的动作，都必须按 ego-browser skill 的 observePageAction 模式执行：先启动动作但不 await，同时轮询 pageInfo；不得写成“await click 后再检查”。
 - observePageAction 返回 dialog 时，保存完整 type、message、url、frameId。调用 record_blocker 时 currentUrl 始终传最近一次 pageInfo 的顶层 URL，dialog.url 和 frameId 分别传 dialogUrl、dialogFrameId，绝不能用 iframe URL 覆盖全局 currentUrl。alert 用 Page.handleJavaScriptDialog accept:true 关闭并立刻结束 heredoc；beforeunload 使用 accept:false；所有 confirm/prompt 都交接顾问。
@@ -292,6 +292,7 @@ export type OpenCodeResourceOverrides = {
   egoBrowserReadinessAttempts?: number
   egoBrowserSingleLaunchSentinel?: string
   sharedWorkspacePath?: string
+  modelId?: string
 }
 
 function renderEgoBrowserWrapper(overrides?: OpenCodeResourceOverrides) {
@@ -4690,6 +4691,8 @@ function authoritativeEditDenyPatterns(workspacePath: string, relativePaths: str
 
 export async function writeOpenCodeConfig(workspacePath: string, overrides?: OpenCodeResourceOverrides) {
   const base = join(workspacePath, ".opencode")
+  const resolvedModel = resolveApplicationAgentModel(overrides?.modelId)
+  const model = `${resolvedModel.providerID}/${resolvedModel.modelID}`
   // OpenCode routes write/edit/patch through permission.edit. These files are
   // authoritative tool/UI state, so the ordinary Agent may read but not forge them.
   const authoritativeStateEditPermissions = authoritativeEditDenyPatterns(workspacePath, [
@@ -4735,7 +4738,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
   await rm(join(base, "bin", ["terra", "dialog", "guard"].join("-")), { force: true })
   await writeGeneratedJson(join(base, "opencode.json"), {
     $schema: "https://opencode.ai/config.json",
-    model: APPLICATION_AGENT_MODEL,
+    model: model,
     permission: {
       "*": "allow",
       read: {
@@ -4772,7 +4775,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
       "application-agent": {
         description: "Terra-Edu 留学申请 Agent，自动整理资料、识别缺失项、生成清单并协助填写申请平台。",
         mode: "primary",
-        model: APPLICATION_AGENT_MODEL,
+        model: model,
         prompt: "{file:./prompts/application-agent.md}",
       permission: {
         "*": "allow",
@@ -4807,7 +4810,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
       "application-refill-agent": {
         description: "Terra-Edu 重新填写 Agent，只读复用已确认材料与档案，在全新对话和独立 Ego task space 中重新填表。",
         mode: "primary",
-          model: APPLICATION_AGENT_MODEL,
+          model: model,
           prompt: "{file:./prompts/application-refill-agent.md}",
           permission: {
             "*": "allow",

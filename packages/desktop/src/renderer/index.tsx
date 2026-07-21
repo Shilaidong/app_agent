@@ -576,6 +576,8 @@ function ApplicationAgentShell(props: {
   const [showOpenCode, setShowOpenCode] = createSignal(false)
   const [goConfigured, setGoConfigured] = createSignal(false)
   const [agentMessages, setAgentMessages] = createSignal<ApplicationAgentChatItem[]>([])
+  const [agentModels, setAgentModels] = createSignal<readonly { id: string; label: string; description: string }[]>([])
+  const [selectedModelId, setSelectedModelId] = createSignal("qwen3.7-plus")
   const [agentInput, setAgentInput] = createSignal("")
   const [restoreNotice, setRestoreNotice] = createSignal<string | null>(null)
   const [applicationTasks, setApplicationTasks] = createSignal<ApplicationTask[]>([])
@@ -896,7 +898,7 @@ function ApplicationAgentShell(props: {
         return
       }
       setTask(created)
-      const session = await window.api.startApplicationAgentSession(created)
+      const session = await window.api.startApplicationAgentSession(created, selectedModelId())
       setOpenCodeSession(session)
       persistActiveSession(session)
       setShowOpenCode(false)
@@ -1181,7 +1183,7 @@ function ApplicationAgentShell(props: {
     try {
       const latestTask = await window.api.getApplicationTask(next.workspacePath)
       const session = await window.api.findApplicationAgentSession(latestTask.workspacePath)
-        ?? await window.api.startApplicationAgentSession(latestTask)
+        ?? await window.api.startApplicationAgentSession(latestTask, selectedModelId())
       setTask(latestTask)
       setInput(latestTask.input)
       setSupplementalFolder("")
@@ -1307,6 +1309,7 @@ function ApplicationAgentShell(props: {
 
   onMount(() => {
     void window.api.hasOpenCodeGoApiKey().then(setGoConfigured)
+    void window.api.getApplicationAgentModels().then(setAgentModels)
     void refreshAuthStatus()
     void loadApplicationTasks()
     // Restore the last active session after an app restart so the material
@@ -1569,6 +1572,20 @@ function ApplicationAgentShell(props: {
                   >
                     <option value="zh">中文</option>
                     <option value="en">English</option>
+                  </select>
+                </label>
+                <label>
+                  Agent 模型
+                  <select
+                    class="composer-model-select"
+                    value={selectedModelId()}
+                    disabled={busy() || Boolean(opencodeSession())}
+                    title={opencodeSession() ? "任务已开始，模型不能切换" : "选择申请 Agent 使用的模型"}
+                    onChange={(event) => setSelectedModelId(event.currentTarget.value)}
+                  >
+                    <For each={agentModels()}>
+                      {(option) => <option value={option.id} title={option.description}>{option.label}</option>}
+                    </For>
                   </select>
                 </label>
               </div>

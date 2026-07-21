@@ -1816,6 +1816,24 @@ button {
   resize: vertical;
 }
 
+.composer-model-select {
+  align-self: end;
+  min-height: 54px;
+  border-radius: 10px;
+  border: 1px solid rgba(46, 50, 48, 0.16);
+  background: rgba(255, 255, 255, 0.92);
+  color: #2f5d3e;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.composer-model-select:disabled {
+  opacity: 0.62;
+  cursor: default;
+}
+
 .agent-chat-input > button:not(.composer-runtime-chip) {
   align-self: end;
   border: 0;

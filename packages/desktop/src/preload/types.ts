@@ -188,12 +188,14 @@ export type ApplicationAgentSession = {
   sessionID: string
   directory: string
   workspacePath: string
+  modelID: string
 }
 
 export type ApplicationAgentRefillRequest = {
   task: ApplicationTask
   requestID: string
   sourceSessionID?: string
+  modelId?: string
 }
 
 export type ApplicationRefillAttempt = {
@@ -317,7 +319,8 @@ export type ElectronAPI = {
   previewApplicationSelectionList: (sourcePath: string) => Promise<ApplicationSelectionListPreview>
   createApplicationTasksFromSelectionList: (input: ApplicationSelectionListInput) => Promise<ApplicationSelectionListBatch>
   downloadApplicationSelectionListTemplate: () => Promise<string | null>
-  startApplicationAgentSession: (task: ApplicationTask) => Promise<ApplicationAgentSession>
+  startApplicationAgentSession: (task: ApplicationTask, modelId?: string) => Promise<ApplicationAgentSession>
+  getApplicationAgentModels: () => Promise<readonly { id: string; label: string; description: string }[]>
   startApplicationAgentRefillSession: (
     input: ApplicationAgentRefillRequest,
   ) => Promise<ApplicationAgentRefillSession>

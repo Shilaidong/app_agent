@@ -73,7 +73,8 @@ const api: ElectronAPI = {
     ipcRenderer.invoke("application-agent:create-selection-list-tasks", input),
   downloadApplicationSelectionListTemplate: () =>
     ipcRenderer.invoke("application-agent:download-selection-list-template"),
-  startApplicationAgentSession: (task) => ipcRenderer.invoke("application-agent:start-session", task),
+  startApplicationAgentSession: (task, modelId) => ipcRenderer.invoke("application-agent:start-session", task, modelId),
+  getApplicationAgentModels: () => ipcRenderer.invoke("application-agent:list-models"),
   startApplicationAgentRefillSession: (input) =>
     ipcRenderer.invoke("application-agent:start-refill-session", input),
   resendApplicationAgentStartPrompt: (session, task) =>

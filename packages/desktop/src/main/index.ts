@@ -24,6 +24,7 @@ import type {
 } from "../preload/types"
 import {
   APPLICATION_AGENT_MODEL_ID,
+  APPLICATION_AGENT_MODELS,
   applicationRefillSessionTitle,
   buildApplicationAgentRefillPrompt,
   buildApplicationAgentStartPrompt,
@@ -33,6 +34,7 @@ import {
   markApplicationRefillPromptSent,
   prepareApplicationAgentConfig,
   prepareApplicationRefillAttempt,
+  resolveApplicationAgentModel,
   validateApplicationRefillReadiness,
 } from "./application-agent"
 import { writeOpenCodeConfig } from "./application-agent-opencode"
@@ -548,6 +550,7 @@ const main = Effect.gen(function* () {
       agent?: string
       time?: { updated?: number }
       title?: string
+      model?: { id?: string; providerID?: string }
     }
     const sessions = await getSidecarJson<SidecarSession[]>("/session?limit=80", workspacePath).catch(() => [])
     const found = sessions
@@ -561,15 +564,21 @@ const main = Effect.gen(function* () {
           item.title?.includes("重新填写"),
       )
     if (!found) return null
+    // Reuse the session's original model so restarted prompts keep using it
+    // instead of silently falling back to the default. Fall back to the
+    // default only if the sidecar entry is old enough to lack a model field.
+    const modelID = found.model?.id || APPLICATION_AGENT_MODEL_ID
     return {
       sessionID: found.id,
       directory: workspacePath,
       workspacePath,
+      modelID,
     }
   }
 
-  const startApplicationAgentSession = async (task: ApplicationTask): Promise<ApplicationAgentSession> => {
-    await prepareApplicationAgentConfig(task.sessionDirectory)
+  const startApplicationAgentSession = async (task: ApplicationTask, modelId?: string): Promise<ApplicationAgentSession> => {
+    const resolved = resolveApplicationAgentModel(modelId)
+    await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.modelID })
     await ensureApplicationAgentQuota("start_application_task", task.workspacePath)
     const created = await postSidecarJson<{ id: string }>(
       "/session",
@@ -578,8 +587,8 @@ const main = Effect.gen(function* () {
         title: `申请任务：${task.input.studentName} / ${task.input.school} / ${task.input.program}`,
         agent: "application-agent",
         model: {
-          providerID: "opencode-go",
-          id: APPLICATION_AGENT_MODEL_ID,
+          providerID: resolved.providerID,
+          id: resolved.modelID,
         },
       },
     )
@@ -587,6 +596,7 @@ const main = Effect.gen(function* () {
       sessionID: created.id,
       directory: task.sessionDirectory,
       workspacePath: task.workspacePath,
+      modelID: resolved.modelID,
     }
     await ensureApplicationAgentQuota("send_start_prompt", task.workspacePath, created.id)
     await postSidecarJson<void>(
@@ -595,8 +605,8 @@ const main = Effect.gen(function* () {
       {
         agent: "application-agent",
         model: {
-          providerID: "opencode-go",
-          modelID: APPLICATION_AGENT_MODEL_ID,
+          providerID: resolved.providerID,
+          modelID: resolved.modelID,
         },
         parts: [{ type: "text", text: buildApplicationAgentStartPrompt(task) }],
       },
@@ -622,10 +632,11 @@ const main = Effect.gen(function* () {
     if (running) return Promise.reject(new Error("正在创建重新填写会话，请稍候。"))
 
     const pending = (async () => {
+      const resolved = resolveApplicationAgentModel(input.modelId)
       const task = await getApplicationTask(input.task.workspacePath)
       const inspected = await inspectApplicationRefillAttempt(task.workspacePath, requestID)
       await validateApplicationRefillReadiness(task.workspacePath)
-      await prepareApplicationAgentConfig(task.sessionDirectory)
+      await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.modelID })
       await ensureApplicationAgentQuota("start_application_refill", task.workspacePath)
       const sourceSessionID = inspected?.sourceSessionID || input.sourceSessionID?.trim()
       if (!inspected?.sessionID && sourceSessionID) {
@@ -690,8 +701,8 @@ const main = Effect.gen(function* () {
               title,
               agent: "application-refill-agent",
               model: {
-                providerID: "opencode-go",
-                id: APPLICATION_AGENT_MODEL_ID,
+                providerID: resolved.providerID,
+                id: resolved.modelID,
               },
             },
           ).catch(async (error) => {
@@ -707,6 +718,7 @@ const main = Effect.gen(function* () {
         sessionID: created.id,
         directory: task.sessionDirectory,
         workspacePath: task.workspacePath,
+        modelID: resolved.modelID,
       }
       type SidecarRefillMessage = { info?: { role?: string } }
       const messages = await getSidecarJson<SidecarRefillMessage[]>(
@@ -721,8 +733,8 @@ const main = Effect.gen(function* () {
           {
             agent: "application-refill-agent",
             model: {
-              providerID: "opencode-go",
-              modelID: APPLICATION_AGENT_MODEL_ID,
+              providerID: resolved.providerID,
+              modelID: resolved.modelID,
             },
             parts: [{ type: "text", text: buildApplicationAgentRefillPrompt(task, attempt) }],
           },
@@ -761,12 +773,12 @@ const main = Effect.gen(function* () {
     await ensureApplicationAgentQuota("resend_start_prompt", task.workspacePath, session.sessionID)
     await postSidecarJson<void>(
       `/session/${session.sessionID}/prompt_async`,
-      session.directory,
+      task.sessionDirectory,
       {
         agent: "application-agent",
         model: {
           providerID: "opencode-go",
-          modelID: APPLICATION_AGENT_MODEL_ID,
+          modelID: session.modelID,
         },
         parts: [{ type: "text", text: buildApplicationAgentStartPrompt(task) }],
       },
@@ -819,7 +831,7 @@ const main = Effect.gen(function* () {
         agent,
         model: {
           providerID: "opencode-go",
-          modelID: APPLICATION_AGENT_MODEL_ID,
+          modelID: session.modelID,
         },
         parts: [{ type: "text", text }],
       },
@@ -889,6 +901,7 @@ const main = Effect.gen(function* () {
     sendApplicationAgentPrompt,
     getApplicationAgentMessages,
     findApplicationAgentSession,
+    getApplicationAgentModels: () => Promise.resolve(APPLICATION_AGENT_MODELS),
   })
 
   yield* Effect.promise(() => app.whenReady())

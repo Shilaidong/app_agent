@@ -32,6 +32,7 @@ import {
   repairApplicationSharedDossier,
   resumeApplicationTask,
   submitApplicationMaterialReview,
+  APPLICATION_AGENT_MODELS,
 } from "./application-agent"
 import { previewSelectionList } from "./application-selection-list"
 import {
@@ -73,7 +74,8 @@ type Deps = {
   checkUpdate: () => Promise<{ updateAvailable: boolean; version?: string }>
   installUpdate: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
-  startApplicationAgentSession: (task: ApplicationTask) => Promise<ApplicationAgentSession>
+  startApplicationAgentSession: (task: ApplicationTask, modelId?: string) => Promise<ApplicationAgentSession>
+  getApplicationAgentModels: () => Promise<readonly { id: string; label: string; description: string }[]>
   startApplicationAgentRefillSession: (
     input: ApplicationAgentRefillRequest,
   ) => Promise<ApplicationAgentRefillSession>
@@ -271,8 +273,8 @@ export function registerIpcHandlers(deps: Deps) {
     await copyFile(selectionListTemplatePath(), destination.filePath)
     return destination.filePath
   })
-  ipcMain.handle("application-agent:start-session", (_event: IpcMainInvokeEvent, task: ApplicationTask) =>
-    deps.startApplicationAgentSession(task),
+  ipcMain.handle("application-agent:start-session", (_event: IpcMainInvokeEvent, task: ApplicationTask, modelId?: string) =>
+    deps.startApplicationAgentSession(task, modelId),
   )
   ipcMain.handle(
     "application-agent:start-refill-session",
@@ -341,6 +343,7 @@ export function registerIpcHandlers(deps: Deps) {
     clearApplicationPlatformAccount(applicationUrl),
   )
   ipcMain.handle("application-agent:has-go-api-key", () => hasOpenCodeGoApiKey())
+  ipcMain.handle("application-agent:list-models", () => APPLICATION_AGENT_MODELS)
   ipcMain.handle("terra-auth:status", () => getTerraAuthStatus())
   ipcMain.handle("terra-auth:login", (_event: IpcMainInvokeEvent, email: string, password: string) =>
     loginTerraAdvisor(email, password),

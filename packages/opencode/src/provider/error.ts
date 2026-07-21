@@ -25,6 +25,7 @@ const OVERFLOW_PATTERNS = [
   /prompt too long; exceeded (?:max )?context length/i, // Ollama explicit overflow error
   /too large for model with \d+ maximum context length/i, // Mistral
   /model_context_window_exceeded/i, // z.ai non-standard finish_reason surfaced as error text
+  /exceeded limit on max bytes to request body/i, // opencode-go / Alibaba gateway body size limit (HTTP 400 BadRequest.TooLarge)
 ]
 
 function isOpenAiErrorRetryable(e: APICallError) {

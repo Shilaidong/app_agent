@@ -32,7 +32,8 @@ import {
 
 export { buildApplicationAgentRefillPrompt, buildApplicationAgentStartPrompt } from "./application-agent-opencode"
 export { applicationRefillSessionTitle } from "./application-agent-refill"
-export { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID } from "./application-agent-model"
+export { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID, APPLICATION_AGENT_MODELS, resolveApplicationAgentModel } from "./application-agent-model"
+export type { ApplicationAgentModelOption } from "./application-agent-model"
 export type { ApplicationRefillAttempt } from "./application-agent-refill"
 export type { BrowserSafetyStopSummary } from "./application-agent-browser-safety"
 
@@ -484,7 +485,7 @@ export async function listApplicationTasks(limit = 8): Promise<ApplicationTask[]
     .slice(0, Math.max(1, limit))
 }
 
-export async function prepareApplicationAgentConfig(directory: string) {
+export async function prepareApplicationAgentConfig(directory: string, overrides?: { modelId?: string }) {
   await mkdir(directory, { recursive: true })
   await mkdir(join(directory, "02_generated"), { recursive: true })
   await mkdir(join(directory, "03_state"), { recursive: true })
@@ -511,7 +512,7 @@ export async function prepareApplicationAgentConfig(directory: string) {
   }
   const savedInput = await readJson<ApplicationTaskInput | null>(join(directory, "03_state/task_input.json"), null)
   const taskInput = savedInput ? await canonicalTaskInput(directory, savedInput) : null
-  await writeOpenCodeConfig(directory, { sharedWorkspacePath: taskInput?.sharedWorkspacePath })
+  await writeOpenCodeConfig(directory, { sharedWorkspacePath: taskInput?.sharedWorkspacePath, modelId: overrides?.modelId })
 }
 
 export async function getApplicationTask(workspacePath: string): Promise<ApplicationTask> {
