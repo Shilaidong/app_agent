@@ -46,6 +46,15 @@ function isOverflow(message: string) {
   return /^4(00|13)\s*(status code)?\s*\(no body\)/i.test(message)
 }
 
+/** Gateway/body-size limits (e.g. opencode-go 6MB) are not token-window overflows. */
+export function isRequestBodySizeLimit(message: string) {
+  return (
+    /exceeded limit on max bytes to request body/i.test(message) ||
+    /BadRequest\.TooLarge/i.test(message) ||
+    /request entity too large/i.test(message)
+  )
+}
+
 function message(providerID: ProviderID, e: APICallError) {
   return iife(() => {
     const msg = e.message

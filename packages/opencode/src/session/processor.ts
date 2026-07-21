@@ -37,6 +37,8 @@ export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
   readonly message: MessageV2.Assistant
+  /** Raw overflow text from the last ContextOverflow halt, if any (for body-size limits). */
+  readonly lastOverflowMessage: string | undefined
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
@@ -77,6 +79,7 @@ interface ProcessorContext extends Input {
   snapshot: string | undefined
   blocked: boolean
   needsCompaction: boolean
+  lastOverflowMessage: string | undefined
   currentText: MessageV2.TextPart | undefined
   reasoningMap: Record<string, MessageV2.ReasoningPart>
 }
@@ -117,6 +120,7 @@ export const layer = Layer.effect(
         snapshot: initialSnapshot,
         blocked: false,
         needsCompaction: false,
+        lastOverflowMessage: undefined,
         currentText: undefined,
         reasoningMap: {},
       }
@@ -752,6 +756,9 @@ export const layer = Layer.effect(
         const error = parse(e)
         if (MessageV2.ContextOverflowError.isInstance(error)) {
           ctx.needsCompaction = true
+          // Keep the provider text so the prompt loop can stop body-size compact
+          // retries that never shrink the HTTP payload.
+          ctx.lastOverflowMessage = errorMessage(e)
           yield* bus.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
           return
         }
@@ -779,6 +786,7 @@ export const layer = Layer.effect(
       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
         slog.info("process")
         ctx.needsCompaction = false
+        ctx.lastOverflowMessage = undefined
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
         return yield* Effect.gen(function* () {
@@ -850,6 +858,9 @@ export const layer = Layer.effect(
       return {
         get message() {
           return ctx.assistantMessage
+        },
+        get lastOverflowMessage() {
+          return ctx.lastOverflowMessage
         },
         updateToolCall,
         completeToolCall,

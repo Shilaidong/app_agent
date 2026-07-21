@@ -1,6 +1,3 @@
-export const APPLICATION_AGENT_MODEL_ID = "qwen3.7-plus"
-export const APPLICATION_AGENT_MODEL = `opencode-go/${APPLICATION_AGENT_MODEL_ID}`
-
 export type ApplicationAgentModelOption = {
   id: string
   label: string
@@ -9,7 +6,7 @@ export type ApplicationAgentModelOption = {
 
 // All models route through opencode-go so the consultant never needs to
 // configure a separate provider. Add new models here; the renderer picks
-// from this list at task start.
+// from this list at task start. The first entry is the product default.
 export const APPLICATION_AGENT_MODELS: ApplicationAgentModelOption[] = [
   {
     id: "qwen3.7-plus",
@@ -27,6 +24,9 @@ export const APPLICATION_AGENT_MODELS: ApplicationAgentModelOption[] = [
     description: "MiMo V2.5 Pro。更强，更贵。",
   },
 ]
+
+export const APPLICATION_AGENT_MODEL_ID = APPLICATION_AGENT_MODELS[0].id
+export const APPLICATION_AGENT_MODEL = `opencode-go/${APPLICATION_AGENT_MODEL_ID}`
 
 export function resolveApplicationAgentModel(modelId?: string): { providerID: string; modelID: string } {
   const id = (modelId || "").trim()

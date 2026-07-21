@@ -23,7 +23,6 @@ import type {
   WslConfig,
 } from "../preload/types"
 import {
-  APPLICATION_AGENT_MODEL_ID,
   APPLICATION_AGENT_MODELS,
   applicationRefillSessionTitle,
   buildApplicationAgentRefillPrompt,
@@ -543,7 +542,6 @@ const main = Effect.gen(function* () {
   }
 
   const findApplicationAgentSession = async (workspacePath: string): Promise<ApplicationAgentSession | null> => {
-    await prepareApplicationAgentConfig(workspacePath)
     type SidecarSession = {
       id: string
       directory?: string
@@ -552,7 +550,13 @@ const main = Effect.gen(function* () {
       title?: string
       model?: { id?: string; providerID?: string }
     }
-    const sessions = await getSidecarJson<SidecarSession[]>("/session?limit=80", workspacePath).catch(() => [])
+    // Prefer the session's own model when rewriting workspace config. Preparing
+    // with the product default first would clobber a mimo session's opencode.json.
+    let sessions = await getSidecarJson<SidecarSession[]>("/session?limit=80", workspacePath).catch(() => [] as SidecarSession[])
+    if (sessions.length === 0) {
+      await prepareApplicationAgentConfig(workspacePath)
+      sessions = await getSidecarJson<SidecarSession[]>("/session?limit=80", workspacePath).catch(() => [] as SidecarSession[])
+    }
     const found = sessions
       .filter((item) => item.directory === workspacePath)
       .sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
@@ -567,7 +571,8 @@ const main = Effect.gen(function* () {
     // Reuse the session's original model so restarted prompts keep using it
     // instead of silently falling back to the default. Fall back to the
     // default only if the sidecar entry is old enough to lack a model field.
-    const modelID = found.model?.id || APPLICATION_AGENT_MODEL_ID
+    const modelID = resolveApplicationAgentModel(found.model?.id).modelID
+    await prepareApplicationAgentConfig(workspacePath, { modelId: modelID })
     return {
       sessionID: found.id,
       directory: workspacePath,
@@ -769,7 +774,8 @@ const main = Effect.gen(function* () {
     if (await applicationAgentForSession(session) !== "application-agent") {
       throw new Error("重新填写会话不能重新发送材料整理启动指令；请直接在当前对话中补充填表信息。")
     }
-    await prepareApplicationAgentConfig(task.sessionDirectory)
+    const resolved = resolveApplicationAgentModel(session.modelID)
+    await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.modelID })
     await ensureApplicationAgentQuota("resend_start_prompt", task.workspacePath, session.sessionID)
     await postSidecarJson<void>(
       `/session/${session.sessionID}/prompt_async`,
@@ -777,8 +783,8 @@ const main = Effect.gen(function* () {
       {
         agent: "application-agent",
         model: {
-          providerID: "opencode-go",
-          modelID: session.modelID,
+          providerID: resolved.providerID,
+          modelID: resolved.modelID,
         },
         parts: [{ type: "text", text: buildApplicationAgentStartPrompt(task) }],
       },
@@ -800,6 +806,7 @@ const main = Effect.gen(function* () {
 
   const sendApplicationAgentPrompt = async (session: ApplicationAgentSession, prompt: string) => {
     const agent = await applicationAgentForSession(session)
+    const resolved = resolveApplicationAgentModel(session.modelID)
     await ensureApplicationAgentQuota("send_agent_prompt", session.workspacePath, session.sessionID)
     const questions = await getSidecarJson<PendingQuestionRequest[]>("/question", session.directory).catch(() => [])
     const pendingQuestion = questions.find((item) => item.sessionID === session.sessionID)
@@ -830,8 +837,8 @@ const main = Effect.gen(function* () {
       {
         agent,
         model: {
-          providerID: "opencode-go",
-          modelID: session.modelID,
+          providerID: resolved.providerID,
+          modelID: resolved.modelID,
         },
         parts: [{ type: "text", text }],
       },

@@ -29,6 +29,7 @@ import type {
   TerraAuthStatus,
 } from "../preload/types"
 import applicationAgentAvatar from "./assets/application-agent-avatar.png"
+import { APPLICATION_AGENT_MODEL_ID } from "../main/application-agent-model"
 import {
   activeApplicationSessionKey,
   applicationTypes,
@@ -577,8 +578,12 @@ function ApplicationAgentShell(props: {
   const [goConfigured, setGoConfigured] = createSignal(false)
   const [agentMessages, setAgentMessages] = createSignal<ApplicationAgentChatItem[]>([])
   const [agentModels, setAgentModels] = createSignal<readonly { id: string; label: string; description: string }[]>([])
-  const [selectedModelId, setSelectedModelId] = createSignal("qwen3.7-plus")
+  const [selectedModelId, setSelectedModelId] = createSignal(APPLICATION_AGENT_MODEL_ID)
   const [agentInput, setAgentInput] = createSignal("")
+  const adoptOpenCodeSession = (session: ApplicationAgentSession | null) => {
+    setOpenCodeSession(session)
+    if (session?.modelID) setSelectedModelId(session.modelID)
+  }
   const [restoreNotice, setRestoreNotice] = createSignal<string | null>(null)
   const [applicationTasks, setApplicationTasks] = createSignal<ApplicationTask[]>([])
   const [homeMode, setHomeMode] = createSignal<"new" | "read">("new")
@@ -851,7 +856,7 @@ function ApplicationAgentShell(props: {
       const status = await window.api.logoutTerraAdvisor()
       setAuthStatus(status)
       setTask(null)
-      setOpenCodeSession(null)
+      adoptOpenCodeSession(null)
       clearActiveSession()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -899,7 +904,7 @@ function ApplicationAgentShell(props: {
       }
       setTask(created)
       const session = await window.api.startApplicationAgentSession(created, selectedModelId())
-      setOpenCodeSession(session)
+      adoptOpenCodeSession(session)
       persistActiveSession(session)
       setShowOpenCode(false)
       await refreshAgentMessages(session)
@@ -934,8 +939,8 @@ function ApplicationAgentShell(props: {
       if (!firstTask) throw new Error("没有创建可启动的申请任务。")
       setApplicationTasks((current) => [...batch.tasks, ...current.filter((item) => !batch.tasks.some((task) => task.workspacePath === item.workspacePath))])
       setTask(firstTask)
-      const session = await window.api.startApplicationAgentSession(firstTask)
-      setOpenCodeSession(session)
+      const session = await window.api.startApplicationAgentSession(firstTask, selectedModelId())
+      adoptOpenCodeSession(session)
       persistActiveSession(session)
       setShowOpenCode(false)
       setRestoreNotice(`已创建 1 个学生工作区和 ${batch.tasks.length} 个学校子任务；材料、OCR、分类和学生核心档案只整理一次，将从第 1 所学校开始。`)
@@ -1037,8 +1042,9 @@ function ApplicationAgentShell(props: {
         task: current,
         requestID: refillRequestID() || window.crypto.randomUUID(),
         sourceSessionID: opencodeSession()?.sessionID,
+        modelId: opencodeSession()?.modelID || selectedModelId(),
       })
-      setOpenCodeSession(result.session)
+      adoptOpenCodeSession(result.session)
       setAgentMessages([])
       persistActiveSession(result.session)
       setShowOpenCode(false)
@@ -1167,7 +1173,7 @@ function ApplicationAgentShell(props: {
     setSelectedSelectionRows([])
     setSavedPlatformAccount(null)
     setTask(null)
-    setOpenCodeSession(null)
+    adoptOpenCodeSession(null)
     setShowOpenCode(false)
     setError(null)
     setShowRefillConfirmation(false)
@@ -1191,7 +1197,7 @@ function ApplicationAgentShell(props: {
       setShareSupplementAcrossSchools(false)
       setShowRefillConfirmation(false)
       setRefillRequestID("")
-      setOpenCodeSession(session)
+      adoptOpenCodeSession(session)
       setShowOpenCode(false)
       setAgentMessages([])
       persistActiveSession(session)
@@ -1309,7 +1315,14 @@ function ApplicationAgentShell(props: {
 
   onMount(() => {
     void window.api.hasOpenCodeGoApiKey().then(setGoConfigured)
-    void window.api.getApplicationAgentModels().then(setAgentModels)
+    void window.api.getApplicationAgentModels().then((models) => {
+      setAgentModels(models)
+      // Keep the current selection when it is still valid (e.g. restored session
+      // already set a mimo id). Only fall back when the list is empty or the
+      // selection is unknown.
+      if (models.length === 0) return
+      if (!models.some((option) => option.id === selectedModelId())) setSelectedModelId(models[0].id)
+    })
     void refreshAuthStatus()
     void loadApplicationTasks()
     // Restore the last active session after an app restart so the material
@@ -1327,7 +1340,7 @@ function ApplicationAgentShell(props: {
             if (!session) return
             const latestTask = await window.api.getApplicationTask(workspacePath).catch(() => null)
             if (!latestTask) return
-            setOpenCodeSession(session)
+            adoptOpenCodeSession(session)
             setTask(latestTask)
             setInput(latestTask.input)
             void refreshAgentMessages(session)
@@ -1583,9 +1596,14 @@ function ApplicationAgentShell(props: {
                     title={opencodeSession() ? "任务已开始，模型不能切换" : "选择申请 Agent 使用的模型"}
                     onChange={(event) => setSelectedModelId(event.currentTarget.value)}
                   >
-                    <For each={agentModels()}>
-                      {(option) => <option value={option.id} title={option.description}>{option.label}</option>}
-                    </For>
+                    <Show
+                      when={agentModels().length > 0}
+                      fallback={<option value={selectedModelId()}>{selectedModelId()}</option>}
+                    >
+                      <For each={agentModels()}>
+                        {(option) => <option value={option.id} title={option.description}>{option.label}</option>}
+                      </For>
+                    </Show>
                   </select>
                 </label>
               </div>

@@ -7,6 +7,7 @@ import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
+import { ProviderError } from "@/provider/error"
 import { ModelID, ProviderID } from "../provider/schema"
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
@@ -1243,6 +1244,10 @@ export const layer = Layer.effect(
         const slog = elog.with({ sessionID })
         let structured: unknown
         let step = 0
+        // Gateway body-size overflows (e.g. opencode-go 6MB) trigger compaction.
+        // Cap retries so a single oversized tool payload cannot compact forever.
+        let bodySizeCompactAttempts = 0
+        const BODY_SIZE_COMPACT_LIMIT = 2
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1460,6 +1465,18 @@ export const layer = Layer.effect(
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
+              const overflowText = handle.lastOverflowMessage ?? ""
+              if (ProviderError.isRequestBodySizeLimit(overflowText)) {
+                bodySizeCompactAttempts += 1
+                if (bodySizeCompactAttempts > BODY_SIZE_COMPACT_LIMIT) {
+                  handle.message.error = new MessageV2.ContextOverflowError({
+                    message:
+                      "Provider request body remained over the size limit after compaction. Start a new session or reduce screenshots and large tool outputs.",
+                  }).toObject()
+                  yield* sessions.updateMessage(handle.message)
+                  return "break" as const
+                }
+              }
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
