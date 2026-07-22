@@ -13,6 +13,50 @@ afterEach(async () => {
 })
 
 describe("shared student dossier tools", () => {
+  test("owner cannot enter material review before student profile is prepared", async () => {
+    const root = await temporaryDirectory()
+    const layout = await createStudentWorkspace(join(root, "李四-申请批次"))
+    const ownerWorkspace = join(layout.schoolsPath, "01-hku")
+    await Promise.all([
+      schoolFixture(ownerWorkspace, layout.sharedWorkspacePath, "owner-incomplete", 1),
+      writeJson(layout.sharedDossierStatePath, {
+        status: "preparing",
+        version: 0,
+        ownerTaskId: "owner-incomplete",
+      }),
+      writeJson(join(layout.workspacePath, "03_state", "batch_state.json"), {
+        id: "batch-incomplete",
+        workspaceLayoutVersion: 2,
+        studentName: "李四",
+        sharedWorkspacePath: layout.sharedWorkspacePath,
+      }),
+    ])
+    const ownerTools = await generatedTools(ownerWorkspace, layout.sharedWorkspacePath)
+    await Promise.all([
+      writeJson(join(ownerWorkspace, "03_state/materials_index.json"), []),
+      writeJson(join(ownerWorkspace, "03_state/missing_items.json"), []),
+      writeJson(join(ownerWorkspace, "03_state/material_review.json"), { status: "pending" }),
+    ])
+
+    const documents = JSON.parse(await ownerTools.documents.execute(
+      { input: { action: "generate_all" } },
+      { directory: ownerWorkspace, agent: "application-agent" },
+    ))
+    expect(documents).toMatchObject({
+      status: "blocked",
+      documentsGenerated: true,
+      publishOk: false,
+      mustContinuePreparation: true,
+    })
+    expect(String(documents.publishWarning)).toContain("STUDENT_DOSSIER_INCOMPLETE")
+    expect(await readJson(join(ownerWorkspace, "03_state/material_review.json"))).toMatchObject({ status: "preparing" })
+    expect(await readJson(join(ownerWorkspace, "03_state/task_state.json"))).toMatchObject({ status: "正在生成学生资料" })
+    await expect(ownerTools.state.execute(
+      { input: { status: "等待顾问确认材料", message: "错误地提前进入确认" } },
+      { directory: ownerWorkspace, agent: "application-agent" },
+    )).rejects.toThrow("STUDENT_DOSSIER_INCOMPLETE")
+  })
+
   test("publishes once and makes later school preparation read-only", async () => {
     const root = await temporaryDirectory()
     const layout = await createStudentWorkspace(join(root, "张三-申请批次"))
@@ -408,6 +452,101 @@ describe("shared student dossier tools", () => {
     expect(edit["02_generated/student_profile.md"]).not.toBe("deny")
     expect(edit["**/02_generated/student_profile.md"]).not.toBe("deny")
     expect(edit["03_state/materials_index.json"]).not.toBe("deny")
+    const prompt = await Bun.file(join(ownerWorkspace, ".opencode/prompts/application-agent.md")).text()
+    expect(prompt).toContain(JSON.stringify(ownerWorkspace))
+    expect(prompt).toContain(JSON.stringify(layout.sharedWorkspacePath))
+    expect(prompt).toContain("read_profile_sources")
+    expect(prompt).toContain("publishOk:true")
+  })
+
+  test("start prompt requires owner extract_text before any stop", async () => {
+    const { buildApplicationAgentStartPrompt } = await import("./application-agent-opencode")
+    const prompt = buildApplicationAgentStartPrompt({
+      id: "start-continuity",
+      slug: "01-school",
+      workspacePath: "/tmp/school",
+      sessionDirectory: "/tmp/school",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: "已创建",
+      input: {
+        studentName: "测试学生",
+        sourceFolder: "/tmp/shared/00_original_backup",
+        school: "NTU",
+        program: "MSc",
+        applicationType: "硕士",
+        applicationUrl: "https://example.edu/apply",
+        batchWorkspacePath: "/tmp/测试学生-申请批次-2",
+        sharedWorkspacePath: "/tmp/测试学生-申请批次-2/shared",
+        batchOrder: 1,
+      },
+      counts: { totalFiles: 0, missingInformation: 0, missingMaterials: 0, uncertainItems: 0 },
+      generatedFiles: [],
+      progress: [],
+    } as any)
+    expect(prompt).toContain("必须在同一连续执行中立刻调用 application-agent_materials")
+    expect(prompt).toContain("禁止等待顾问输入“继续”")
+    expect(prompt).not.toContain("请现在只执行“启动阶段”")
+  })
+
+  test("extract_text mirrors shared OCR and read_profile_sources returns local texts without absolute paths", async () => {
+    const root = await temporaryDirectory()
+    const layout = await createStudentWorkspace(join(root, "测试学生-申请批次-2"))
+    const ownerWorkspace = join(layout.schoolsPath, "01-ntu-msc-accountancy")
+    await Promise.all([
+      schoolFixture(ownerWorkspace, layout.sharedWorkspacePath, "owner-ocr-mirror", 1),
+      writeJson(layout.sharedDossierStatePath, {
+        status: "preparing",
+        version: 0,
+        ownerTaskId: "owner-ocr-mirror",
+      }),
+      writeJson(join(layout.workspacePath, "03_state", "batch_state.json"), {
+        id: "batch-ocr-mirror",
+        workspaceLayoutVersion: 2,
+        studentName: "测试学生",
+        sharedWorkspacePath: layout.sharedWorkspacePath,
+      }),
+      Bun.write(join(layout.sharedMaterialsPath, "香港_新加坡研究生申请信息收集表.txt"), "姓名：测试学生\n邮箱：student@example.com\n"),
+    ])
+    const ownerTools = await generatedTools(ownerWorkspace, layout.sharedWorkspacePath)
+    await Bun.write(join(ownerWorkspace, ".opencode/bin/terra-ocr"), "#!/bin/bash\nexit 0\n")
+    const { chmod } = await import("node:fs/promises")
+    await chmod(join(ownerWorkspace, ".opencode/bin/terra-ocr"), 0o755)
+    const init = JSON.parse(await ownerTools.workspace.execute(
+      { input: { action: "initialize" } },
+      { directory: ownerWorkspace, agent: "application-agent" },
+    ))
+    expect(init).toMatchObject({
+      ownerPreparation: true,
+      mustContinueWith: "application-agent_materials extract_text",
+    })
+    const extracted = JSON.parse(await ownerTools.materials.execute(
+      { input: { action: "extract_text" } },
+      { directory: ownerWorkspace, agent: "application-agent" },
+    ))
+    expect(extracted.localRead.nextTool).toBe("application-agent_materials read_profile_sources")
+    expect(extracted.mustContinueWith).toBe("application-agent_materials classify")
+    expect(JSON.stringify(extracted.files)).not.toContain(layout.sharedWorkspacePath)
+    const localIndex = await readJson(join(ownerWorkspace, "03_state/ocr_index.json")) as Array<{ output: string }>
+    expect(localIndex.length).toBeGreaterThan(0)
+    for (const item of localIndex) {
+      expect(item.output.startsWith("03_state/extracted_text/")).toBe(true)
+      expect(await Bun.file(join(ownerWorkspace, item.output)).exists()).toBe(true)
+    }
+    const classified = JSON.parse(await ownerTools.materials.execute(
+      { input: { action: "classify" } },
+      { directory: ownerWorkspace, agent: "application-agent" },
+    ))
+    expect(classified.mustContinueWith).toBe("application-agent_materials read_profile_sources")
+    const sources = JSON.parse(await ownerTools.materials.execute(
+      { input: { action: "read_profile_sources" } },
+      { directory: ownerWorkspace, agent: "application-agent" },
+    ))
+    expect(sources.returnedSources).toBeGreaterThan(0)
+    expect(sources.writeProfileTo).toBe("02_generated/student_profile.md")
+    expect(JSON.stringify(sources)).toContain("student@example.com")
+    expect(JSON.stringify(sources.sources)).not.toContain(layout.sharedWorkspacePath)
+    expect(JSON.stringify(sources.sources)).not.toContain("测试学生 - ")
   })
 })
 
@@ -471,6 +610,7 @@ async function generatedTools(workspacePath: string, sharedWorkspacePath: string
     workspace: GeneratedTool
     materials: GeneratedTool
     documents: GeneratedTool
+    state: GeneratedTool
     cua: GeneratedTool
   }>
 }

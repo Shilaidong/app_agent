@@ -10,6 +10,7 @@ const refillSource = readFileSync(join(root, "src/main/application-agent-refill.
 const opencodeSource = readFileSync(join(root, "src/main/application-agent-opencode.ts"), "utf8")
 const mainSource = readFileSync(join(root, "src/main/index.ts"), "utf8")
 const modelSource = readFileSync(join(root, "src/main/application-agent-model.ts"), "utf8")
+const ollamaCloudSource = readFileSync(join(root, "src/main/ollama-cloud.ts"), "utf8")
 const constantsSource = readFileSync(join(root, "src/main/constants.ts"), "utf8")
 const builderSource = readFileSync(join(root, "electron-builder.config.ts"), "utf8")
 const prebuildSource = readFileSync(join(root, "scripts/prebuild.ts"), "utf8")
@@ -144,7 +145,15 @@ includesAll(expectedGeneratedFiles, "generated file contract")
 
 assert(countMatches(/name: "/g) >= expectedSkills.length, "Skill definitions appear truncated")
 assert(source.includes("model: ${APPLICATION_AGENT_MODEL}"), "Default OpenCode Go model constant is not used")
-assert(modelSource.includes('id: "qwen3.7-plus"') && modelSource.includes("APPLICATION_AGENT_MODEL_ID = APPLICATION_AGENT_MODELS[0].id"), "Default OpenCode Go model must be Qwen 3.7 Plus")
+assert(modelSource.includes('model("opencode-go", "qwen3.7-plus"') && modelSource.includes("APPLICATION_AGENT_MODEL_ID = APPLICATION_AGENT_MODELS[0].id"), "Default OpenCode Go model must be Qwen 3.7 Plus")
+assert(modelSource.includes('model("ollama-cloud", "qwen3.5:397b"'), "Ollama Cloud Qwen 3.5 must be available as an application model")
+assert(modelSource.includes("OpenCode Go 订阅") && modelSource.includes("Ollama Cloud 订阅"), "Model picker must label OpenCode Go vs Ollama Cloud subscriptions")
+assert(modelSource.includes('"kimi-k2.6"') && modelSource.includes('"minimax-m3"') && modelSource.includes('"nemotron-3-super"'), "Multimodal catalog must include Kimi, MiniMax M3, and NVIDIA options")
+assert(rendererSource.includes("<optgroup label={group.subscription}>"), "Model select must group options by subscription")
+assert(ollamaCloudSource.includes("process.resourcesPath") && ollamaCloudSource.includes("ollama-cloud-key.txt"), "Ollama Cloud must read its bundled private API key")
+assert(!ollamaCloudSource.includes("security") && !ollamaCloudSource.includes("keychain"), "Ollama Cloud must not access the macOS Keychain")
+assert(desktopServerSource.includes("OLLAMA_API_KEY") && desktopServerSource.includes("getOllamaCloudApiKey"), "Desktop sidecar must receive the bundled Ollama Cloud credential")
+assert(builderSource.includes("ollama-cloud-key.txt"), "mac package must bundle the Ollama Cloud credential")
 assert(source.includes("question: \"allow\""), "OpenCode question tool must be enabled for consultant confirmation cards")
 assert(source.includes("todowrite"), "OpenCode todowrite SOP is missing")
 assert(source.includes("webfetch"), "OpenCode webfetch requirement research is missing")
@@ -172,6 +181,12 @@ for (const protectedPath of [".opencode/**", "03_state/application_progress.json
 assert(opencodeSource.includes("OpenCode routes write/edit/patch through permission.edit"), "Protected write/edit/patch state must be enforced through OpenCode permission.edit")
 assert(opencodeSource.includes("MATERIAL_REVIEW_UNTRUSTED"), "prepare_ego_task must reject forged material reviews without desktop trust")
 assert(opencodeSource.includes("documentsGenerated") && opencodeSource.includes("publishWarning"), "Document generation must report publish failures without swallowing generated files")
+assert(opencodeSource.includes("mustContinuePreparation") && opencodeSource.includes("STUDENT_DOSSIER_INCOMPLETE"), "Incomplete shared dossiers must remain in preparation instead of opening material review")
+assert(
+  (opencodeSource.includes("禁止自行给批次名增加空格") || opencodeSource.includes("禁止在连字符两侧插入空格") || opencodeSource.includes("连字符两侧") || opencodeSource.includes("read_profile_sources"))
+    && opencodeSource.includes("当前选校批次路径契约"),
+  "Generated Agent prompts must preserve exact batch paths",
+)
 assert(opencodeSource.includes("task.ocr") && opencodeSource.includes("avgSeconds"), "OCR loop must write structured progress for the desktop UI")
 assert(opencodeSource.includes("--jsonl") && opencodeSource.includes("spawn(ocr"), "Materials OCR must prefer multi-file --jsonl batch mode with single-file fallback")
 assert(opencodeSource.includes("fillDatePickerByClicks") && opencodeSource.includes("EGO_FILL_DATE_PICKER_SOURCE"), "Managed browser policy must ship fillDatePickerByClicks")
@@ -203,6 +218,8 @@ assert(source.includes("绝不自动抢回控制"), "ego-browser SOP must forbid
 assert(source.includes("type 为 alert 时使用 accept:true"), "ego-browser SOP must accept validation alerts before rescanning")
 assert(source.includes("type 为 beforeunload 时一律 accept:false"), "ego-browser SOP must cancel beforeunload dialogs")
 assert(source.includes("唯一例外是 Page.handleJavaScriptDialog"), "ego-browser SOP must stop all other actions while a native dialog is open")
+assert(source.includes("必须点击页面上真实可见的 Save / Continue") && source.includes("该点击必须包在 observePageAction 里"), "ego-browser SOP must require a real Save/Continue click after verified page completion")
+assert(source.includes("Major is required.") && source.includes("严禁对“确定/OK”做 snapshot click"), "ego-browser SOP must dismiss native validation alerts via CDP instead of clicking 确定")
 assert(source.includes("任何可能改变页面结构或可见内容的动作都会使旧复查失效"), "ego-browser SOP must invalidate prior form checks after dynamic changes")
 assert(source.includes("writeEgoBrowserSkill"), "Workspace generator must install bundled ego-browser skill")
 assert(source.includes("readAuthoritativeEgoBrowserResource") && source.includes("officialSkill.sha256"), "Workspace generator must load and hash-check the current vendored Ego skill")
@@ -270,14 +287,19 @@ assert(!existsSync(join(root, "resources/vendor/terra-dialog-guard/terra-dialog-
 assert(source.includes("extract_text"), "Materials tool must expose deterministic OCR extraction")
 assert(source.includes("isNativeTextMaterialPath") && source.includes("appendNativeTextExtractions") && source.includes("textutil"), "Materials extract_text must extract office/text documents, not only OCR scans")
 assert(source.includes("信息收集") && source.includes("命中学生信息收集表关键词"), "Info-collection forms must classify as high-value identity materials")
-assert(source.includes("ownerPreparation:true 后不得在只更新") || source.includes("ownerPreparation:true 时，更新状态后不得结束本回合"), "Startup SOP must forbid finishing after only setting 正在读取文件")
+assert(source.includes("ownerPreparation:true 后不得在只更新") || source.includes("ownerPreparation:true 时，更新状态后不得结束本回合") || source.includes("必须在同一连续执行中立刻调用 application-agent_materials"), "Startup SOP must forbid finishing after only setting 正在读取文件")
+assert(source.includes("syncSchoolLocalExtractedText") && source.includes("localRead"), "extract_text must mirror OCR text into school-local relative paths for profile generation")
+assert(source.includes("read_profile_sources") && source.includes("readProfileSources"), "materials tool must expose read_profile_sources so profile generation does not invent absolute paths")
+assert(source.includes("mustContinueWith") && source.includes("application-agent_materials extract_text"), "Owner workspace initialize must require immediate extract_text continuation")
+assert(!source.includes("请现在只执行“启动阶段”"), "Start prompt must not stop after the startup phase")
+assert(source.includes("read_profile_sources") || source.includes("连字符两侧") || source.includes("禁止改写批次目录名"), "Path contract must keep agents off hand-written absolute batch paths")
 assert(source.includes("record_dynamic_form_verified") && source.includes("DYNAMIC_FORM_SCAN_REQUIRED"), "Dynamic form rescan gate is missing")
 assert(desktopUiSource.includes("multiple?: boolean") && desktopUiSource.includes("确认并提交所选项"), "Consultant multi-select question submission is missing")
 assert(!windowsSource.includes("trafficLightPosition"), "macOS windows must keep the native draggable titlebar")
 assert(prebuildSource.includes("bundle-ripgrep") && prebuildSource.includes("build-terra-paddleocr") && !prebuildSource.includes("build-terra-dialog-guard"), "Desktop build must prepare bundled ripgrep and PaddleOCR without the retired dialog guard")
 assert(builderSource.includes("resources/vendor/ripgrep/") && builderSource.includes("resources/vendor/terra-paddleocr/") && !builderSource.includes("resources/vendor/terra-dialog-guard/"), "Desktop package must include ripgrep and PaddleOCR without the retired dialog guard")
-assert(source.includes("启动阶段只做"), "Startup prompt must constrain the first turn to a minimal startup phase")
-assert(source.includes("不要在启动阶段调用 webfetch"), "Startup prompt must keep web research out of the first turn")
+assert(source.includes("启动阶段只做") || source.includes("启动阶段先做"), "Startup prompt must constrain the first turn to a minimal startup phase")
+assert(source.includes("不要在启动阶段调用 webfetch") || source.includes("启动阶段不要调用 webfetch"), "Startup prompt must keep web research out of the first turn")
 assert(source.includes("todowrite 如果失败一次"), "Startup prompt must not block workspace initialization on todowrite failure")
 assert(!source.includes("OpenCode 内置工具参数必须严格使用官方字段名"), "Startup prompt must not include brittle built-in field-name contracts")
 assert(!source.includes("read -> read_file"), "Startup prompt must not include a fallback mapping table")
@@ -312,6 +334,8 @@ assert(!rendererSource.includes("pendingScrollRestore"), "Renderer must not rest
 assert(rendererSource.includes("material-review-gate"), "Renderer must show the material-review gate before browser automation")
 assert(rendererSource.includes("pickSupplementalFolder"), "Material-review gate must open a native folder picker")
 assert(rendererSource.includes("暂不补充，开始填表"), "Material-review gate must let advisors continue without extra material")
+assert(rendererSource.includes("opencodeSession() ?? await window.api.findApplicationAgentSession"), "Material review must recover a missing renderer session instead of silently returning")
+assert(rendererSource.includes("发现学生核心档案尚未生成") && rendererSource.includes("必须逐字使用以上路径"), "Material review must route incomplete owner dossiers back to the Agent with exact paths")
 assert(rendererSource.includes("isSameApplicationTaskInput"), "Renderer duplicate task guard is missing")
 assert(rendererSource.includes("不会再创建重复任务"), "Renderer duplicate task user notice is missing")
 assert(desktopUiSource.includes("Agent 可能卡住"), "Renderer/main message projection must expose stalled agent state")
@@ -347,6 +371,8 @@ const qwenCatalogModel = modelsCatalog["opencode-go"]?.models?.["qwen3.7-plus"]
 assert(qwenCatalogModel?.description === "Multimodal reasoning model for visual analysis, planning, and tool use", "Vendored models.dev snapshot must contain the full Qwen 3.7 Plus catalog record")
 assert(qwenCatalogModel.attachment === true && qwenCatalogModel.modalities?.input?.includes("image"), "Vendored Qwen 3.7 Plus metadata must enable image attachments")
 assert(qwenCatalogModel.provider?.npm === "@ai-sdk/anthropic", "Vendored Qwen 3.7 Plus metadata must select its real provider protocol")
+const ollamaQwenCatalogModel = modelsCatalog["ollama-cloud"]?.models?.["qwen3.5:397b"]
+assert(ollamaQwenCatalogModel?.attachment === true && ollamaQwenCatalogModel.modalities?.input?.includes("image"), "Vendored Ollama Qwen 3.5 metadata must enable image attachments")
 assert(releaseMacSource.includes("ELECTRON_BUILDER_CACHE"), "mac release must keep electron-builder cache inside the workspace")
 assert(releaseMacSource.includes("bun test"), "mac release must run desktop unit tests")
 assert(releaseMacSource.includes("bundled-qwen-catalog.test.ts") && releaseMacSource.includes("test/tool/read.test.ts"), "mac release must run the empty-cache Qwen catalog and read-permission regressions")
@@ -468,19 +494,25 @@ assert(source.includes("record_blocker") && source.includes("blockerDisposition"
 assert(source.includes("handoffPending") && source.includes("BROWSER_HANDOFF_PENDING"), "A handed-off task space must not be automatically prepared or reclaimed")
 assert(source.includes("listTaskSpaces") && source.includes("legacyTaskSpaceConfirmationRequiredAt"), "Legacy workspaces without a task-space id must require advisor confirmation")
 assert(source.includes("await claimTaskSpace(taskSpaceId)"), "A consultant-selected user/inactive legacy task space must resume with the official claimTaskSpace API")
+assert(source.includes("resumeProbePending") && source.includes("BROWSER_RESUME_PROBE_REQUIRED") && source.includes("taskSpacePresent"), "resume_ego must require a listTaskSpaces probe before takeOver after handoff")
+assert(source.includes("TERRA_EGO_TASKSPACE_RECOVERY_REQUIRED"), "ego-browser wrapper must hard-block takeOver/create while resume probe or rebind confirmation is pending")
+assert(source.includes("cuaEvidence") && source.includes("input.detail"), "retire/resume evidence must accept detail as well as evidence/text")
 assert(source.includes("TASK_SPACE_RETIRE_CONFIRMATION_REQUIRED") && source.includes("replacement_creation_authorized") && source.includes("retiredTaskSpaces"), "A disappeared numeric task-space id must use an explicit two-phase retire-and-rebind audit")
 assert(source.includes("browserCompletionGateError") && source.includes("BROWSER_COMPLETION_SAVE_PENDING") && source.includes("BROWSER_COMPLETION_HANDOFF_PENDING") && source.includes("BROWSER_COMPLETION_REQUIRED_FIELDS_REMAIN") && source.includes("BROWSER_COMPLETION_OBSERVATION_REQUIRED"), "Browser completion must gate pending saves/handoffs/required fields and require fresh exact page evidence")
 assert(source.includes("BROWSER_TASK_ALREADY_COMPLETED") && source.includes("TERRA_EGO_COMPLETION_HELPER_FAILED:") && source.includes("completionFailures") && source.includes("BROWSER_TASK_FINALIZATION_FAILED") && source.includes("completionHelperFailedAt"), "A failed final helper call must atomically archive completion and terminally lock the current browser session")
 assert(
   source.includes("TERRA_EGO_UNSAFE_TASKSPACE_CLOSE") &&
     source.includes("TERRA_EGO_UNSAFE_PAGE_RELOAD") &&
+    source.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") &&
+    source.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") &&
+    source.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") &&
     source.includes("completeTaskSpace 只能使用可验证的字面量") &&
     source.includes("EGO_NODE_STDIN_COMPACT") &&
     source.includes('"$HELPER" "$@" <"$EGO_NODE_STDIN"') &&
     !opencodeSource.includes("/usr/bin/sandbox-exec") &&
     !opencodeSource.includes("NODE_OPTIONS=") &&
     !opencodeSource.includes("TERRA_EGO_NODE_PERMISSION_"),
-  "The managed Ego wrapper must reject destructive closure while preserving a direct pinned-helper execution path",
+  "The managed Ego wrapper must reject destructive closure, scripted submit, bare Save clicks, and native-alert OK clicks while preserving a direct pinned-helper execution path",
 )
 assert(
   opencodeSource.includes("TERRA_EGO_NODE_CAPABILITY_DENIED") &&
@@ -551,8 +583,8 @@ assert(rendererSource.includes("?? await window.api.startApplicationAgentSession
 assert(rendererSource.includes("startApplicationAgentSession(firstTask, selectedModelId())"), "Selection-list batch start must pass the selected model")
 assert(rendererSource.includes("modelId: opencodeSession()?.modelID || selectedModelId()"), "Refill must reuse the live session model when available")
 assert(rendererSource.includes("adoptOpenCodeSession"), "Renderer must sync the model selector when adopting a session")
-assert(mainSource.includes("prepareApplicationAgentConfig(workspacePath, { modelId: modelID })"), "findApplicationAgentSession must rewrite workspace config with the session model")
-assert(mainSource.includes("prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.modelID })"), "Resend/start paths must prepare workspace config with the resolved model")
+assert(mainSource.includes("prepareApplicationAgentConfig(workspacePath, { modelId: resolved.optionID })"), "findApplicationAgentSession must rewrite workspace config with the session model")
+assert(mainSource.includes("prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.optionID })"), "Resend/start paths must prepare workspace config with the resolved model")
 assert(opencodeErrorSource.includes("exceeded limit on max bytes to request body") && opencodeErrorSource.includes("isRequestBodySizeLimit"), "Provider overflow detection must recognize request body size limits")
 assert(opencodePromptSource.includes("BODY_SIZE_COMPACT_LIMIT") && opencodePromptSource.includes("isRequestBodySizeLimit"), "Prompt loop must cap body-size compaction retries")
 assert(rendererSource.includes("shareSupplementAcrossSchools"), "Material review must explicitly distinguish school-only and student-wide supplements")
@@ -564,6 +596,7 @@ assert(applicationSource.includes("resumeStatus") && applicationSource.includes(
 assert(rendererSource.includes("taskNeedsExplicitContinue") && rendererSource.includes("等待顾问接管浏览器"), "Browser-handoff tasks must expose the same explicit Continue action as paused tasks")
 assert(rendererSource.includes("action=resume_ego") && rendererSource.includes("consultantConfirmed=true"), "Explicit browser-handoff continuation must instruct the Agent to record resume_ego confirmation")
 assert(rendererSource.includes("不得在调用成功前运行 ego-browser"), "Browser-handoff continuation must not allow takeover before resume_ego succeeds")
+assert(rendererSource.includes("taskSpacePresent") && rendererSource.includes("listTaskSpaces 探测"), "Browser-handoff continuation must require the two-phase resume list probe")
 
 const workspace = process.env.APPLICATION_AGENT_WORKSPACE
 if (workspace) {

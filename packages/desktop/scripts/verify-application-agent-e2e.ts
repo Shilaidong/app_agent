@@ -291,6 +291,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_TASKSPACE_CLOSE") && wrapperSource.includes("EGO_NODE_STDIN_COMPACT"), "Workspace wrapper must inspect nodejs stdin before launching Ego.")
   assert(wrapperSource.includes("completeTaskSpace 只能使用可验证的字面量") && wrapperSource.includes("keep[[:space:]]*:[[:space:]]*true"), "Workspace wrapper must allow only a mechanically verified literal keep:true completion call.")
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_PAGE_RELOAD") && wrapperSource.includes("grep -Eiq 'closeTab'") && wrapperSource.includes("grep -Eiq 'reload'"), "Workspace wrapper must reject automatic reloads and every direct or aliased programmatic tab close before Ego starts.")
+  assert(wrapperSource.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") && wrapperSource.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") && wrapperSource.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED"), "Workspace wrapper must reject scripted submit, bare Save/Continue clicks, and native-alert OK clicks.")
   assert(wrapperSource.includes('"$HELPER" "$@" <"$EGO_NODE_STDIN"'), "Workspace wrapper must forward the model-authored nodejs source directly to the pinned Ego helper.")
   assert(!wrapperSource.includes("/usr/bin/sandbox-exec") && !wrapperSource.includes("TERRA_EGO_NODE_PERMISSION_"), "Workspace wrapper must not add a sandbox or permission broker around Ego's independent browser service.")
 
@@ -339,10 +340,12 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(terraPolicy.includes("helper 回合退出时自动消掉仍未处理的弹窗") && terraPolicy.includes("只在初次导航期间临时替换无选择分支的 window.alert") && terraPolicy.includes("它绝不替换 confirm、prompt 或 beforeunload"), "Terra policy must reflect the observed load-alert detach behavior and limit interception to information-only initial alerts.")
   assert(terraPolicy.includes("captureScreenshot('05_screenshots/<unique-name>.png')") && terraPolicy.includes("OpenCode `read` on that exact") && terraPolicy.includes("image/png"), "Terra policy must require explicit workspace screenshots followed by exact OpenCode image reads.")
   assert(terraPolicy.includes("fillInput+Tab+readback") && terraPolicy.includes("click+snapshot+click-option+reobserve") && terraPolicy.includes("Vue internals"), "Terra policy must require real generic interactions and ban framework-internal writes.")
+  assert(terraPolicy.includes("必须点击页面上真实可见的 Save / Continue") && terraPolicy.includes("Major is required.") && terraPolicy.includes("Page.handleJavaScriptDialog accept:true"), "Terra policy must require real Save/Continue clicks and CDP dismissal of native validation alerts.")
   assert(terraPolicy.includes("completeTaskSpace(taskSpaceId, { keep: true })") && terraPolicy.includes("一律不得使用 keep:false"), "Terra policy must preserve completed Ego windows instead of exercising the crashing native close path.")
   const cuaSkill = readText(join(workspace, ".opencode/skills/cua-application-filling/SKILL.md"))
   assert(cuaSkill.includes("绝不自动抢回控制"), "CUA skill must forbid automatic task-space takeover.")
   assert(cuaSkill.includes("Page.handleJavaScriptDialog"), "CUA skill must guide native dialog handling.")
+  assert(cuaSkill.includes("必须点击真实可见的 Save / Continue") && cuaSkill.includes("Major is required."), "CUA skill must require Save/Continue clicks and native-alert CDP handling after page completion.")
   assert(cuaSkill.includes("observePageAction") && cuaSkill.includes("先启动动作但不 await"), "CUA skill must observe iframe dialogs while the triggering action is still pending.")
 
   const prompt = readText(join(workspace, ".opencode/prompts/application-agent.md"))
@@ -549,6 +552,35 @@ async function verifyCuaStateTransitions(workspace: string) {
     const expectedMarker = input.includes("closeTab") ? "TERRA_EGO_UNSAFE_TASKSPACE_CLOSE" : "TERRA_EGO_UNSAFE_PAGE_RELOAD"
     assert(result.status === 81 && result.stderr.includes(expectedMarker), `Wrapper must reject direct and aliased application-page destruction paths before launching Ego: ${input}`)
   })
+  ;[
+    { input: "await document.querySelector('form').requestSubmit()\n", marker: "TERRA_EGO_SCRIPTED_SUBMIT_DENIED" },
+    { input: "await form.submit()\n", marker: "TERRA_EGO_SCRIPTED_SUBMIT_DENIED" },
+    { input: "await click('@save', { label: 'Save' })\n", marker: "TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION" },
+    { input: "await click('@continue', { label: 'Continue' })\n", marker: "TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION" },
+    { input: "await click('确定')\n", marker: "TERRA_EGO_NATIVE_ALERT_CLICK_DENIED" },
+    { input: "await click('@ok', { label: 'OK' })\n", marker: "TERRA_EGO_NATIVE_ALERT_CLICK_DENIED" },
+  ].forEach(({ input, marker }) => {
+    const result = spawnSync(wrapper, ["nodejs"], { cwd: workspace, encoding: "utf8", input })
+    assert(result.status === 81 && result.stderr.includes(marker), `Wrapper must reject unsafe save/dialog shortcuts before launching Ego: ${input}`)
+  })
+  const observedSaveGate = spawnSync(wrapper, ["nodejs"], {
+    cwd: workspace,
+    encoding: "utf8",
+    input: "await click('@save', { label: 'Save' })\nawait observePageAction(() => {})\n",
+  })
+  assert(
+    observedSaveGate.status !== 81 || !observedSaveGate.stderr.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION"),
+    "Wrapper must not apply TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION when observePageAction is present in the same heredoc",
+  )
+  const cdpAlertGate = spawnSync(wrapper, ["nodejs"], {
+    cwd: workspace,
+    encoding: "utf8",
+    input: "await click('确定')\nawait cdp('Page.handleJavaScriptDialog', { accept: true })\n",
+  })
+  assert(
+    cdpAlertGate.status !== 81 || !cdpAlertGate.stderr.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED"),
+    "Wrapper must not apply TERRA_EGO_NATIVE_ALERT_CLICK_DENIED when handleJavaScriptDialog is present in the same heredoc",
+  )
   ;[
     "const fs = require('fs')\nfs.writeFileSync('03_state/x.json', '{}')\n",
     'const cp = require("child_process")\n',
@@ -1427,16 +1459,29 @@ async function verifyCuaStateTransitions(workspace: string) {
   })
   assert(String(prepareDuringHandoff).includes("BROWSER_HANDOFF_PENDING"), "prepare_ego_task must not reopen or claim a handed-off task space.")
 
-  const resumedHandoff = await executeCua({
+  const resumedProbe = await executeCua({
     action: "resume_ego",
     taskSpaceId: "101",
     consultantConfirmed: true,
   })
-  assert(String(resumedHandoff).includes('takeOverTaskSpace("101")'), "A consultant-confirmed handoff must resume only through the saved numeric task space.")
-  assert(!String(resumedHandoff).includes("const task = await useOrCreateTaskSpace"), "A consultant-confirmed handoff must not silently recreate or claim a task space.")
+  assert(String(resumedProbe).includes("BROWSER_RESUME_PROBE_REQUIRED") && String(resumedProbe).includes("listTaskSpaces"), "Consultant-confirmed handoff must first authorize a listTaskSpaces probe.")
+  assert(!String(resumedProbe).includes('takeOverTaskSpace("101")'), "The first resume_ego round must not authorize takeOver before the saved ID is listed.")
+  assert(!String(resumedProbe).includes("const task = await useOrCreateTaskSpace"), "A consultant-confirmed handoff must not silently recreate or claim a task space.")
+  const probeProgress = readRecord(join(workspace, "03_state/application_progress.json"))
+  assert(probeProgress.egoBrowser?.handoffPending === true && probeProgress.egoBrowser?.resumeProbePending === true, "Resume authorization alone must leave a list probe pending.")
+  assert(!probeProgress.egoBrowser?.resumedAt, "A resume timestamp must not be written before takeOverTaskSpace and its first observation succeed.")
+
+  const resumedHandoff = await executeCua({
+    action: "resume_ego",
+    taskSpaceId: "101",
+    consultantConfirmed: true,
+    taskSpacePresent: true,
+    evidence: "listTaskSpaces still contains numeric ID 101 with agent ownership.",
+  })
+  assert(String(resumedHandoff).includes('takeOverTaskSpace("101")'), "A consultant-confirmed handoff must resume only through the saved numeric task space after list proof.")
   assert(String(resumedHandoff).includes("第一步只调用 pageInfo()"), "The first recovered browser round must be observation-only.")
   const authorizedProgress = readRecord(join(workspace, "03_state/application_progress.json"))
-  assert(authorizedProgress.egoBrowser?.handoffPending === true && authorizedProgress.egoBrowser?.takeoverPending === true, "Consultant authorization alone must not claim that browser takeover succeeded.")
+  assert(authorizedProgress.egoBrowser?.handoffPending === true && authorizedProgress.egoBrowser?.takeoverPending === true && authorizedProgress.egoBrowser?.resumeProbePending === false, "List-confirmed resume must clear the probe gate without claiming takeover succeeded.")
   assert(!authorizedProgress.egoBrowser?.resumedAt, "A resume timestamp must not be written before takeOverTaskSpace and its first observation succeed.")
 
   const resumedObservation = await executeCua({
@@ -1451,6 +1496,36 @@ async function verifyCuaStateTransitions(workspace: string) {
   const resumedProgress = readRecord(join(workspace, "03_state/application_progress.json"))
   assert(resumedProgress.egoBrowser?.handoffPending === false && resumedProgress.egoBrowser?.takeoverPending === false, "Only a successful post-takeover observation may clear the handoff gate.")
   assert(typeof resumedProgress.egoBrowser?.resumedAt === "string", "Completed takeover must record its real resumedAt timestamp.")
+
+  // Re-hand off so a missing-ID resume path can be exercised without disturbing the prior success path above.
+  await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    ...mainFrameContext,
+    handoffType: "browser_takeover",
+    controlLossKind: "deliberate_handoff",
+    evidence: "Fixture handoff before missing-ID resume probe.",
+  })
+  await executeCua({
+    action: "resume_ego",
+    taskSpaceId: "101",
+    consultantConfirmed: true,
+  })
+  const missingViaResume = await executeCua({
+    action: "resume_ego",
+    taskSpaceId: "101",
+    consultantConfirmed: true,
+    taskSpacePresent: false,
+    detail: "listTaskSpaces returned []; saved numeric ID 101 is absent after Ego conflict.",
+  })
+  assert(String(missingViaResume).includes("TASK_SPACE_RETIRE_CONFIRMATION_REQUIRED"), "A missing saved ID discovered during resume must enter retire-and-rebind, not takeOver or create.")
+  assert(!String(missingViaResume).includes("await takeOverTaskSpace") && !String(missingViaResume).includes('takeOverTaskSpace("'), "Missing-ID resume must not authorize takeOver.")
+  assert(String(missingViaResume).includes("retire_and_rebind_ego_task"), "Missing-ID resume must hand the agent the retire-and-rebind next step.")
+  const missingResumeProgress = readRecord(join(workspace, "03_state/application_progress.json"))
+  assert(missingResumeProgress.egoBrowser?.taskSpaceId === "101" && missingResumeProgress.egoBrowser?.rebindPending?.phase === "consultant_confirmation", "Missing-ID resume must keep the old ID and open rebind confirmation.")
+  assert(missingResumeProgress.egoBrowser?.resumeProbePending === false, "Missing-ID resume must clear the list probe gate once rebind is pending.")
 
   const missingTaskSpaceEvidence = "listTaskSpaces returned IDs 202 and 404; saved numeric ID 101 is absent."
   const missingTaskSpaceDetection = await executeCua({

@@ -491,12 +491,106 @@ describe("browser safety stop hard gates", () => {
   })
 })
 
-async function createSafetyFixture(options?: { withRefillArtifacts?: boolean }) {
+async function createSafetyFixture(options?: { withRefillArtifacts?: boolean; taskSpaceId?: string }) {
   const workspacePath = await temporaryDirectory()
-  await seedWorkspace(workspacePath, { taskSpaceId: "42", withRefillArtifacts: options?.withRefillArtifacts })
+  const taskSpaceId = options?.taskSpaceId || "42"
+  await seedWorkspace(workspacePath, { taskSpaceId, withRefillArtifacts: options?.withRefillArtifacts })
   const task = await readJson(join(workspacePath, "03_state/task_state.json")) as FixtureTask
   return { workspacePath, task }
 }
+
+describe("resume probe and missing task-space recovery", () => {
+  test("resume_ego requires list proof before takeOver and routes missing IDs into rebind", async () => {
+    const fixture = await createSafetyFixture({ taskSpaceId: "17" })
+    await writeJson(join(fixture.workspacePath, "03_state/application_progress.json"), {
+      currentPage: "Login",
+      currentUrl: "https://example.edu/apply",
+      completedPages: [],
+      savedPages: [],
+      uploadedMaterials: [],
+      failedActions: [],
+      highRiskBlocks: [],
+      browserBackend: "ego-browser",
+      egoBrowser: {
+        taskSpaceId: "17",
+        taskSpaceName: "Terra-Edu / Safety Student",
+        preparedAt: new Date().toISOString(),
+        backend: "ego-browser",
+        handoffPending: true,
+        handoffAt: new Date().toISOString(),
+        handoffType: "login",
+        controlLossKind: "deliberate_handoff",
+      },
+    })
+    const tools = await generatedTools(fixture.workspacePath)
+
+    const probe = await tools.cua.execute(
+      { input: { action: "resume_ego", taskSpaceId: "17", consultantConfirmed: true } },
+      { directory: fixture.workspacePath, agent: "application-agent", sessionID: "session-resume" },
+    )
+    expect(probe).toContain("BROWSER_RESUME_PROBE_REQUIRED")
+    expect(probe).toContain("listTaskSpaces")
+    expect(probe).not.toContain('takeOverTaskSpace("17")')
+    expect((await readJson(join(fixture.workspacePath, "03_state/application_progress.json"))).egoBrowser.resumeProbePending).toBe(true)
+
+    const helper = join(fixture.workspacePath, "ego-browser-helper-stub")
+    await writeFile(
+      helper,
+      `#!/bin/sh
+set -eu
+if [ "\${1:-}" = "taskspace" ] && [ "\${2:-}" = "list" ]; then
+  printf '%s\\n' '[]'
+  exit 0
+fi
+[ "\${1:-}" = "nodejs" ] || exit 64
+printf '%s\\n' 'STUB_SHOULD_NOT_RUN'
+exit 0
+`,
+      "utf8",
+    )
+    await chmod(helper, 0o755)
+    await writeOpenCodeConfig(fixture.workspacePath, {
+      egoBrowserTestHelperPath: helper,
+      egoBrowserReadinessAttempts: 2,
+    })
+    const blockedCreate = await runWrapper(fixture.workspacePath, 'const task = await useOrCreateTaskSpace("rogue")\n')
+    expect(blockedCreate.status).toBe(84)
+    expect(blockedCreate.stderr).toContain("TERRA_EGO_TASKSPACE_RECOVERY_REQUIRED")
+    const allowedList = await runWrapper(fixture.workspacePath, "cliLog(JSON.stringify(await listTaskSpaces(), null, 2))\n")
+    expect(allowedList.status).toBe(0)
+
+    const missing = await tools.cua.execute(
+      {
+        input: {
+          action: "resume_ego",
+          taskSpaceId: "17",
+          consultantConfirmed: true,
+          taskSpacePresent: false,
+          detail: "listTaskSpaces returned []; saved ID 17 is absent",
+        },
+      },
+      { directory: fixture.workspacePath, agent: "application-agent", sessionID: "session-resume" },
+    )
+    expect(missing).toContain("TASK_SPACE_RETIRE_CONFIRMATION_REQUIRED")
+    const progress = await readJson(join(fixture.workspacePath, "03_state/application_progress.json"))
+    expect(progress.egoBrowser.taskSpaceId).toBe("17")
+    expect(progress.egoBrowser.rebindPending.phase).toBe("consultant_confirmation")
+    expect(progress.egoBrowser.resumeProbePending).toBe(false)
+
+    const detailEvidence = await tools.cua.execute(
+      {
+        input: {
+          action: "retire_and_rebind_ego_task",
+          taskSpaceId: "17",
+          missingTaskSpaceConfirmed: true,
+          detail: "listTaskSpaces=[] saved 17 missing",
+        },
+      },
+      { directory: fixture.workspacePath, agent: "application-agent", sessionID: "session-resume" },
+    )
+    expect(detailEvidence).toContain("TASK_SPACE_RETIRE_CONFIRMATION_REQUIRED")
+  })
+})
 
 async function seedWorkspace(workspacePath: string, options?: { taskSpaceId?: string; withRefillArtifacts?: boolean }) {
   await Promise.all([

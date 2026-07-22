@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url"
 import { app, utilityProcess } from "electron"
 import type { Details } from "electron"
 import { DEFAULT_SERVER_URL_KEY, WSL_ENABLED_KEY } from "./constants"
+import { getOllamaCloudApiKey } from "./ollama-cloud"
 import { openCodeGoAuthContent } from "./opencode-go"
 import { getUserShell, loadShellEnv } from "./shell-env"
 import { getStore } from "./store"
@@ -251,6 +252,8 @@ function createSidecarEnv(): Record<string, string> {
   )
   const goAuth = openCodeGoAuthContent()
   if (goAuth && !env.OPENCODE_AUTH_CONTENT) env.OPENCODE_AUTH_CONTENT = goAuth
+  const ollamaKey = getOllamaCloudApiKey()
+  if (ollamaKey && !env.OLLAMA_API_KEY) env.OLLAMA_API_KEY = ollamaKey
   if (app.isPackaged) env.OPENCODE_RIPGREP_PATH = join(process.resourcesPath, "vendor", "ripgrep", "rg")
   env.OPENCODE_DISABLE_PLUGIN_DEPENDENCY_INSTALL = "1"
   delete env.DEBUG

@@ -41,6 +41,7 @@ import {
   saveApplicationPlatformAccount,
 } from "./application-accounts"
 import { hasOpenCodeGoApiKey } from "./opencode-go"
+import { hasOllamaCloudApiKey } from "./ollama-cloud"
 import { getStore } from "./store"
 import { getTerraAuthStatus, loginTerraAdvisor, logoutTerraAdvisor } from "./terra-auth"
 import { setTitlebar, updateTitlebar } from "./windows"
@@ -75,7 +76,9 @@ type Deps = {
   installUpdate: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
   startApplicationAgentSession: (task: ApplicationTask, modelId?: string) => Promise<ApplicationAgentSession>
-  getApplicationAgentModels: () => Promise<readonly { id: string; label: string; description: string }[]>
+  getApplicationAgentModels: () => Promise<
+    readonly { id: string; modelID?: string; providerID?: string; subscription?: string; label: string; description: string }[]
+  >
   startApplicationAgentRefillSession: (
     input: ApplicationAgentRefillRequest,
   ) => Promise<ApplicationAgentRefillSession>
@@ -343,7 +346,9 @@ export function registerIpcHandlers(deps: Deps) {
     clearApplicationPlatformAccount(applicationUrl),
   )
   ipcMain.handle("application-agent:has-go-api-key", () => hasOpenCodeGoApiKey())
-  ipcMain.handle("application-agent:list-models", () => APPLICATION_AGENT_MODELS)
+  ipcMain.handle("application-agent:list-models", () =>
+    APPLICATION_AGENT_MODELS.filter((model) => model.providerID !== "ollama-cloud" || hasOllamaCloudApiKey()),
+  )
   ipcMain.handle("terra-auth:status", () => getTerraAuthStatus())
   ipcMain.handle("terra-auth:login", (_event: IpcMainInvokeEvent, email: string, password: string) =>
     loginTerraAdvisor(email, password),

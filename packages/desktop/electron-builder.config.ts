@@ -110,7 +110,7 @@ const getBase = (): Configuration => ({
     {
       from: "resources/private/",
       to: "private/",
-      filter: ["opencode-go-key.txt", "supabase-public.json"],
+      filter: ["opencode-go-key.txt", "ollama-cloud-key.txt", "supabase-public.json"],
     },
     {
       from: "resources/vendor/ripgrep/",

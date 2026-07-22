@@ -59,7 +59,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 const log = Log.create({ service: "tool.registry" })
 
 export function webSearchEnabled(providerID: ProviderID, flags = { exa: false, parallel: false }) {
-  return providerID.startsWith("opencode") || flags.exa || flags.parallel
+  return providerID.startsWith("opencode") || providerID === "ollama-cloud" || flags.exa || flags.parallel
 }
 
 type TaskDef = Tool.InferDef<typeof TaskTool>

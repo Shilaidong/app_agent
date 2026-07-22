@@ -571,19 +571,20 @@ const main = Effect.gen(function* () {
     // Reuse the session's original model so restarted prompts keep using it
     // instead of silently falling back to the default. Fall back to the
     // default only if the sidecar entry is old enough to lack a model field.
-    const modelID = resolveApplicationAgentModel(found.model?.id).modelID
-    await prepareApplicationAgentConfig(workspacePath, { modelId: modelID })
+    const resolved = resolveApplicationAgentModel(found.model?.id, found.model?.providerID)
+    await prepareApplicationAgentConfig(workspacePath, { modelId: resolved.optionID })
     return {
       sessionID: found.id,
       directory: workspacePath,
       workspacePath,
-      modelID,
+      modelID: resolved.modelID,
+      providerID: resolved.providerID,
     }
   }
 
   const startApplicationAgentSession = async (task: ApplicationTask, modelId?: string): Promise<ApplicationAgentSession> => {
     const resolved = resolveApplicationAgentModel(modelId)
-    await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.modelID })
+    await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.optionID })
     await ensureApplicationAgentQuota("start_application_task", task.workspacePath)
     const created = await postSidecarJson<{ id: string }>(
       "/session",
@@ -602,6 +603,7 @@ const main = Effect.gen(function* () {
       directory: task.sessionDirectory,
       workspacePath: task.workspacePath,
       modelID: resolved.modelID,
+      providerID: resolved.providerID,
     }
     await ensureApplicationAgentQuota("send_start_prompt", task.workspacePath, created.id)
     await postSidecarJson<void>(
@@ -641,7 +643,7 @@ const main = Effect.gen(function* () {
       const task = await getApplicationTask(input.task.workspacePath)
       const inspected = await inspectApplicationRefillAttempt(task.workspacePath, requestID)
       await validateApplicationRefillReadiness(task.workspacePath)
-      await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.modelID })
+      await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.optionID })
       await ensureApplicationAgentQuota("start_application_refill", task.workspacePath)
       const sourceSessionID = inspected?.sourceSessionID || input.sourceSessionID?.trim()
       if (!inspected?.sessionID && sourceSessionID) {
@@ -724,6 +726,7 @@ const main = Effect.gen(function* () {
         directory: task.sessionDirectory,
         workspacePath: task.workspacePath,
         modelID: resolved.modelID,
+        providerID: resolved.providerID,
       }
       type SidecarRefillMessage = { info?: { role?: string } }
       const messages = await getSidecarJson<SidecarRefillMessage[]>(
@@ -774,8 +777,8 @@ const main = Effect.gen(function* () {
     if (await applicationAgentForSession(session) !== "application-agent") {
       throw new Error("重新填写会话不能重新发送材料整理启动指令；请直接在当前对话中补充填表信息。")
     }
-    const resolved = resolveApplicationAgentModel(session.modelID)
-    await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.modelID })
+    const resolved = resolveApplicationAgentModel(session.modelID, session.providerID)
+    await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.optionID })
     await ensureApplicationAgentQuota("resend_start_prompt", task.workspacePath, session.sessionID)
     await postSidecarJson<void>(
       `/session/${session.sessionID}/prompt_async`,
@@ -806,7 +809,7 @@ const main = Effect.gen(function* () {
 
   const sendApplicationAgentPrompt = async (session: ApplicationAgentSession, prompt: string) => {
     const agent = await applicationAgentForSession(session)
-    const resolved = resolveApplicationAgentModel(session.modelID)
+    const resolved = resolveApplicationAgentModel(session.modelID, session.providerID)
     await ensureApplicationAgentQuota("send_agent_prompt", session.workspacePath, session.sessionID)
     const questions = await getSidecarJson<PendingQuestionRequest[]>("/question", session.directory).catch(() => [])
     const pendingQuestion = questions.find((item) => item.sessionID === session.sessionID)

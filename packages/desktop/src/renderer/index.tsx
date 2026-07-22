@@ -577,12 +577,31 @@ function ApplicationAgentShell(props: {
   const [showOpenCode, setShowOpenCode] = createSignal(false)
   const [goConfigured, setGoConfigured] = createSignal(false)
   const [agentMessages, setAgentMessages] = createSignal<ApplicationAgentChatItem[]>([])
-  const [agentModels, setAgentModels] = createSignal<readonly { id: string; label: string; description: string }[]>([])
+  const [agentModels, setAgentModels] = createSignal<
+    readonly { id: string; modelID?: string; providerID?: string; subscription?: string; label: string; description: string }[]
+  >([])
   const [selectedModelId, setSelectedModelId] = createSignal(APPLICATION_AGENT_MODEL_ID)
   const [agentInput, setAgentInput] = createSignal("")
   const adoptOpenCodeSession = (session: ApplicationAgentSession | null) => {
     setOpenCodeSession(session)
-    if (session?.modelID) setSelectedModelId(session.modelID)
+    if (!session?.modelID) return
+    const models = agentModels()
+    const match =
+      models.find((option) => option.id === `${session.providerID || ""}/${session.modelID}`) ||
+      models.find((option) => option.providerID === session.providerID && option.modelID === session.modelID) ||
+      models.find((option) => option.modelID === session.modelID) ||
+      models.find((option) => option.id === session.modelID)
+    if (match) setSelectedModelId(match.id)
+  }
+  const modelSubscriptionGroups = () => {
+    const groups: { subscription: string; models: { id: string; label: string; description: string }[] }[] = []
+    for (const option of agentModels()) {
+      const subscription = option.subscription || "其他模型"
+      const existing = groups.find((group) => group.subscription === subscription)
+      if (existing) existing.models.push(option)
+      else groups.push({ subscription, models: [option] })
+    }
+    return groups
   }
   const [restoreNotice, setRestoreNotice] = createSignal<string | null>(null)
   const [applicationTasks, setApplicationTasks] = createSignal<ApplicationTask[]>([])
@@ -722,9 +741,11 @@ function ApplicationAgentShell(props: {
 
   const submitMaterialReview = async (mode: "supplement_folder" | "skip" | "note") => {
     const current = task()
-    const session = opencodeSession()
     const note = materialNote().trim()
-    if (!current || !session) return
+    if (!current) {
+      setError("当前申请任务尚未载入，请刷新任务列表后重试。")
+      return
+    }
     if (mode === "supplement_folder" && !supplementalFolder()) {
       setError("请先选择包含补充材料的文件夹。")
       return
@@ -737,6 +758,34 @@ function ApplicationAgentShell(props: {
     setBusy(true)
     setError(null)
     try {
+      const session = opencodeSession() ?? await window.api.findApplicationAgentSession(current.workspacePath)
+      if (!session) throw new Error("找不到当前申请的 OpenCode 会话，无法继续材料确认。请重新打开该任务后重试。")
+      if (!opencodeSession()) {
+        adoptOpenCodeSession(session)
+        persistActiveSession(session)
+      }
+      if (
+        mode === "skip" &&
+        current.input.sharedWorkspacePath &&
+        current.input.batchOrder === 1 &&
+        current.sharedDossierStatus === "preparing"
+      ) {
+        await window.api.sendApplicationAgentPrompt(
+          session,
+          [
+            "顾问点击了“暂不补充，开始填表”，但桌面预检发现当前首校负责的学生共享档案仍是 preparing，不能进入浏览器。",
+            `当前学校工作区的精确路径是：${JSON.stringify(current.workspacePath)}`,
+            `学生共享资料库的精确路径是：${JSON.stringify(current.input.sharedWorkspacePath)}`,
+            "必须逐字使用以上路径，禁止自行增删空格或重写批次目录名。不要重复 OCR；先调用 application-agent_materials read_profile_sources，再写学校本地 02_generated/student_profile.md。",
+            "随后调用 application-agent_documents generate_all，确认返回 publishOk:true 且共享档案状态为 prepared，才重新停在材料确认关口。publishOk:false 时不得停止或进入填表。",
+            "这次点击尚未批准 material_review.json；补全后请等待顾问再次确认。不要调用 prepare_ego_task，不要启动 ego-browser。",
+          ].join("\n"),
+        )
+        setRestoreNotice("发现学生核心档案尚未生成，已让原 Agent 使用精确路径补全。完成后材料确认面板会重新出现，请再确认一次。")
+        await refreshAgentMessages(session)
+        await loadApplicationTasks()
+        return
+      }
       const reviewed = await window.api.submitApplicationMaterialReview(current.workspacePath, {
         mode,
         sourceFolder: mode === "supplement_folder" ? supplementalFolder() : undefined,
@@ -1108,7 +1157,7 @@ function ApplicationAgentShell(props: {
               "顾问已明确点击继续任务。先读取 task_control.json、task_state.json、application_progress.json 和 agent_execution_audit.json；不要依据旧聊天内容猜测浏览器控制权。",
               "继续任务只清除普通暂停 paused，绝不会清除 egoBrowser.safetyStop。若 safetyStop.active 为 true，或 observationRequired 为 true，必须遵守该硬停止，不得 resume/takeOver/填写/保存。",
               "仅当 application_progress.json 中 egoBrowser.handoffPending 为 true，或旧记录存在 handoffAt 且 handoffPending 未明确为 false、并且保存的是可信数值 taskSpaceId，且没有 active safetyStop 时，才调用 application-agent_cua：action=resume_ego、taskSpaceId=保存的 ID、consultantConfirmed=true。不得在调用成功前运行 ego-browser。",
-              "resume_ego 成功后，严格按其返回指令执行：新的 heredoc 只能 takeOverTaskSpace(保存的数值 ID) 后 pageInfo() 观察；这一观察回合不得填写、导航、保存、关闭或处理未知弹窗。",
+              "resume_ego 是两阶段：第一次成功只授权 listTaskSpaces 探测；严禁此时 takeOver/claim/useOrCreate。再次调用 resume_ego 时：若 list 含保存 ID，传 taskSpacePresent:true 与 evidence/detail=完整 list JSON，再按其返回执行 takeOver/claim + pageInfo；若 list 不含保存 ID，传 taskSpacePresent:false（或 missingTaskSpaceConfirmed:true）进入 retire-and-rebind，禁止私自新建空间后继续填表。",
               "若没有上述已审计的待恢复交接，绝不调用 resume_ego 或 takeOverTaskSpace。改为调用 prepare_ego_task：它会对缺失或非数值的旧 taskSpaceId 先列出 listTaskSpaces 并用 OpenCode question 请求顾问确认；正常 agent ownership 空间也必须先重新观察。遇到 user controlling、inactive 或不明确弹窗时继续交接，不得自动抢占。",
             ].join("\n"),
           )
@@ -1593,15 +1642,25 @@ function ApplicationAgentShell(props: {
                     class="composer-model-select"
                     value={selectedModelId()}
                     disabled={busy() || Boolean(opencodeSession())}
-                    title={opencodeSession() ? "任务已开始，模型不能切换" : "选择申请 Agent 使用的模型"}
+                    title={opencodeSession() ? "任务已开始，模型不能切换" : "按订阅选择申请 Agent 使用的模型"}
                     onChange={(event) => setSelectedModelId(event.currentTarget.value)}
                   >
                     <Show
                       when={agentModels().length > 0}
                       fallback={<option value={selectedModelId()}>{selectedModelId()}</option>}
                     >
-                      <For each={agentModels()}>
-                        {(option) => <option value={option.id} title={option.description}>{option.label}</option>}
+                      <For each={modelSubscriptionGroups()}>
+                        {(group) => (
+                          <optgroup label={group.subscription}>
+                            <For each={group.models}>
+                              {(option) => (
+                                <option value={option.id} title={option.description}>
+                                  {option.label}
+                                </option>
+                              )}
+                            </For>
+                          </optgroup>
+                        )}
                       </For>
                     </Show>
                   </select>
@@ -1960,6 +2019,7 @@ function ApplicationAgentShell(props: {
                           </span>
                         </label>
                       </Show>
+                      <Show when={error()}>{(message) => <p class="application-agent-error">{message()}</p>}</Show>
                       <div class="material-review-buttons">
                         <button
                           type="button"

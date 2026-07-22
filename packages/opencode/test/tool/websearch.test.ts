@@ -36,8 +36,9 @@ describe("websearch provider", () => {
     expect(selectWebSearchProvider(SESSION_ID, { exa: false, parallel: true })).toBe("parallel")
   })
 
-  test("is only enabled for opencode or explicit websearch provider flags", () => {
+  test("is enabled for bundled application providers or explicit websearch provider flags", () => {
     expect(webSearchEnabled(ProviderID.opencode, { exa: false, parallel: false })).toBe(true)
+    expect(webSearchEnabled(ProviderID.make("ollama-cloud"), { exa: false, parallel: false })).toBe(true)
     expect(webSearchEnabled(ProviderID.openai, { exa: false, parallel: false })).toBe(false)
     expect(webSearchEnabled(ProviderID.openai, { exa: true, parallel: false })).toBe(true)
     expect(webSearchEnabled(ProviderID.openai, { exa: false, parallel: true })).toBe(true)

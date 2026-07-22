@@ -15,7 +15,7 @@ const EGO_LITE_CDHASH = egoRuntimeLock.cdHash
 const EGO_BROWSER_PROTOCOL = `## ego-browser 通用观察协议
 
 - 每个 heredoc 只完成一个短回合：先观察、执行一个逻辑动作组、再验证并结束本回合。同一可见区块内 3–8 个普通纯文本字段必须作为短批次：连续 fillInput+Tab，最后统一 snapshot/读回；不要一字段一回合。选择、添加/删除、自动完成、日期选择器、上传、保存和导航必须各自单独复查，不要与下一项高风险动作串在同一批次。
-- 首次使用 task space 时记录返回的数值 task.id，并把它作为唯一可恢复的 taskSpaceId（调用 application-agent_cua 时传该 ID 的字符串形式）。已有保存 ID 的正常连续回合先用 listTaskSpaces 确认该空间仍为 agent ownership，再以该数值 ID 调用 useOrCreateTaskSpace(taskSpaceId)；不得再按名称匹配。若 listTaskSpaces 中已没有这个数值 ID，立即停止，用 retire_and_rebind_ego_task 记录缺失证据并让顾问明确选择“复用指定现有空间”或“新建替代空间”；确认前不得废弃、替换、新建或按名称猜测。主动调用 handOffTaskSpace 且确认 done:true 后，只有顾问明确回复继续，才可执行 \`await takeOverTaskSpace(taskSpaceId)\`；不要读取它的返回值，紧接着先调用 pageInfo()。若未主动交接却意外出现 user ownership、inactive、not assigned 或 user is controlling，立即停止浏览器命令并记录交接；顾问明确确认继续后按官方 API 执行 \`await claimTaskSpace(taskSpaceId)\`，紧接着也只调用 pageInfo()。绝不自动抢回控制。
+- 首次使用 task space 时记录返回的数值 task.id，并把它作为唯一可恢复的 taskSpaceId（调用 application-agent_cua 时传该 ID 的字符串形式）。已有保存 ID 的正常连续回合先用 listTaskSpaces 确认该空间仍为 agent ownership，再以该数值 ID 调用 useOrCreateTaskSpace(taskSpaceId)；不得再按名称匹配。若 listTaskSpaces 中已没有这个数值 ID，立即停止，用 retire_and_rebind_ego_task 记录缺失证据并让顾问明确选择“复用指定现有空间”或“新建替代空间”；确认前不得废弃、替换、新建或按名称猜测。主动调用 handOffTaskSpace 且确认 done:true 后，顾问明确继续时必须先调用 application-agent_cua resume_ego（consultantConfirmed:true）；其第一阶段只允许 listTaskSpaces 探测保存 ID 是否仍在。只有再次调用 resume_ego 并传 taskSpacePresent:true 与完整 list 证据后，才可 \`await takeOverTaskSpace(保存的数值 ID)\`（或意外控制丢失时的 claimTaskSpace）；不要读取返回值，紧接着先 pageInfo()。若探测证明保存 ID 已消失，传 taskSpacePresent:false（或 missingTaskSpaceConfirmed:true）进入 retire-and-rebind，严禁私自 useOrCreateTaskSpace 另开空间后继续填表。若未主动交接却意外出现 user ownership、inactive、not assigned 或 user is controlling，立即停止浏览器命令并记录交接；顾问明确确认继续后同样先走 resume_ego 探测，再按官方 API claimTaskSpace。绝不自动抢回控制。
 - 选定 task space 后，每个回合先调用 pageInfo()。同一稳定表单页连续填表时不要每填一个字段就重新 snapshot/观察；只在进入新页、保存前后、或 snapshotText 语义无法区分字段与错误时才观察。普通连续填表一个 heredoc 回合可连续填 3–8 个纯文本字段后统一读回一次，不要一字段一观察。首次新建的 task space 已选中一个可观察的空白标签页时，初次申请网址导航必须在这个相同 target 内调用 navigateInitialPageCapturingAlerts；不得用 openOrReuseTab 新建第二个 target。锁定版 Ego 的 Page.navigate 会被同步 load-time alert 阻塞，并在 helper 回合退出时自动消掉仍未处理的弹窗，所以绝不能假设下一回合还能读取该弹窗。navigateInitialPageCapturingAlerts 只在初次导航期间临时替换无选择分支的 window.alert，通过 Ego CDP binding 记录完整 message、URL 和 frameId，并以等价“确定”语义让导航继续；它绝不替换 confirm、prompt 或 beforeunload。返回 kind:alerts 时记录全部文案后立即结束本 heredoc，下一独立回合只复用同一 taskSpaceId 并调用 pageInfo；不得重试导航或刷新。返回 kind:cleanup_failed（contaminated:true）时，临时注入无法确认已移除，该 task space 视为污染：立即硬停止一切导航、填写和保存，不得重试清理；调用 application-agent_cua record_browser_safety_stop（safetyKind:cleanup_failed）结构化写入 progress.egoBrowser.safetyStop，并原样保留 cleanupError、infoError、capturedAlerts、最后 pageInfo 和 taskSpaceId；也可用 TERRA_EGO_TASKSPACE_CONTAMINATED: 前缀的 record_failure 兼容写入同一字段。污染空间不可恢复：顾问只能点击“重新填写”创建全新 taskSpaceId，不得 resume/takeOver/rebind existing，也不得把这次情况记为 record_blocker resolved。返回 kind:alert_evidence_lost 时，注入已清理、空间未被污染，但 iframe load-time alert 可能已被自动确认且文字丢失：同样立即硬停止，不得 snapshot、填写、保存、导航或重试；调用 record_browser_safety_stop（safetyKind:alert_evidence_lost）结构化写入 safetyStop（或 TERRA_EGO_ALERT_EVIDENCE_LOST: 前缀的 record_failure 兼容写入），并用 question 工具明确告知顾问本回合 iframe 弹窗文字可能丢失。顾问只能通过桌面“查看后继续当前空间”按钮授权同空间恢复，或点击“重新填写”；模型传入 consultantConfirmed:true 不能解除。授权后第一回合只能 record_observation，观察成功前禁止填写/保存/complete。这两种硬停止都由 CUA 与 ego-browser wrapper 读取同一 safetyStop 字段强制阻断，不得记为 record_blocker resolved。只有 pageInfo() 没有 dialog 时，才可调用 snapshotText、captureScreenshot、js、click、fillInput、导航或其他页面操作。普通表单优先用 snapshotText 的语义 workflow；语义信息不足时由你根据现场截图改用 visual workflow；DOM/CDP 仅用于有明确观察证据的窄范围操作，不得用它伪造填写结果或直接绕过正常提交。
 - 如果 pageInfo() 返回 dialog，先记录完整 dialog 信息和最近一次顶层页面证据；此时不得调用 snapshotText、captureScreenshot、js、点击/输入/上传/导航等任何页面操作，或任何 CDP 命令，唯一例外是 Page.handleJavaScriptDialog。type 为 alert 时使用 accept:true 关闭、调用 application-agent_cua record_blocker（blockerDisposition: resolved）后立刻结束本 heredoc；type 为 beforeunload 时一律 accept:false、记录 resolved 后结束本 heredoc，下一回合先确认 URL 未变化；所有 confirm 或 prompt 都必须 handOffTaskSpace，确认返回 done:true 后以真实 taskSpaceId、顶层 URL、标题和证据记录 blockerDisposition: handoff 并等待顾问，不得由 Agent 猜测选项或 prompt 文本。
 - iframe 原生 alert 会阻塞触发它的 click/save Promise，但 Ego 仍能通过 pageInfo() 返回完整 dialog。任何保存、继续、选择、导航、上传等可能改变页面的动作，都必须按 ego-browser skill 的 observePageAction 模式执行：先启动动作但不 await，同时轮询 pageInfo；不得写成“await click 后再检查”。
@@ -25,9 +25,11 @@ const EGO_BROWSER_PROTOCOL = `## ego-browser 通用观察协议
 - 普通文本输入必须使用 fillInput，随后发送真实 Tab；同区块 3–8 个纯文本字段应连成一批后再统一读回。编号/注册号/appointment number 等标识字段只能来自材料原文或顾问确认，禁止用分数、成绩或近似字符串推断。只有遮罩输入或 fillInput 无法产生真实按键语义时，才可逐键发送 CDP Input.dispatchKeyEvent，随后同样 Tab 并读取回显。
 - 日期字段优先用 TERRA_POLICY 中的 fillDatePickerByClicks（真实 click 打开日历 → 真实点击切年/月 → 点日 → 点 OK/Apply → 读回）。若平台拒绝键入日期并提示必须用 date picker icon，禁止继续盲打键盘。最多尝试两种策略（icon 路径、相邻 calendar 按钮路径）；两种都失败则记录缺失/blocker 并 handOffTaskSpace 交给顾问，不得在日期控件上反复试错超过 2 个 heredoc。下拉选择必须先 click 打开、重新 snapshot、click 当前可见选项，再重新观察；任何重渲染都会使旧 ref 立即失效。
 - 页面写操作禁止读取或调用 Vue internals、\`$router\`、store，禁止直接 DOM value setter、element.click()、form.submit()/requestSubmit() 或注入脚本提交。js/cdp 只可观察（含读取日历当前年月文案），唯一写入例外是真实键盘/CDP key events、Page.handleJavaScriptDialog 和用于保存审计的 network event 观察；页面交互仍必须走 click/fillInput/uploadFile/fillDatePickerByClicks 等真实交互 helper。
+- 每一页/弹窗表单（含 Add Institution 一类模态框）在可确认字段都填完、动态复查通过、且本页没有更多可填字段后，必须点击页面上真实可见的 Save / Continue / Next / 保存 / 继续 / Create Application 等按钮离开或落盘。禁止用代码跳页、JS submit、改 URL、或口头宣称“已保存”。该点击必须包在 observePageAction 里；裸 \`await click(...)\` 保存会被弹窗永久卡住。
+- 浏览器原生 alert（深色系统框、只有“确定/OK”、文案如 “Major is required.”）不是页面按钮。严禁对“确定/OK”做 snapshot click。正确流程：pageInfo() 读 dialog.message → 仅用 \`cdp('Page.handleJavaScriptDialog', { accept: true })\` 关闭 alert → 按文案补缺字段 → 再用 observePageAction 点 Save/Continue。confirm/prompt 仍必须交接顾问。
 - 任何选择、添加/删除、自动完成、切换或导航都可能改变可见内容。动作后用新的 pageInfo 加 snapshotText 复查；仅当语义不足时再截图。DOM required 扫描只是辅助证据。每次改变页面后都必须重新进行带 taskSpaceId、URL、标题和证据的动态表单验证，才能保存。
 - 遇到校验、超时、服务端错误或结果不明确时，先保留当前页面和观察证据，不得自动刷新、重开链接、重复同一动作或要求重新登录。若属于 observePageAction unknown，必须严格按上一条立即结束，并在下一独立 heredoc 只调用 pageInfo；只有该新观察明确证明动作失败或需要人工处理后，才可记录失败或交接。只有新观察明确显示认证失败或登录页时，才可请求顾问重新登录。
-- 若 Terra 包装器返回 TERRA_EGO_BROWSER_VERSION_CONFLICT、TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE 或 TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE，立即停止，不得重试、调用系统 ego-browser、关闭其他 Ego Lite 或猜测 task space。原样调用 application-agent_cua record_failure，并让顾问按提示处理后从新的观察回合继续。
+- 若 Terra 包装器返回 TERRA_EGO_BROWSER_VERSION_CONFLICT、TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE 或 TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE，立即停止，不得重试、调用系统 ego-browser、关闭其他 Ego Lite、猜测 task space，也不得“改用当前冲突中的 Ego”或私自新建 task space。原样调用 application-agent_cua record_failure；请顾问只关闭非 Terra 管理的另一 Ego Lite 后点击“继续任务”。恢复时仍必须先 resume_ego → listTaskSpaces 探测保存 ID；ID 消失则走 retire-and-rebind，不得绕过。
 - 保存前后都必须有新观察证据。每次 record_observation 都同时记录真正承载表单的 frameId、loaderId 和 frameUrl（非 iframe 页面就是主 frame）。动态复查通过后先调用 begin_save_attempt 得到 saveAttemptId 并固化源页面/frame/loader，再以 observePageAction 执行一次真实保存动作，记录 actionStartedAt 和 eventsDrainedAt，并收集 drainEvents/CDP Network 的结构化响应证据。把 requestWillBeSent 与 responseReceived 精简为 request/response 两部分并由 record_save_verified 以同一非空 requestId 关联；request 的 frameId/loaderId 是上下文身份，response 的 frameId/loaderId 若事件实际提供则必须与同 requestId 的 request 一致，未提供时不得伪造。不得传 headers、body、postData、cookies 或带 query/hash 的证据 URL。保存后调用 record_observation 写入新的顶层页面与表单 frame 证据。只有与源 frame/loader 和该次点击时间窗口一致的 POST/PUT/PATCH 2xx XHR/fetch，或同一 frame 中的普通 2xx document POST/重定向 document POST，并且目标 frame URL/loader 与最终响应匹配时，才能调用 record_save_verified。这同时支持顶层保存和 iframe 内保存；GET、非 2xx、后台 POST、旧事件、frame/loader 不匹配、无网络证据或仅有“Saved”文字都不能算服务器确认。
 - complete_ego_task 是独立且终态的最终门。它必须使用最新页面观察的完整 taskSpaceId、顶层 URL/标题、frame/loader 和原样 evidence，显式传 confirmed:true、completionDisposition 以及 remainingRequiredFields:[]。任何 pending save attempt、顾问交接/接管、task-space rebind、空必填项，或没有晚于最新服务器确认保存的完成页观察，都不得记录阶段完成。complete_ego_task 成功后，所有 application-agent_cua 动作都会返回 BROWSER_TASK_ALREADY_COMPLETED；需要继续改动必须由顾问点击“重新填写”，不能污染已完成的会话。随后只能在独立 heredoc 调用 completeTaskSpace(taskSpaceId, { keep: true })。若这个唯一的最终 helper 回合失败，立即停止，不得再观察或重试；只可调用 record_failure，传相同 taskSpaceId，并把 detail 写为 TERRA_EGO_COMPLETION_HELPER_FAILED: 后紧跟原始错误，工具会归档并撤销这次假完成。
 - 当前锁定的 Ego Lite 0.4.4.15 在程序化关闭经历过原生弹窗的窗口时可能崩溃。只有整所学校的浏览器任务真正结束后，才可在独立最终回合调用 \`completeTaskSpace(taskSpaceId, { keep: true })\`；一律不得使用 keep:false、关闭全部标签页或由 Agent 销毁该窗口，留给顾问正常查看和关闭。`
@@ -372,6 +374,7 @@ if [ -f "$WORKSPACE/03_state/task_control.json" ] && /usr/bin/grep -Eq '"paused"
   exit 75
 fi
 SAFETY_KIND=""
+BROWSER_GATE=""
 if [ -f "$WORKSPACE/03_state/application_progress.json" ]; then
   SAFETY_KIND=$(/usr/bin/python3 -c 'import json,sys
 try:
@@ -381,6 +384,22 @@ try:
     print(stop.get("kind") or "")
   elif stop.get("observationRequired") is True and stop.get("kind") == "alert_evidence_lost":
     print("observation_required")
+except Exception:
+  pass
+' "$WORKSPACE/03_state/application_progress.json" 2>/dev/null || true)
+  BROWSER_GATE=$(/usr/bin/python3 -c 'import json,sys
+try:
+  progress=json.load(open(sys.argv[1], encoding="utf-8"))
+  browser=progress.get("egoBrowser") or {}
+  rebind=browser.get("rebindPending") or {}
+  if rebind.get("phase") == "replacement_creation_authorized":
+    print("rebind_create")
+  elif rebind.get("phase") == "consultant_confirmation":
+    print("rebind_confirm")
+  elif browser.get("resumeProbePending") is True:
+    print("resume_probe")
+  elif browser.get("handoffPending") is True and not browser.get("resumeAuthorizedAt") and not browser.get("resumedAt"):
+    print("handoff_waiting")
 except Exception:
   pass
 ' "$WORKSPACE/03_state/application_progress.json" 2>/dev/null || true)
@@ -398,6 +417,18 @@ if [ "\${1:-}" = "nodejs" ]; then
   EGO_NODE_STDIN_COMPACT=$(/usr/bin/mktemp "$WORKSPACE/03_state/.ego-node-stdin-compact.XXXXXX")
   /bin/cat > "$EGO_NODE_STDIN"
   /usr/bin/tr '\\r\\n\\t' '   ' < "$EGO_NODE_STDIN" > "$EGO_NODE_STDIN_COMPACT"
+  if [ "$BROWSER_GATE" = "resume_probe" ] || [ "$BROWSER_GATE" = "rebind_confirm" ] || [ "$BROWSER_GATE" = "handoff_waiting" ]; then
+    if /usr/bin/grep -Eiq 'takeOverTaskSpace|claimTaskSpace|useOrCreateTaskSpace|fillInput|uploadFile|observePageAction|openOrReuseTab|navigateInitialPageCapturingAlerts|gotoAndWait|handOffTaskSpace|completeTaskSpace|dispatchKeyEvent' "$EGO_NODE_STDIN_COMPACT"; then
+      printf '%s\\n' "TERRA_EGO_TASKSPACE_RECOVERY_REQUIRED: browser gate=$BROWSER_GATE blocks takeOver/create/fill until resume_ego list probe or consultant-authorized retire-and-rebind completes. Only listTaskSpaces (and pageInfo if already bound) is allowed." >&2
+      exit 84
+    fi
+  fi
+  if [ "$BROWSER_GATE" = "rebind_create" ]; then
+    if /usr/bin/grep -Eiq 'takeOverTaskSpace|claimTaskSpace|fillInput|uploadFile|observePageAction|openOrReuseTab|navigateInitialPageCapturingAlerts|gotoAndWait|handOffTaskSpace|completeTaskSpace|dispatchKeyEvent' "$EGO_NODE_STDIN_COMPACT"; then
+      printf '%s\\n' 'TERRA_EGO_TASKSPACE_RECOVERY_REQUIRED: replacement creation round may only useOrCreateTaskSpace and listTaskSpaces; no navigation, fill, or takeOver.' >&2
+      exit 84
+    fi
+  fi
   if /usr/bin/sed -E 's/completeTaskSpace[[:space:]]*\\([[:space:]]*[[:alnum:]_$]+[[:space:]]*,[[:space:]]*\\{[[:space:]]*keep[[:space:]]*:[[:space:]]*true[[:space:]]*\\}[[:space:]]*\\)//g' "$EGO_NODE_STDIN_COMPACT" | /usr/bin/grep -Eiq 'complete([^[:alnum:]]|[[:space:]])*TaskSpace'; then
     printf '%s\\n' 'TERRA_EGO_UNSAFE_TASKSPACE_CLOSE: completeTaskSpace 只能使用可验证的字面量 completeTaskSpace(taskSpaceId, { keep: true })。省略参数、空参数、变量 keep、别名或 keep:false 都会在启动 Ego 前被拒绝。' >&2
     exit 81
@@ -408,6 +439,20 @@ if [ "\${1:-}" = "nodejs" ]; then
   fi
   if /usr/bin/grep -Eiq 'reload' "$EGO_NODE_STDIN_COMPACT"; then
     printf '%s\\n' 'TERRA_EGO_UNSAFE_PAGE_RELOAD: 申请页面异常时禁止自动刷新；请结束本回合，下一回合只重新观察，仍异常则交接顾问。' >&2
+    exit 81
+  fi
+  # Page/modal exit must be a real Save/Continue click under observePageAction — never JS submit or bare await click.
+  if /usr/bin/grep -Eiq 'requestSubmit|form[[:space:]]*\\.[[:space:]]*submit|[[:alnum:]_\\$][[:space:]]*\\.[[:space:]]*submit[[:space:]]*\\(' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_SCRIPTED_SUBMIT_DENIED: 禁止 form.submit()/requestSubmit() 或脚本提交。填完并复查后必须用 observePageAction 点击页面上真实可见的 Save/Continue/保存/继续 按钮。' >&2
+    exit 81
+  fi
+  if /usr/bin/grep -Eiq 'click[[:space:]]*\\([^)]*(Save|Continue|Next|保存|继续|Create Application)' "$EGO_NODE_STDIN_COMPACT" && ! /usr/bin/grep -iq 'observePageAction' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION: Save/Continue/保存/继续 点击必须包在 observePageAction 内；裸 await click 会被原生 alert 永久卡住且无法读弹窗。' >&2
+    exit 81
+  fi
+  # Native Chromium alert OK is not a page widget — CDP only.
+  if /usr/bin/grep -Eiq "click[[:space:]]*\\([^)]*(确定|['\\\"]OK['\\\"]|label:[[:space:]]*['\\\"]OK['\\\"])" "$EGO_NODE_STDIN_COMPACT" && ! /usr/bin/grep -iq 'handleJavaScriptDialog' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_NATIVE_ALERT_CLICK_DENIED: 浏览器原生 alert 的“确定/OK”不是页面按钮。先 pageInfo 读 dialog.message，再用 Page.handleJavaScriptDialog accept:true 关闭；禁止 snapshot click 确定。' >&2
     exit 81
   fi
   if [ "$SAFETY_KIND" = "observation_required" ] && /usr/bin/grep -Eiq 'fillInput|uploadFile|observePageAction|dispatchKeyEvent|navigateInitialPageCapturingAlerts|handOffTaskSpace|takeOverTaskSpace|claimTaskSpace|completeTaskSpace|openOrReuseTab' "$EGO_NODE_STDIN_COMPACT"; then
@@ -800,6 +845,10 @@ async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOv
       "",
       "Allowed write chains are `fillInput+Tab+readback` for ordinary text (batch 3–8 plain fields in one round), `fillDatePickerByClicks` for date-picker portals, `cdp-key-events+Tab+readback` only for masked inputs, and `click+snapshot+click-option+reobserve` for selects. Registration/appointment numbers must come from source materials, never inferred from scores. Vue internals, $router/store access, direct DOM value setters, and scripted submit are forbidden.",
       "",
+      "Page/modal completion: after verified fields are filled and no further fillable fields remain on the current page or modal, you must click the real visible Save / Continue / Next / 保存 / 继续 / Create button through observePageAction. Never mark a page complete, navigate by URL/JS, call form.submit/requestSubmit, or leave a modal without that real button click. A bare `await click(...)` on Save/Continue is forbidden because a native alert will hang the Promise forever.",
+      "",
+      "Native Chromium/JS alerts (dark system dialog with only 确定/OK, e.g. \"Major is required.\") are not page widgets. Never snapshot-click 确定/OK. Call pageInfo(), read dialog.message, dismiss alert-only dialogs with `cdp('Page.handleJavaScriptDialog', { accept: true })`, fix the missing field named in the message, then retry Save/Continue via observePageAction. confirm/prompt still require consultant handoff.",
+      "",
       "For save evidence: first record_observation with the top-level page plus the active form frame's frameId, loaderId, and frameUrl from Page.getFrameTree. Call `Network.enable`, drain old events, record actionStartedAt immediately before one real save click through observePageAction, settle briefly, then drain new events and record eventsDrainedAt. Join `Network.requestWillBeSent` and `Network.responseReceived` by the same non-empty requestId. Pass only compact evidence to record_save_verified: source page/title/frame/loader, the action window, request={requestId,method,url,observedAt,frameId,loaderId}, and response={requestId,status,url,resourceType,observedAt,frameId?,loaderId?,redirected?}. The request event supplies the authoritative frame/loader context; retain response frameId/loaderId only when the drained response event actually provides them, and never invent missing fields. Any provided response IDs must match that same request. XHR/fetch must stay on the frozen source frame+loader. A same-frame document POST may acquire a new request loader; the freshly observed destination frame URL/loader must match that request loader and final 2xx response. This covers ordinary document POST and iframe redirects without comparing an iframe URL to the top-level URL. Strip query/hash from every evidence URL. Never retain or pass headers, postData, body, cookies, or payloads.",
       "",
       "## Canonical action observer",
@@ -914,8 +963,8 @@ ${task.input.sharedWorkspacePath ? `- 学生共享资料库（只通过申请专
 
 ## 工具调用硬性约束
 
-- 启动阶段只做三件事：输出简短进度、优先调用 OpenCode 内置 todowrite 建立默认计划、调用 application-agent_workspace 初始化工作区或同步学生共享档案。todowrite 如果失败一次，不要重试、不要调用 runtime、不要阻塞启动；改用文字列出计划并继续 workspace 初始化。
-- 启动阶段不要调用 webfetch、websearch、application-agent_requirements、ego-browser 或填表相关工具；这些放到工作区初始化成功后的后续阶段逐步执行。
+- 启动阶段先做：输出简短进度、优先调用 OpenCode 内置 todowrite 建立默认计划、调用 application-agent_workspace 初始化工作区或同步学生共享档案。todowrite 如果失败一次，不要重试、不要调用 runtime、不要阻塞启动；改用文字列出计划并继续 workspace 初始化。若 initialize 返回 ownerPreparation:true 或本任务为单校，状态同步后必须立刻调用 application-agent_materials extract_text，不得结束回合。
+- 启动阶段不要调用 webfetch、websearch、application-agent_requirements、ego-browser 或填表相关工具；这些放到 extract_text（如需）成功后的后续阶段逐步执行。
 - 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
 - 后续阶段中，学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方学校/项目/申请要求页面。抓取结果必须调用 application-agent_requirements 落盘。
 - 客户端已随包提供 ripgrep 和 OCR，不要下载工具、不要使用 application-agent_runtime、不要用 Python，也不要用 bash 读写状态 JSON。文件读取使用 OpenCode 内置 read/glob/grep；扫描材料调用 application-agent_materials 的 extract_text；状态更新只调用 application-agent_state 和其他申请专用工具。
@@ -931,21 +980,22 @@ ${task.input.sharedWorkspacePath ? `- 学生共享资料库（只通过申请专
 - 任何可能改变页面结构或可见内容的动作都会使旧复查失效。用最新观察理解新增内容，再以 remainingRequiredFields:[] 调用 application-agent_cua record_dynamic_form_verified；没有这条验证不得 SAVE。
 - 点击 SAVE 前后都必须遵循 TERRA_POLICY，并以 taskSpaceId、当前 URL、页面标题和观察证据调用 record_save_verified。
 
-## 启动阶段（第一轮只做这些）
+## 启动阶段（先做这些，但不得在此停住）
 
 1. 先用 1-2 句话告诉顾问：申请任务已接管，正在创建隔离工作区。
 2. 优先调用 OpenCode 内置 todowrite 创建默认 10 步计划；如果 todowrite 调用失败一次，直接用文字列出默认计划并继续下一步。
 3. 调用 application-agent_workspace，action 使用 initialize。单校任务初始化并复制副本；选校批次由工具判断当前任务是一次性资料整理负责人，还是直接同步已发布的共享档案。
 4. 调用 application-agent_state 同步 workspace 结果：ownerPreparation:true 更新为“正在读取文件”；reusedSharedDossier:true 更新为“正在检查缺失内容”，不要把状态退回材料准备阶段。
-5. 输出学校工作区、学生共享资料库（如有）、是否复用共享档案和下一步计划。若工具返回 reusedSharedDossier:true，后续计划必须删除 OCR、分类和重新生成学生档案三步。
+5. 用 1-3 句话汇报学校工作区、学生共享资料库（如有）、是否复用共享档案。若工具返回 reusedSharedDossier:true，后续计划必须删除 OCR、分类和重新生成学生档案三步。
+6. 关键硬闸：若工具返回 ownerPreparation:true，或这是单校任务，汇报完成后不得结束本轮；必须在同一连续执行中立刻调用 application-agent_materials，action 使用 extract_text。禁止只说“下一步将提取文本”就 stop；禁止等待顾问输入“继续”。reusedSharedDossier:true 时跳过本条，直接进入学校要求抓取。
 
-启动阶段不要读取材料正文、不要抓取学校网页、不要打开申请平台、不要调用 runtime 兜底。完成上述步骤后，再按下面的后续阶段逐步推进。
+启动阶段不要读取材料正文、不要抓取学校网页、不要打开申请平台、不要调用 runtime 兜底。除上面第 6 条要求的 extract_text 外，不要把分类、档案、清单或填表塞进启动同步里一次性并行执行。
 
 ## 后续阶段执行顺序
 
 在执行过程中，你必须像真正的申请 Agent 聊天助手一样持续输出可读进度。每开始一个大步骤前先用 1-3 句话告诉顾问“正在做什么、为什么做、预计产出什么”；每完成一个大步骤后说明“已完成什么、文件保存在哪里、下一步是什么”。不要长时间只调用工具而不输出任何对顾问可见的文字。
 
-后续阶段按 agent prompt 和 skills 中的 SOP 逐步执行：读取材料副本、分类材料、生成学生档案、抓取官方申请要求、记录缺失项、生成清单、再进入 ego-browser 填表。不要把这些后续工作塞进启动阶段一次性并行执行。
+后续阶段按 agent prompt 和 skills 中的 SOP 逐步执行：extract_text 之后再分类材料、生成学生档案、抓取官方申请要求、记录缺失项、生成清单，再进入 ego-browser 填表。
 
 ## 安全边界
 
@@ -956,7 +1006,7 @@ ${task.input.sharedWorkspacePath ? `- 学生共享资料库（只通过申请专
 - 严禁瞎填、猜填不确定字段。
 - 遇到最终提交、付款、不可逆确认、推荐信邀请时，必须停止并写入 task_summary.md 的人工处理事项。
 
-请现在只执行“启动阶段”：优先创建 todowrite 计划；如果 todowrite 不可用就用文字计划继续；初始化目标申请工作区、同步状态并汇报结果。`
+请立即开始执行。优先创建 todowrite 计划；如果 todowrite 不可用就用文字计划继续；初始化目标申请工作区并同步状态。若 initialize 返回 ownerPreparation:true 或本任务为单校，同步状态后必须继续调用 extract_text，不得在启动汇报后结束回合。`
 }
 
 export function buildApplicationAgentRefillPrompt(task: ApplicationTask, attempt: ApplicationRefillAttempt) {
@@ -1022,15 +1072,15 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 3. 只有工具返回 ownerPreparation:true 或单校任务时，才调用 application-agent_materials extract_text（PaddleOCR 扫描 PDF/图片 + 自动抽取 docx/xlsx/txt 等文本）；reusedSharedDossier:true 时必须跳过。ownerPreparation:true 后不得在只更新“正在读取文件”状态后结束回合，同一会话必须立刻调用 extract_text。
 4. 只有资料库负责人或单校任务调用 application-agent_materials classify；后续学校直接复用共享材料索引。
 5. 使用 webfetch 读取申请链接；信息不足时用 websearch 查找官方学校/项目要求，并调用 application-agent_requirements 落盘。
-6. 资料库负责人生成只含学生事实的 student_profile.md；后续学校只读复用，不得重新生成。
+6. 资料库负责人生成只含学生事实的 student_profile.md；后续学校只读复用，不得重新生成。负责人必须先调用 application-agent_materials read_profile_sources，再基于返回的 sources[].text 写入学校本地 02_generated/student_profile.md；禁止手写绝对路径，也禁止用 read/glob/bash/task 拼批次目录。
 7. 检查缺失信息和缺失材料，已有信息不要重复要求，并写入 03_state/missing_items.json。
-8. 调用 application-agent_documents，根据 missing_items.json 生成信息表、材料表、Word 清单和总结。
-9. 材料、缺失项和顾问文档生成后，必须先汇报材料总结并停止。此时桌面应用会显示“材料确认”面板；在 03_state/material_review.json 的 status 变为 approved 且收到顾问后续指令前，严禁调用 application-agent_cua 的 prepare_ego_task、严禁启动 ego-browser 或打开申请平台。
+8. 调用 application-agent_documents，根据 missing_items.json 生成信息表、材料表、Word 清单和总结。选校批次负责人必须检查工具返回 publishOk:true 且共享档案状态为 prepared；publishOk:false 或 STUDENT_DOSSIER_INCOMPLETE 时必须先补全 student_profile.md 并重新调用 documents，不得停止。
+9. 只有材料、学生核心档案、缺失项和顾问文档均生成，并且 documents 明确通过共享档案准备门槛后，才汇报材料总结并停止。此时桌面应用会显示“材料确认”面板；在 03_state/material_review.json 的 status 变为 approved 且收到顾问后续指令前，严禁调用 application-agent_cua 的 prepare_ego_task、严禁启动 ego-browser 或打开申请平台。
 10. 收到材料确认后的后续指令时，先读取 material_review.json 和 06_new_materials。若有补充文件，先提取文字、分类、更新 student_profile.md、missing_items.json 和顾问文档；若有文字补充，先同步到申请档案和缺失项。然后才可调用 application-agent_cua 的 prepare_ego_task，并按官方 ego-browser skill 使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs\` heredoc 打开申请平台、读取 snapshot、填写字段和保存页面。需要 MFA/验证码时用 handOffTaskSpace 交给顾问，顾问回复继续后 takeOverTaskSpace 恢复。
 
 可用 Custom Tools：
 - application-agent_workspace：工作区初始化、复制原始材料、刷新材料计数。
-- application-agent_materials：材料分类、materials_index 生成。
+- application-agent_materials：extract_text 抽取文字；classify 分类；read_profile_sources 读取本地档案源文本。选校批次只允许资料库负责人执行一次整理，后续学校直接复用共享结果。
 - application-agent_documents：从 missing_items.json 生成 Word 清单、表单和总结。
 - application-agent_state：更新 task_state.json。
 - ego-browser skill：macOS 申请平台填表后端。必须使用官方 helper：useOrCreateTaskSpace、openOrReuseTab、snapshotText、fillInput、click、js、cdp、captureScreenshot、handOffTaskSpace、takeOverTaskSpace。
@@ -1039,7 +1089,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - application-agent_requirements：保存学校、项目、平台要求，生成 application_requirements.json/md，并把确定缺失项同步到 missing_items.json。
 
 工具调用硬性约束：
-- 启动阶段只做 todowrite、application-agent_workspace initialize 和 application-agent_state 状态同步；todowrite 如果失败一次，用文字计划继续，不要阻塞工作区初始化；选校批次必须依据 workspace 返回值删去重复准备步骤；不要在启动阶段调用 webfetch、websearch、application-agent_requirements 或 ego-browser。
+- 启动阶段先做 todowrite、application-agent_workspace initialize 和 application-agent_state 状态同步；todowrite 如果失败一次，用文字计划继续，不要阻塞工作区初始化；选校批次必须依据 workspace 返回值删去重复准备步骤；ownerPreparation:true 或单校任务在状态同步后必须立刻调用 extract_text，不得结束回合；不要在启动同步阶段调用 webfetch、websearch、application-agent_requirements 或 ego-browser。
 - 后续阶段中，学校、项目、专业、申请平台要求必须优先用 webfetch 读取已知链接；链接信息不足时用 websearch 查找官方页面。抓取结果必须调用 application-agent_requirements 落盘。
 - 默认流程中的工作区创建、材料分类、状态更新、文档生成、ego-browser 填表状态记录和高风险识别，必须调用对应的 application-agent_* Custom Tool。
 - 客户端已随包提供 ripgrep 和 OCR，不要下载工具、不要用 Python，也不要用 bash 读写状态 JSON。文件读取使用 OpenCode 内置 read/glob/grep；扫描材料调用 application-agent_materials 的 extract_text；状态更新只调用申请专用工具。
@@ -1132,18 +1182,19 @@ const SKILL_DEFINITIONS = [
     name: "student-profile-generation",
     description: "根据已有材料生成结构化 student_profile.md，作为后续填表核心资料库。",
     body: `执行步骤：
-1. 读取 03_state/materials_index.json、03_state/ocr_index.json / extracted_text 提取结果、已有缺失项和任务输入。
+1. 先调用 application-agent_materials，action 使用 read_profile_sources。工具会从学校工作区本地索引返回 materialsIndex 和 sources[].text；禁止手写绝对路径，禁止用 read/glob/bash/task 去拼批次目录。
 2. 如果 application-agent_workspace 已返回 reusedSharedDossier:true，禁止重新生成或改写 student_profile.md；只读使用工具同步的共享档案快照。
-3. 优先阅读文件名含“信息收集”的 extracted_text 或 materials_index 对应文本；其中邮箱、电话、姓名、生日、地址、语言成绩、推荐人事实优先采信，不要再 question 让顾问重复填写表内已有字段。
-4. 只有资料库负责人生成或更新 02_generated/student_profile.md。档案只包含可跨学校复用的学生事实：基本信息、联系方式、家庭信息、教育经历、成绩、语言成绩、活动、奖项、推荐人事实和材料证据路径。
+3. 优先采信 sources 中信息收集表、成绩、语言、简历文本；其中邮箱、电话、姓名、生日、地址、语言成绩、推荐人事实优先写入，不要再 question 让顾问重复填写表内已有字段。
+4. 只有资料库负责人生成或更新学校本地相对路径 02_generated/student_profile.md。档案只包含可跨学校复用的学生事实：基本信息、联系方式、家庭信息、教育经历、成绩、语言成绩、活动、奖项、推荐人事实和材料证据路径。
 5. 学校、项目、截止日期、学校特定文书观点、学校问题答案、学校缺失项和浏览器状态严禁写入学生核心档案；它们分别保存在 task_input、application_requirements、missing_items 和 application_progress。
-6. 对无法确认的字段写“待确认”，不要编造。
-7. 生成后调用 application-agent_state 更新为“正在检查缺失内容”。
+6. 对无法确认的字段写“待确认”，不要编造；不得根据聊天摘要或文件名猜造核心档案。
+7. read_profile_sources 失败时报告真实错误并停止该步；禁止改用 bash、task 或把 skill 名当成工具调用。
+8. 生成后调用 application-agent_state 更新为“正在检查缺失内容”。
 
 输出要求：
 - 告诉顾问档案路径和主要已确认信息。
 - 明确列出仍不确定的关键字段。
-- 若信息收集表已在 extracted_text 中，禁止因“读不了 docx”向顾问索要表内已有的 163 邮箱/姓名/生日。`,
+- 若信息收集表已在 sources 中，禁止因“读不了 docx”向顾问索要表内已有的邮箱/姓名/生日。`,
   },
   {
     name: "application-target-analysis",
@@ -1199,7 +1250,8 @@ const SKILL_DEFINITIONS = [
 4. 同一可见区块内 3–8 个普通纯文本字段在一个 heredoc 内连续 fillInput+Tab，最后统一读回；选择/日期/上传/保存各自单独复查。日期优先 fillDatePickerByClicks；平台要求 date picker icon 时禁止盲打，两种策略失败即 handoff，最多 2 个日期 heredoc。
 5. 默认用 snapshotText；仅当语义不足、保存前后或导航后需要视觉证据时才截图并 read。不要对稳定表单每字段截图。
 6. alert、离页确认、未知确认或顾问接管均按 TERRA_POLICY 处理。交接前确认 handOffTaskSpace 返回 done:true；登录交接调用 handoff_to_consultant 时标记 handoffType: login，其他浏览器接管标记 handoffType: browser_takeover。顾问接管期间保持静默，不要空转观察；绝不自动抢回控制，只有顾问明确回复继续后才可 takeOverTaskSpace/claimTaskSpace。
-7. 保存前完成动态表单复查并调用 begin_save_attempt 取得 saveAttemptId 与源页面上下文；以 observePageAction 执行真实保存，将同一 requestId 的 request/response 精简证据交给 record_save_verified 校验。保存后记录目标页面的新观察与 readbackValue；Save & Continue 跳页是允许的，但源页面上下文和目标页面观察不可混用。GET、非 2xx、旧事件或只有页面文字都不得算保存成功。
+7. 本页/本模态框可确认字段填完且动态复查通过后，必须点击真实可见的 Save / Continue / Next / 保存 / 继续 按钮落盘；禁止 JS submit、改 URL 或宣称已保存。保存前先 begin_save_attempt，再用 observePageAction 执行真实点击，把同一 requestId 的 request/response 交给 record_save_verified。Save & Continue 跳页允许，但源页与目标页观察不可混用。GET、非 2xx、旧事件或只有页面文字都不得算保存成功。
+7b. 若保存触发原生 alert（如 “Major is required.” 且按钮为“确定”）：先 pageInfo 读 dialog.message，用 Page.handleJavaScriptDialog accept:true 关闭，禁止点击页面上的“确定”；补全缺失字段后再 observePageAction 重试 Save/Continue。
 8. 上传材料用 ego-browser uploadFile；上传后在新的无 dialog 观察中确认文件名或状态，再调用 record_upload。
 9. 每次准备执行最终提交、付款、推荐信邀请或其他不可逆确认前，必须先调用 application-agent_risk；命中 BLOCKED 就停止。
 10. 只有整个浏览器阶段确实结束时才可 completeTaskSpace(taskSpaceId, { keep: true })；不得因为当前页面完成而关闭或完成 task space，也不得使用 keep:false。
@@ -1757,7 +1809,15 @@ function browserTaskSpaceMismatch(progress: any, taskSpaceId: string) {
   }
   const savedTaskSpaceId = numericTaskSpaceId(persistedTaskSpaceId)
   if (!savedTaskSpaceId || savedTaskSpaceId === taskSpaceId) return ""
-  return "BROWSER_TASK_SPACE_MISMATCH: supplied taskSpaceId does not match the saved ego-browser task space."
+  return (
+    "BROWSER_TASK_SPACE_MISMATCH: supplied taskSpaceId does not match the saved ego-browser task space (" +
+    savedTaskSpaceId +
+    ")。禁止对其他 ID 继续观察/填写/保存。若 listTaskSpaces 已证明保存 ID 消失，对保存 ID 调用 retire_and_rebind_ego_task（missingTaskSpaceConfirmed:true，evidence 或 detail=完整 list JSON）；确认前不得 useOrCreateTaskSpace。"
+  )
+}
+
+function cuaEvidence(input: Record<string, unknown>) {
+  return String(input.evidence || input.text || input.detail || "").trim()
 }
 
 function hasPendingBrowserHandoff(progress: any) {
@@ -2488,6 +2548,131 @@ function sharedOcrState(task: any) {
   }
 }
 
+// Mirror shared OCR text into the school workspace so read/glob can stay on
+// in-project relative paths. Absolute shared paths remain the publish source of
+// truth; local ocr_index.output points at 03_state/extracted_text/<sha>.txt.
+async function syncSchoolLocalExtractedText(
+  workspace: string,
+  sharedOutputDir: string,
+  results: Array<{ file: string; output: string; textLength: number; error: string; sourceSha256?: string; method?: string }>,
+) {
+  const localOutputDir = join(workspace, "03_state", "extracted_text")
+  await mkdir(localOutputDir, { recursive: true })
+  if (existsSync(sharedOutputDir)) {
+    await cp(sharedOutputDir, localOutputDir, { recursive: true, force: true })
+  }
+  const localResults = []
+  for (const item of results) {
+    const sha = String(item.sourceSha256 || "").trim() || basename(String(item.output || "")).replace(/\.txt$/i, "")
+    const localOutput = join(localOutputDir, sha + ".txt")
+    if (!existsSync(localOutput) && item.output && existsSync(item.output)) {
+      await cp(item.output, localOutput, { force: true })
+    }
+    localResults.push({
+      ...item,
+      sharedOutput: item.output,
+      output: relative(workspace, localOutput).replaceAll("\\", "/"),
+    })
+  }
+  await writeJson(join(workspace, "03_state", "ocr_index.json"), localResults)
+  return localResults
+}
+
+function localMaterialReadHint() {
+  return {
+    materialsIndex: "03_state/materials_index.json",
+    ocrIndex: "03_state/ocr_index.json",
+    extractedTextDir: "03_state/extracted_text",
+    profilePath: "02_generated/student_profile.md",
+    nextTool: "application-agent_materials read_profile_sources",
+    note: "生成 student_profile 前必须调用 application-agent_materials action=read_profile_sources；不要手写绝对路径，也不要用 read/glob/bash/task 去拼批次目录。",
+  }
+}
+
+function agentFacingOcrEntries(results: Array<Record<string, unknown>>) {
+  return results.map((item) => ({
+    fileName: basename(String(item.file || item.sharedOutput || item.output || "")),
+    output: item.output,
+    textLength: item.textLength,
+    error: item.error,
+    sourceSha256: item.sourceSha256,
+    method: item.method,
+  }))
+}
+
+function profileSourcePriority(fileName: string, category = "") {
+  const name = (fileName + " " + category).toLowerCase()
+  if (/信息收集|info.?collect|application.?form|个人信息/.test(name)) return 0
+  if (/简历|resume|cv/.test(name)) return 1
+  if (/成绩|transcript|gpa/.test(name)) return 2
+  if (/ielts|toefl|语言|language/.test(name)) return 3
+  if (/护照|身份证|passport|id.?card|enrollment|在读/.test(name)) return 4
+  if (/推荐|recommend/.test(name)) return 5
+  if (/实习|intern|工作/.test(name)) return 6
+  return 9
+}
+
+async function readProfileSources(workspace: string) {
+  const materialsIndexPath = join(workspace, "03_state", "materials_index.json")
+  const ocrIndexPath = join(workspace, "03_state", "ocr_index.json")
+  if (!existsSync(materialsIndexPath)) {
+    throw new Error("PROFILE_SOURCES_MISSING: 03_state/materials_index.json 不存在。请先完成 classify。")
+  }
+  const materials = await readJson(materialsIndexPath, []) as Array<Record<string, unknown>>
+  const ocr = existsSync(ocrIndexPath)
+    ? await readJson(ocrIndexPath, []) as Array<Record<string, unknown>>
+    : []
+  const bySha = new Map(ocr.map((item) => [String(item.sourceSha256 || ""), item]))
+  const ranked = materials
+    .map((item) => {
+      const fileName = String(item.fileName || basename(String(item.backupPath || item.originalPath || item.classifiedPath || "")))
+      const sourceSha256 = String(item.sourceSha256 || "")
+      const ocrItem = bySha.get(sourceSha256)
+      return {
+        fileName,
+        category: String(item.category || ""),
+        reason: String(item.reason || ""),
+        sourceSha256,
+        textLength: Number(ocrItem?.textLength || 0),
+        output: String(ocrItem?.output || ""),
+        priority: profileSourcePriority(fileName, String(item.category || "")),
+      }
+    })
+    .sort((a, b) => a.priority - b.priority || b.textLength - a.textLength)
+  const selected = ranked.filter((item) => item.output && item.textLength > 0).slice(0, 16)
+  const sources = []
+  for (const item of selected) {
+    const absolute = join(workspace, item.output)
+    if (!existsSync(absolute)) continue
+    const raw = await readFile(absolute, "utf8")
+    const maxChars = item.priority === 0 ? 12000 : 4000
+    sources.push({
+      fileName: item.fileName,
+      category: item.category,
+      reason: item.reason,
+      sourceSha256: item.sourceSha256,
+      localPath: item.output,
+      textLength: item.textLength,
+      text: raw.length > maxChars ? raw.slice(0, maxChars) + "\n…[truncated]" : raw,
+    })
+  }
+  return {
+    status: "completed",
+    materialsCount: materials.length,
+    ocrCount: ocr.length,
+    returnedSources: sources.length,
+    materialsIndex: materials.map((item) => ({
+      fileName: String(item.fileName || basename(String(item.backupPath || item.originalPath || ""))),
+      category: item.category,
+      reason: item.reason,
+      sourceSha256: item.sourceSha256,
+    })),
+    sources,
+    writeProfileTo: "02_generated/student_profile.md",
+    message: "已从学校工作区本地索引读取档案源文本。请仅基于 sources[].text 生成 02_generated/student_profile.md；禁止再手写绝对路径调用 read/glob/bash/task。",
+  }
+}
+
 export const workspace = {
   description: "Create or refresh an isolated Terra-Edu school workspace. Single-school tasks copy source materials; selection-list tasks prepare or reuse one read-only student dossier shared by all school children.",
   args: inputArg({
@@ -2536,10 +2721,11 @@ export const workspace = {
         status: "completed",
         reusedSharedDossier: false,
         ownerPreparation: true,
+        mustContinueWith: "application-agent_materials extract_text",
         sharedWorkspacePath: sharedAccess.shared.workspace,
         sharedMaterialsPath: sharedAccess.shared.materials,
         sharedProfilePath: sharedAccess.shared.profile,
-        nextSteps: ["一次性 PaddleOCR", "一次性材料分类", "生成纯学生事实档案", "发布共享档案"],
+        nextSteps: ["同一回合立刻调用 extract_text", "classify", "read_profile_sources", "写 student_profile.md", "发布共享档案"],
       }, null, 2)
     }
     const source = input.sourceFolder || task.input?.sourceFolder
@@ -2565,9 +2751,9 @@ export const workspace = {
 }
 
 export const materials = {
-  description: "Extract text from scanned PDF/image materials with the bundled PaddleOCR and from office/text files (docx/xlsx/txt/md/csv), or classify backed-up materials and write materials_index files.",
+  description: "Extract text from scanned PDF/image materials with the bundled PaddleOCR and from office/text files (docx/xlsx/txt/md/csv), classify backed-up materials, or read local profile source texts without inventing absolute paths.",
   args: inputArg({
-    action: { type: "string", enum: ["extract_text", "classify"], description: "Extract material text before classification, or classify all backed-up materials" },
+    action: { type: "string", enum: ["extract_text", "classify", "read_profile_sources"], description: "extract_text runs OCR/office extraction; classify builds materials_index; read_profile_sources returns local extracted texts for student_profile generation" },
   }, ["action"]),
   async execute(args, ctx) {
     rejectPreparationMutationForRefill(ctx, "application-agent_materials")
@@ -2584,6 +2770,11 @@ export const materials = {
     const hasSupplementalMaterials = materialReview.status === "approved" && materialReview.mode === "supplement_folder" && existsSync(supplementalRoot)
     const schoolOverlay = hasSupplementalMaterials && materialReview.scope !== "student"
     await appendAudit(workspace, "materials", action, "started")
+    if (action === "read_profile_sources") {
+      const payload = await readProfileSources(workspace)
+      await appendAudit(workspace, "materials", action, "completed", "profile sources " + payload.returnedSources + "/" + payload.materialsCount, ctx)
+      return JSON.stringify(payload, null, 2)
+    }
     if (sharedAccess?.role === "reader" && !hasSupplementalMaterials) {
       await hydrateSharedDossier(workspace, task, sharedAccess)
       await appendAudit(workspace, "materials", action, "completed", "preparation locked; reused shared dossier v" + Number(sharedAccess.state.version || 1))
@@ -2622,11 +2813,21 @@ export const materials = {
           layoutVersion: layoutVersion,
         })
         await writeJson(shared.indexPath, results)
-        await writeJson(join(workspace, "03_state", "ocr_index.json"), results)
+        const localResults = shared.layoutVersion === 2
+          ? await syncSchoolLocalExtractedText(workspace, shared.outputDir || localOutputDir, results)
+          : (await writeJson(join(workspace, "03_state", "ocr_index.json"), results), results)
         await appendLog(workspace, "agent", "已复用选校批次共享的文字提取结果，并补齐 " + native.added + " 份 office/text 材料。")
         await saveTask(workspace, task, "正在读取文件", "已复用共享文字提取结果；office/text 新提取 " + native.added + " 份。")
         await appendAudit(workspace, "materials", action, "completed", "reused shared ocr " + results.length + "; native " + native.added, ctx)
-        return JSON.stringify({ status: "completed", reusedSharedOcr: true, completed: results.length, nativeAdded: native.added, files: results }, null, 2)
+        return JSON.stringify({
+          status: "completed",
+          reusedSharedOcr: true,
+          completed: results.length,
+          nativeAdded: native.added,
+          files: agentFacingOcrEntries(localResults),
+          localRead: localMaterialReadHint(),
+          mustContinueWith: "application-agent_materials classify",
+        }, null, 2)
       }
       const outputDir = shared?.outputDir || localOutputDir
       await mkdir(outputDir, { recursive: true })
@@ -2773,7 +2974,9 @@ export const materials = {
       const baseResults = schoolOverlay && sharedAccess ? await readJson(sharedAccess.shared.ocrIndex, []) : []
       const schoolOcrOverlay = !schoolOverlay ? await readJson(join(workspace, "03_state", "school_ocr_overlay.json"), []) : []
       const combinedResults = schoolOverlay ? [...baseResults, ...results] : [...results, ...schoolOcrOverlay]
-      await writeJson(join(workspace, "03_state", "ocr_index.json"), combinedResults)
+      const localResults = shared && !schoolOverlay
+        ? await syncSchoolLocalExtractedText(workspace, outputDir, combinedResults)
+        : (await writeJson(join(workspace, "03_state", "ocr_index.json"), combinedResults), combinedResults)
       if (schoolOverlay) {
         await writeJson(join(workspace, "03_state", "material_review.json"), {
           ...materialReview,
@@ -2795,7 +2998,15 @@ export const materials = {
       await appendLog(workspace, "agent", "已提取材料文字：扫描 OCR/复用 " + completed.length + "/" + combinedResults.length + " 份有文字；其中 office/text 新提取 " + native.added + " 份。")
       await saveTask(workspace, task, "正在读取文件", "已完成材料文字提取：有文字 " + completed.length + " 份，失败或无文字 " + failed.length + " 份（含 office/text " + native.added + " 份）。")
       await appendAudit(workspace, "materials", action, "completed", "ocr+native " + completed.length + "/" + combinedResults.length + "; nativeAdded " + native.added)
-      return JSON.stringify({ status: "completed", completed: completed.length, failed: failed.length, nativeAdded: native.added, files: combinedResults }, null, 2)
+      return JSON.stringify({
+        status: "completed",
+        completed: completed.length,
+        failed: failed.length,
+        nativeAdded: native.added,
+        files: agentFacingOcrEntries(localResults),
+        localRead: localMaterialReadHint(),
+        mustContinueWith: "application-agent_materials classify",
+      }, null, 2)
     }
 
     if (sharedAccess?.role === "owner" && existsSync(sharedAccess.shared.materialsIndex) && !hasSupplementalMaterials) {
@@ -2806,7 +3017,14 @@ export const materials = {
       }
       await saveTask(workspace, task, "正在生成学生资料", "已复用当前学生资料库中已完成的材料分类结果。")
       await appendAudit(workspace, "materials", action, "completed", "reused owner classification " + records.length)
-      return JSON.stringify({ status: "completed", reusedSharedClassification: true, files: records.length }, null, 2)
+      return JSON.stringify({
+        status: "completed",
+        reusedSharedClassification: true,
+        files: records.length,
+        localRead: localMaterialReadHint(),
+        mustContinueWith: "application-agent_materials read_profile_sources",
+        message: "材料分类已就绪。下一步必须调用 read_profile_sources，再写 02_generated/student_profile.md。",
+      }, null, 2)
     }
 
     const sharedMaterialsRoot = sharedAccess?.shared.materials || join(workspace, "00_original_backup")
@@ -2874,7 +3092,13 @@ export const materials = {
     await appendLog(workspace, "agent", "已完成材料分类或复用，共 " + combinedRecords.length + " 个文件。")
     await saveTask(workspace, task, "正在生成学生资料", "材料已分类完成，materials_index 已更新。")
     await appendAudit(workspace, "materials", action, "completed", "classified " + combinedRecords.length + " files")
-    return "已分类或复用 " + combinedRecords.length + " 个文件。无法确认用途的文件会留在 needs_review。"
+    return JSON.stringify({
+      status: "completed",
+      files: combinedRecords.length,
+      localRead: localMaterialReadHint(),
+      mustContinueWith: "application-agent_materials read_profile_sources",
+      message: "已分类或复用 " + combinedRecords.length + " 个文件。无法确认用途的文件会留在 needs_review。下一步必须调用 read_profile_sources，再写 02_generated/student_profile.md；禁止手写绝对路径调用 read/glob/bash/task。",
+    }, null, 2)
   },
 }
 
@@ -2893,6 +3117,11 @@ export const state = {
     await appendAudit(workspace, "state", String(input.status || "update"), "started", input.message || "")
     const progress = ensureCuaProgress(await readJson(join(workspace, "03_state/application_progress.json"), {}))
     const materialReview = await readJson(join(workspace, "03_state/material_review.json"), {})
+    const sharedAccess = input.status === "等待顾问确认材料" ? await sharedDossierAccess(task) : undefined
+    if (sharedAccess?.role === "owner" && sharedAccess.state.status !== "prepared" && sharedAccess.state.status !== "ready") {
+      await appendAudit(workspace, "state", String(input.status), "failed", "student dossier is not prepared", ctx)
+      throw new Error("STUDENT_DOSSIER_INCOMPLETE: 资料库负责人必须先生成学校本地 02_generated/student_profile.md，并让 application-agent_documents 返回 publishOk:true、共享状态 prepared；当前不得进入材料确认关口。")
+    }
     // Keep the desktop material-review panel sticky until the consultant clicks it.
     if (materialReview.status === "pending" && input.status && input.status !== "等待顾问确认材料" && input.status !== "已暂停") {
       await appendAudit(workspace, "state", String(input.status), "failed", "material review still pending", ctx)
@@ -2985,9 +3214,18 @@ export const documents = {
       })
     }
     const reviewCompleteAfter = reviewAfterDocs.status === "approved" && await materialReviewPreparationComplete(workspace, reviewAfterDocs)
+    const preparationBlocked = reviewAfterDocs.status !== "approved" && Boolean(publishWarning)
     // Never clear an existing approved review back to pending. Sticky pending only when never approved.
-    const needsMaterialReview = !progress.egoBrowser?.preparedAt && reviewAfterDocs.status !== "approved"
+    const needsMaterialReview = !preparationBlocked && !progress.egoBrowser?.preparedAt && reviewAfterDocs.status !== "approved"
     const reviewAwaitingApplication = reviewAfterDocs.status === "approved" && !reviewCompleteAfter
+    if (preparationBlocked) {
+      await writeJson(join(workspace, "03_state/material_review.json"), {
+        ...reviewAfterDocs,
+        status: "preparing",
+        summary: "学生核心档案尚未准备完整，补全并通过共享档案准备门槛后才会请求顾问确认。",
+        updatedAt: new Date().toISOString(),
+      })
+    }
     if (needsMaterialReview) {
       const previousPending = reviewAfterDocs.status === "pending" ? reviewAfterDocs : {}
       await writeJson(join(workspace, "03_state/material_review.json"), {
@@ -3002,8 +3240,10 @@ export const documents = {
     await saveTask(
       workspace,
       task,
-      needsMaterialReview ? "等待顾问确认材料" : reviewAwaitingApplication ? "正在检查缺失内容" : !progress.egoBrowser?.preparedAt ? "可继续申请" : missing.some((item: any) => item.blocksProgress) ? "等待补充材料" : progress.egoBrowser?.completedAt ? "阶段性完成" : "正在填写申请平台",
-      needsMaterialReview
+      preparationBlocked ? "正在生成学生资料" : needsMaterialReview ? "等待顾问确认材料" : reviewAwaitingApplication ? "正在检查缺失内容" : !progress.egoBrowser?.preparedAt ? "可继续申请" : missing.some((item: any) => item.blocksProgress) ? "等待补充材料" : progress.egoBrowser?.completedAt ? "阶段性完成" : "正在填写申请平台",
+      preparationBlocked
+        ? "顾问文档已生成，但学生核心档案尚未准备完整：" + publishWarning + "。必须补全 student_profile.md 并重新运行文档工具；当前不会显示材料确认或进入填表。"
+        : needsMaterialReview
         ? "材料整理、缺失项和阶段总结已完成。请在申请 Agent 的材料确认面板决定是否补充，再进入浏览器。"
         : reviewAwaitingApplication
           ? "补充内容尚未通过应用校验，暂不启动浏览器。"
@@ -3015,7 +3255,7 @@ export const documents = {
       workspace,
       "documents",
       action,
-      "completed",
+      preparationBlocked ? "failed" : "completed",
       publishWarning
         ? "generated documents; shared dossier publish warning: " + publishWarning
         : sharedPublication
@@ -3025,12 +3265,15 @@ export const documents = {
           : "generated documents from missing_items.json",
     )
     return JSON.stringify({
-      status: "completed",
+      status: preparationBlocked ? "blocked" : "completed",
       documentsGenerated: true,
       publishOk: !publishWarning,
       publishWarning: publishWarning || undefined,
+      mustContinuePreparation: preparationBlocked || undefined,
       sharedPublication: sharedPublication || undefined,
-      message: needsMaterialReview
+      message: preparationBlocked
+        ? "文档已生成，但 STUDENT_DOSSIER_INCOMPLETE：必须先生成 02_generated/student_profile.md，再重新调用 application-agent_documents。publishOk:true 且共享状态 prepared 前不得停止、请求材料确认或启动 ego-browser。"
+        : needsMaterialReview
         ? "文档已生成到 02_generated，任务已停在材料确认关口。请等待顾问在桌面应用选择补充文件夹、填写文字补充或确认暂不补充；不要启动 ego-browser。"
         : publishWarning
           ? "文档已生成到 02_generated，但共享档案发布失败：" + publishWarning + "。请顾问修复共享档案后再进入后续学校。"
@@ -3340,6 +3583,7 @@ export const cua = {
     safetyEvidence: { type: "object", description: "Optional structured evidence for record_browser_safety_stop (cleanupError, capturedAlerts, topLevelAlerts, info)." },
     safetyResolution: { type: "string", enum: ["consultant_continue_same_space", "consultant_refill"], description: "For resolve_browser_safety_stop only. consultant_continue_same_space requires a prior desktop authorization; cleanup_failed cannot continue the same space." },
     consultantConfirmed: { type: "boolean", description: "Required true after the consultant explicitly chose to resume a handed-off task space, or to resolve an old workspace that has no saved taskSpaceId. Alone it never clears browser safetyStop." },
+    taskSpacePresent: { type: "boolean", description: "For resume_ego phase 2 only: true when listTaskSpaces still contains the saved numeric taskSpaceId; false when that ID is absent. Required together with evidence/detail from the list output before takeOver/claim is authorized." },
     blockerDisposition: { type: "string", enum: ["resolved", "handoff"], description: "Required for record_blocker: resolved after a safe dialog response, or handoff after control was given to the consultant." },
     handoffType: { type: "string", enum: ["login", "browser_takeover"], description: "For handoff_to_consultant: login only for an observed login/authentication need; browser_takeover for dialogs, user takeover, or other manual intervention." },
     controlLossKind: { type: "string", enum: ["deliberate_handoff", "unexpected_control_loss"], description: "Whether the Agent deliberately completed handOffTaskSpace(done:true), or Ego unexpectedly reported user/inactive/not-assigned control loss." },
@@ -3557,6 +3801,10 @@ export const cua = {
       ensureCuaProgress(progress)
       const taskSpaceId = String(input.taskSpaceId || "").trim()
       const savedTaskSpaceId = numericTaskSpaceId(progress.egoBrowser?.taskSpaceId)
+      const evidence = cuaEvidence(input)
+      const probePending = progress.egoBrowser?.resumeProbePending === true
+      const missingConfirmed = input.missingTaskSpaceConfirmed === true || input.taskSpacePresent === false
+      const presentConfirmed = input.taskSpacePresent === true
       const auditError =
         browserSafetyGateError(progress) ||
         browserAuditError(auditAction, { taskSpaceId }) ||
@@ -3564,7 +3812,10 @@ export const cua = {
         browserTaskSpaceMismatch(progress, taskSpaceId) ||
         (!savedTaskSpaceId ? "BROWSER_TASK_SPACE_REQUIRED: no saved taskSpaceId is available to resume." : "") ||
         (!hasPendingBrowserHandoff(progress) ? "BROWSER_HANDOFF_REQUIRED: only a recorded consultant handoff can be resumed with takeOverTaskSpace." : "") ||
-        (input.consultantConfirmed === true ? "" : "CONSULTANT_CONFIRMATION_REQUIRED: resume only after the consultant explicitly continues the handed-off browser task space.")
+        (input.consultantConfirmed === true ? "" : "CONSULTANT_CONFIRMATION_REQUIRED: resume only after the consultant explicitly continues the handed-off browser task space.") ||
+        (progress.egoBrowser?.rebindPending
+          ? "BROWSER_TASK_SPACE_REBIND_PENDING: finish retire-and-rebind before resume_ego."
+          : "")
       if (auditError) {
         appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: auditError, page: progress.currentPage || "" })
         await writeJson(join(workspace, "03_state/application_progress.json"), progress)
@@ -3572,29 +3823,111 @@ export const cua = {
         await appendAudit(workspace, "cua", auditAction, "failed", auditError)
         return auditError
       }
+
+      // Phase 2a: list proved the saved ID is gone → enter retire-and-rebind, never takeOver/useOrCreate.
+      if (missingConfirmed) {
+        const missingError = browserAuditError(auditAction, { evidence }) ||
+          (probePending || progress.egoBrowser?.resumeAuthorizedAt
+            ? ""
+            : "BROWSER_RESUME_PROBE_REQUIRED: call resume_ego once to authorize listTaskSpaces before reporting a missing ID.")
+        if (missingError) {
+          appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: missingError, page: progress.currentPage || "" })
+          await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+          await appendAudit(workspace, "cua", auditAction, "failed", missingError)
+          return missingError
+        }
+        progress.browserBackend = "ego-browser"
+        progress.egoBrowser = {
+          ...(progress.egoBrowser || {}),
+          taskSpaceId: savedTaskSpaceId,
+          handoffPending: true,
+          takeoverPending: false,
+          resumeProbePending: false,
+          resumeAuthorizedAt: progress.egoBrowser?.resumeAuthorizedAt || new Date().toISOString(),
+          resumedAt: undefined,
+          rebindPending: {
+            phase: "consultant_confirmation",
+            oldTaskSpaceId: savedTaskSpaceId,
+            detectedAt: new Date().toISOString(),
+            evidence,
+            source: "resume_ego_missing_task_space",
+          },
+        }
+        progress.dynamicFormChecks = []
+        delete progress.pendingSaveAttempt
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await saveTask(workspace, task, "等待顾问接管浏览器", "恢复探测证明保存的 Ego task-space ID 已消失。原 ID 仍保留，等待顾问明确选择复用现有空间或新建替代空间。")
+        await appendAudit(workspace, "cua", auditAction, "completed", "resume probe found missing task space; retire-and-rebind required")
+        return [
+          "TASK_SPACE_RETIRE_CONFIRMATION_REQUIRED: listTaskSpaces 已证明保存的 taskSpaceId " + savedTaskSpaceId + " 不存在。",
+          "严禁 takeOverTaskSpace、claimTaskSpace、useOrCreateTaskSpace 或继续填表。",
+          "用 OpenCode question 向顾问展示 list 结果，并让其明确选择“复用指定现有空间”或“新建替代空间”。",
+          "收到选择后调用 retire_and_rebind_ego_task：taskSpaceId=" + savedTaskSpaceId + "、missingTaskSpaceConfirmed:true、consultantConfirmed:true、rebindMode=existing|new，并传 evidence/detail=完整 list JSON；选择现有空间时再传 replacementTaskSpaceId、taskSpaceObservedName、taskSpaceOwnership。",
+        ].join("\n")
+      }
+
+      // Phase 2b: list proved the saved ID is still present → authorize the real takeOver/claim round.
+      if (presentConfirmed) {
+        const presentError = browserAuditError(auditAction, { evidence }) ||
+          (probePending || progress.egoBrowser?.resumeAuthorizedAt
+            ? ""
+            : "BROWSER_RESUME_PROBE_REQUIRED: call resume_ego once to authorize listTaskSpaces before takeOver.")
+        if (presentError) {
+          appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: presentError, page: progress.currentPage || "" })
+          await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+          await appendAudit(workspace, "cua", auditAction, "failed", presentError)
+          return presentError
+        }
+        progress.browserBackend = "ego-browser"
+        progress.egoBrowser = {
+          ...(progress.egoBrowser || {}),
+          taskSpaceId: savedTaskSpaceId,
+          handoffPending: true,
+          takeoverPending: true,
+          resumeProbePending: false,
+          resumeAuthorizedAt: progress.egoBrowser?.resumeAuthorizedAt || new Date().toISOString(),
+          resumedAt: undefined,
+          resumeListEvidence: evidence,
+        }
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+        await appendLog(workspace, "cua", "恢复探测确认 task space 仍在，等待实际接管并观察：" + savedTaskSpaceId)
+        await saveTask(workspace, task, "等待顾问接管浏览器", "listTaskSpaces 已确认保存 ID 仍在；只有 takeOver/claim 成功且首个 pageInfo 观察被记录后，才算真正恢复。")
+        await appendAudit(workspace, "cua", auditAction, "completed", "consultant authorized ego-browser takeover after list probe")
+        const recoveryCall = progress.egoBrowser?.controlLossKind === "unexpected_control_loss"
+          ? "await claimTaskSpace(" + JSON.stringify(savedTaskSpaceId) + ")"
+          : "await takeOverTaskSpace(" + JSON.stringify(savedTaskSpaceId) + ")"
+        return "顾问已授权恢复，且 listTaskSpaces 已确认保存 ID 仍在。下一轮 Bash heredoc先执行 " + recoveryCall + "；不要读取返回值，紧接着第一步只调用 pageInfo()。无 dialog 后用 Page.getFrameTree 记录实际表单 frame，再以真实顶层 URL/标题、frameId/loaderId/frameUrl 和证据调用 record_observation，届时才会清除 handoffPending。不得改用 useOrCreateTaskSpace。"
+      }
+
+      // Phase 1: consultant continue → authorize list-only probe; hard-block takeOver/create until phase 2.
       progress.browserBackend = "ego-browser"
       progress.egoBrowser = {
         ...(progress.egoBrowser || {}),
         taskSpaceId: savedTaskSpaceId,
         handoffPending: true,
         takeoverPending: true,
+        resumeProbePending: true,
         resumeAuthorizedAt: new Date().toISOString(),
         resumedAt: undefined,
       }
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
-      await appendLog(workspace, "cua", "顾问已授权恢复 ego-browser，等待实际接管并观察：" + savedTaskSpaceId)
-      await saveTask(workspace, task, "等待顾问接管浏览器", "顾问已授权 Agent 恢复；只有 takeOverTaskSpace 成功且首个 pageInfo 观察被记录后，才算真正恢复。")
-      await appendAudit(workspace, "cua", auditAction, "completed", "consultant authorized ego-browser takeover")
-      const recoveryCall = progress.egoBrowser?.controlLossKind === "unexpected_control_loss"
-        ? "await claimTaskSpace(" + JSON.stringify(savedTaskSpaceId) + ")"
-        : "await takeOverTaskSpace(" + JSON.stringify(savedTaskSpaceId) + ")"
-      return "顾问已授权恢复，但 task space 尚未标记为已接管。下一轮 Bash heredoc先执行 " + recoveryCall + "；不要读取返回值，紧接着第一步只调用 pageInfo()。无 dialog 后用 Page.getFrameTree 记录实际表单 frame，再以真实顶层 URL/标题、frameId/loaderId/frameUrl 和证据调用 record_observation，届时才会清除 handoffPending。不得改用 useOrCreateTaskSpace。"
+      await appendLog(workspace, "cua", "顾问已授权恢复 ego-browser，进入 listTaskSpaces 探测：" + savedTaskSpaceId)
+      await saveTask(workspace, task, "等待顾问接管浏览器", "顾问已授权恢复；必须先 listTaskSpaces 确认保存 ID 仍在，才能 takeOver。")
+      await appendAudit(workspace, "cua", auditAction, "completed", "consultant authorized ego-browser resume probe")
+      return [
+        "BROWSER_RESUME_PROBE_REQUIRED: 顾问已授权恢复，但尚未确认保存的 taskSpaceId 是否仍存在。",
+        "本回合只能 listTaskSpaces，严禁 takeOverTaskSpace、claimTaskSpace、useOrCreateTaskSpace、导航或填写。",
+        "PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs <<'EOF'",
+        "cliLog(JSON.stringify({ savedTaskSpaceId: " + JSON.stringify(savedTaskSpaceId) + ", spaces: await listTaskSpaces() }, null, 2))",
+        "EOF",
+        "然后再次调用 resume_ego（consultantConfirmed:true、taskSpaceId=" + savedTaskSpaceId + "）：若 list 含该 ID，传 taskSpacePresent:true 与 evidence/detail=完整 list JSON；若不含，传 taskSpacePresent:false（或 missingTaskSpaceConfirmed:true）与同样证据，进入 retire-and-rebind。",
+      ].join("\n")
     }
     if (input.action === "retire_and_rebind_ego_task") {
       ensureCuaProgress(progress)
       const taskSpaceId = String(input.taskSpaceId || "").trim()
       const replacementTaskSpaceId = String(input.replacementTaskSpaceId || "").trim()
-      const evidence = String(input.evidence || input.text || "").trim()
+      const evidence = cuaEvidence(input)
       const rebindMode = String(input.rebindMode || "").trim()
       const savedTaskSpaceId = numericTaskSpaceId(progress.egoBrowser?.taskSpaceId)
       const pendingRebind = progress.egoBrowser?.rebindPending
@@ -3621,6 +3954,7 @@ export const cua = {
       if (input.consultantConfirmed !== true) {
         progress.egoBrowser = {
           ...(progress.egoBrowser || {}),
+          resumeProbePending: false,
           rebindPending: {
             phase: "consultant_confirmation",
             oldTaskSpaceId: taskSpaceId,
@@ -3827,10 +4161,20 @@ export const cua = {
         await appendAudit(workspace, "cua", auditAction, "failed", taskSpaceError)
         return taskSpaceError
       }
+      if (progress.egoBrowser?.rebindPending) {
+        await saveTask(workspace, task, "等待顾问接管浏览器", "保存的 Ego task space 已消失，正在等待顾问确认 retire-and-rebind。不得重新准备或私自新建空间。")
+        await appendAudit(workspace, "cua", auditAction, "failed", "browser task space rebind is still pending")
+        return "BROWSER_TASK_SPACE_REBIND_PENDING: 保存的 taskSpaceId 已进入 retire-and-rebind。不要调用 useOrCreateTaskSpace、takeOverTaskSpace 或 prepare 绕过；请按顾问选择完成 retire_and_rebind_ego_task。"
+      }
       if (hasPendingBrowserHandoff(progress)) {
+        if (progress.egoBrowser?.resumeProbePending === true) {
+          await saveTask(workspace, task, "等待顾问接管浏览器", "恢复探测尚未完成：只能 listTaskSpaces，不得重新准备或新建空间。")
+          await appendAudit(workspace, "cua", auditAction, "failed", "browser resume probe is still pending")
+          return "BROWSER_RESUME_PROBE_REQUIRED: 顾问已授权恢复，但必须先完成 listTaskSpaces 探测并再次调用 resume_ego（taskSpacePresent true/false）。不要调用 useOrCreateTaskSpace、openOrReuseTab 或 takeOverTaskSpace。"
+        }
         await saveTask(workspace, task, "等待顾问接管浏览器", "当前 ego-browser task space 已交给顾问。不得重新准备、创建或认领空间；请等待顾问明确点击继续任务。")
         await appendAudit(workspace, "cua", auditAction, "failed", "browser handoff is still pending")
-        return "BROWSER_HANDOFF_PENDING: 当前 task space 已交给顾问。不要调用 useOrCreateTaskSpace、openOrReuseTab 或 takeOverTaskSpace；顾问明确继续后，带保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true）。"
+        return "BROWSER_HANDOFF_PENDING: 当前 task space 已交给顾问。不要调用 useOrCreateTaskSpace、openOrReuseTab 或 takeOverTaskSpace；顾问明确继续后，带保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true）。第一阶段只 listTaskSpaces，确认 ID 仍在后才能 takeOver。"
       }
       const legacyWorkspace = requiresLegacyTaskSpaceConfirmation(progress)
       if (legacyWorkspace && input.consultantConfirmed !== true) {
@@ -4329,8 +4673,8 @@ export const cua = {
       )
       await appendAudit(workspace, "cua", auditAction, "completed", "handoff to consultant")
       return controlLossKind === "unexpected_control_loss"
-        ? "已记录意外控制丢失。不得调用 handOffTaskSpace 或自动接管；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true），再按官方 API 用 claimTaskSpace 恢复并先 pageInfo。"
-        : "已记录顾问接管。确认 ego-browser 脚本中的 handOffTaskSpace(task.id) 已返回 done:true；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true），再 await takeOverTaskSpace(savedID)（不读取返回）并先 pageInfo。"
+        ? "已记录意外控制丢失。不得调用 handOffTaskSpace 或自动接管；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true）。第一阶段只 listTaskSpaces；确认 ID 仍在后再 claimTaskSpace 并先 pageInfo。若 ID 消失则走 retire-and-rebind，禁止私自新建空间。"
+        : "已记录顾问接管。确认 ego-browser 脚本中的 handOffTaskSpace(task.id) 已返回 done:true；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true）。第一阶段只 listTaskSpaces；确认 ID 仍在后再 takeOverTaskSpace（不读取返回）并先 pageInfo。若 ID 消失则走 retire-and-rebind，禁止私自新建空间。"
     }
     if (input.action === "record_save_verified") {
       ensureCuaProgress(progress)
@@ -4637,8 +4981,16 @@ export const cua = {
     }
     if (browserServiceBlocked) {
       const externalService = /TERRA_EGO_BROWSER_(?:VERSION_CONFLICT|EXTERNAL_SERVICE_ACTIVE)/.test(detail)
+      if (externalService && numericTaskSpaceId(progress.egoBrowser?.taskSpaceId) && hasPendingBrowserHandoff(progress)) {
+        progress.egoBrowser = {
+          ...(progress.egoBrowser || {}),
+          resumeProbePending: true,
+          browserServiceConflictAt: new Date().toISOString(),
+        }
+        await writeJson(join(workspace, "03_state/application_progress.json"), progress)
+      }
       const message = externalService
-        ? "检测到另一 Ego Lite 浏览器服务。为保护其登录态和页面，Terra-Edu 没有接管、查询或关闭它；请顾问关闭另一 Ego Lite 后明确点击“继续任务”。"
+        ? "检测到另一 Ego Lite 浏览器服务或协议冲突。为保护登录态，Terra-Edu 没有接管、查询或关闭它；请顾问关闭非 Terra 管理的另一 Ego Lite 后点击“继续任务”。禁止改用冲突中的 Ego，也禁止私自新建 task space。继续后必须先 resume_ego → listTaskSpaces；若保存 ID 消失则走 retire-and-rebind。"
         : "随包 Ego Lite 服务不可用，当前浏览器回合结果不确定；不得重试或刷新，请顾问检查当前页面后明确点击“继续任务”。"
       await saveTask(workspace, task, "等待顾问接管浏览器", message)
       await appendAudit(workspace, "cua", auditAction, "failed", detail)
@@ -4851,6 +5203,17 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
         ...(sharedReadPattern ? { [sharedReadPattern]: "deny" } : {}),
       }
     : {}
+  const applicationPrompt = overrides?.sharedWorkspacePath
+    ? `${DEFAULT_APPLICATION_PROMPT}
+
+当前选校批次路径契约：
+- 当前学校工作区的精确绝对路径：${JSON.stringify(workspacePath)}
+- 学生共享资料库的精确绝对路径：${JSON.stringify(overrides.sharedWorkspacePath)}
+- 生成 student_profile 与读取材料索引时，优先调用 application-agent_materials read_profile_sources；不要手写绝对路径去 read/glob。
+- 若必须使用绝对路径，必须逐字复制以上 JSON 字符串或工具返回路径。禁止改写批次目录名（包括在连字符两侧插入空格）。
+- 如果内置文件工具拒绝某个路径，先比较实际参数与以上精确路径；不得改写后反复重试，也不得用 bash 或 task 绕过。
+- 当前任务是资料库负责人时，必须先 read_profile_sources，再写学校本地 02_generated/student_profile.md，且 application-agent_documents 必须返回 publishOk:true、共享状态 prepared，之后才能停在材料确认关口。`
+    : DEFAULT_APPLICATION_PROMPT
   await mkdir(join(base, "agents"), { recursive: true })
   await mkdir(join(base, "bin"), { recursive: true })
   await mkdir(join(base, "commands"), { recursive: true })
@@ -4862,9 +5225,26 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
     ),
   )
   await rm(join(base, "bin", ["terra", "dialog", "guard"].join("-")), { force: true })
+  const ollamaModelOptions =
+    resolvedModel.providerID === "ollama-cloud"
+      ? {
+          [resolvedModel.modelID]: resolvedModel.modelID.includes("qwen3.5")
+            ? { options: { reasoningEffort: "none" } }
+            : {},
+        }
+      : null
   await writeGeneratedJson(join(base, "opencode.json"), {
     $schema: "https://opencode.ai/config.json",
     model: model,
+    ...(ollamaModelOptions
+      ? {
+          provider: {
+            "ollama-cloud": {
+              models: ollamaModelOptions,
+            },
+          },
+        }
+      : {}),
     permission: {
       "*": "allow",
       read: {
@@ -5027,7 +5407,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
       reserved: 12000,
     },
   })
-  await writeGeneratedFile(join(base, "prompts/application-agent.md"), DEFAULT_APPLICATION_PROMPT)
+  await writeGeneratedFile(join(base, "prompts/application-agent.md"), applicationPrompt)
   await writeGeneratedFile(join(base, "prompts/application-refill-agent.md"), DEFAULT_APPLICATION_REFILL_PROMPT)
   await writeGeneratedFile(
     join(base, "agents/application-agent.md"),
@@ -5068,7 +5448,7 @@ ${sharedExternalPattern ? `    "${sharedExternalPattern}": allow\n` : ""}  glob:
   websearch: allow
 ---
 
-${DEFAULT_APPLICATION_PROMPT}
+${applicationPrompt}
 `,
   )
   await writeGeneratedFile(
