@@ -300,6 +300,16 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(isRecord(config.permission.edit), "Top-level OpenCode permission must define edit protection.")
   assert(isRecord(config.agent) && isRecord(config.agent["application-agent"]), "Generated config must include the ordinary application-agent.")
   const applicationAgent = config.agent["application-agent"]
+  assert(applicationAgent.variant === "high", "application-agent must default to thinking variant high.")
+  assert(isRecord(config.provider) && isRecord(config.provider["opencode-go"]) && isRecord(config.provider["opencode-go"].models), "Generated config must enable thinking options for OpenCode Go models.")
+  assert(isRecord(config.provider["ollama-cloud"]) && isRecord(config.provider["ollama-cloud"].models), "Generated config must enable thinking options for every Ollama Cloud curated model.")
+  const defaultThinking = config.provider["opencode-go"].models["qwen3.7-plus"]
+  assert(isRecord(defaultThinking) && isRecord(defaultThinking.options) && isRecord(defaultThinking.options.thinking) && defaultThinking.options.thinking.type === "enabled", "Default Qwen 3.7 Plus must enable Anthropic thinking by default.")
+  const kimiThinking = config.provider["opencode-go"].models["kimi-k2.6"]
+  assert(isRecord(kimiThinking) && isRecord(kimiThinking.options) && kimiThinking.options.enable_thinking === true && kimiThinking.options.reasoningEffort === "high", "Non-Qwen Go models must enable openai-compatible thinking by default.")
+  const ollamaThinking = config.provider["ollama-cloud"].models["qwen3.5:397b"]
+  assert(isRecord(ollamaThinking) && isRecord(ollamaThinking.options) && ollamaThinking.options.enable_thinking === true && ollamaThinking.options.reasoningEffort === "high", "Ollama Cloud models must enable thinking by default.")
+  assert(Object.keys(config.provider["opencode-go"].models).length >= 9 && Object.keys(config.provider["ollama-cloud"].models).length >= 20, "Thinking config must cover the full curated model catalog.")
   assert(isRecord(applicationAgent.permission) && isRecord(applicationAgent.permission.read) && applicationAgent.permission.read["*"] === "allow", "Ordinary application-agent must retain read access to authoritative state.")
   assert(isRecord(applicationAgent.permission.edit), "Ordinary application-agent must define edit protection.")
   const applicationAgentMarkdown = readText(join(workspace, ".opencode/agents/application-agent.md"))
@@ -341,11 +351,13 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(terraPolicy.includes("captureScreenshot('05_screenshots/<unique-name>.png')") && terraPolicy.includes("OpenCode `read` on that exact") && terraPolicy.includes("image/png"), "Terra policy must require explicit workspace screenshots followed by exact OpenCode image reads.")
   assert(terraPolicy.includes("fillInput+Tab+readback") && terraPolicy.includes("click+snapshot+click-option+reobserve") && terraPolicy.includes("Vue internals"), "Terra policy must require real generic interactions and ban framework-internal writes.")
   assert(terraPolicy.includes("本页落盘/前进控件") && terraPolicy.includes("不以按钮字面量做硬规则") && terraPolicy.includes("Major is required.") && terraPolicy.includes("dismiss_js_alert") && terraPolicy.includes("先填完再查") && terraPolicy.includes("未填完禁止 Save") && terraPolicy.includes("clickByCoordinates") && terraPolicy.includes("PAGE_LEFT_WITHOUT_SAVE_EVIDENCE"), "Terra policy must require real page-commit clicks by behavior, coordinate CDP fallback, URL leave warning, fill-then-verify, Academic hard-block, and dismiss_js_alert.")
+  assert(terraPolicy.includes("In-page DOM modals") && terraPolicy.includes("Start New Application") && terraPolicy.includes("never coordinate-click at 0,0"), "Terra policy must keep in-page DOM modals on Ego @ref path and ban zero-rect coordinate shortcuts.")
   assert(terraPolicy.includes("completeTaskSpace(taskSpaceId, { keep: true })") && terraPolicy.includes("一律不得使用 keep:false"), "Terra policy must preserve completed Ego windows instead of exercising the crashing native close path.")
   const cuaSkill = readText(join(workspace, ".opencode/skills/cua-application-filling/SKILL.md"))
   assert(cuaSkill.includes("绝不自动抢回控制"), "CUA skill must forbid automatic task-space takeover.")
   assert(cuaSkill.includes("dismiss_js_alert") && (cuaSkill.includes("Accessibility") || cuaSkill.includes("辅助功能") || cuaSkill.includes("结束回合")), "CUA skill must guide dismiss_js_alert via Accessibility outside Ego CDP.")
   assert(cuaSkill.includes("Major is required.") && cuaSkill.includes("Academic/Add Institution") && cuaSkill.includes("先填完再查") && cuaSkill.includes("dismiss_js_alert") && (cuaSkill.includes("本页落盘") || cuaSkill.includes("Save/Continue")), "CUA skill must require page commit, fill-then-verify, Academic hotspots, and dismiss_js_alert.")
+  assert(cuaSkill.includes("网页二级模态框") && cuaSkill.includes("坐标为 0 时先再观察") && cuaSkill.includes("Start New Application"), "CUA skill must keep in-page DOM modals on Ego @ref path and ban zero-rect / value-setter shortcuts.")
   assert(terraPolicy.includes("未走完疑似弹窗流程并达限前禁止 handoff/takeOver") || cuaSkill.includes("未达疑似重试上限前禁止 handoff/takeOver") || cuaSkill.includes("达限后才可交接") || terraPolicy.includes("达重试上限仍未点掉时（且仅此时）才允许 handoff_to_consultant"), "Validation/suspected alerts must forbid early handoff until dismiss limit.")
   assert(cuaSkill.includes("observePageAction") && cuaSkill.includes("先启动动作但不 await"), "CUA skill must observe iframe dialogs while the triggering action is still pending.")
 

@@ -23,12 +23,13 @@ function model(
     providerID,
     subscription,
     label,
-    description,
+    description: description.includes("思考模式开启") ? description : `思考模式开启。${description}`,
   }
 }
 
 // Hard-coded multimodal (and explicitly requested) application models.
 // Default stays the first OpenCode Go entry for installs without Ollama Cloud.
+// Every entry has thinking enabled by default when a workspace is prepared.
 export const APPLICATION_AGENT_MODELS: ApplicationAgentModelOption[] = [
   // —— OpenCode Go 订阅（多模态）——
   model("opencode-go", "qwen3.7-plus", "千问 Qwen 3.7 Plus", "默认。多模态，综合能力强，填表质量稳。"),
@@ -92,4 +93,47 @@ export function resolveApplicationAgentModel(
   }
 
   return { providerID: fallback.providerID, modelID: fallback.modelID, optionID: fallback.id }
+}
+
+/** Thinking options for one catalog model. Every curated model defaults to thinking on. */
+export function thinkingOptionsForModel(input: { providerID: string; modelID: string }) {
+  // OpenCode Go Qwen Plus uses @ai-sdk/anthropic and needs Anthropic thinking budgets.
+  if (input.providerID === "opencode-go" && input.modelID.toLowerCase().includes("qwen")) {
+    const high = { thinking: { type: "enabled" as const, budgetTokens: 16_000 } }
+    return {
+      options: high,
+      variants: {
+        high,
+        max: { thinking: { type: "enabled" as const, budgetTokens: 31_999 } },
+        none: { thinking: { type: "disabled" as const } },
+      },
+    }
+  }
+
+  // openai-compatible path (Go kimi/mimo, all Ollama Cloud models, etc.)
+  const high = { enable_thinking: true, reasoningEffort: "high" as const }
+  return {
+    options: high,
+    variants: {
+      high,
+      medium: { enable_thinking: true, reasoningEffort: "medium" as const },
+      none: { enable_thinking: false, reasoningEffort: "none" as const },
+    },
+  }
+}
+
+/**
+ * Workspace OpenCode provider block: thinking enabled for every curated model.
+ * Agent variant defaults to "high".
+ */
+export function applicationAgentThinkingConfig(_selected?: { providerID: string; modelID: string }) {
+  const provider: Record<string, { models: Record<string, ReturnType<typeof thinkingOptionsForModel>> }> = {}
+  for (const option of APPLICATION_AGENT_MODELS) {
+    const bucket = provider[option.providerID] || (provider[option.providerID] = { models: {} })
+    bucket.models[option.modelID] = thinkingOptionsForModel(option)
+  }
+  return {
+    variant: "high",
+    provider,
+  }
 }

@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
-import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID, resolveApplicationAgentModel } from "./application-agent-model"
+import { APPLICATION_AGENT_MODEL, APPLICATION_AGENT_MODEL_ID, applicationAgentThinkingConfig, resolveApplicationAgentModel } from "./application-agent-model"
 import { JS_ALERT_AX_JXA, dismissJsAlertViaAxRuntimeSource } from "./js-alert-ax"
 import type { ApplicationRefillAttempt, ApplicationTask } from "./application-agent"
 import egoRuntimeLock from "../../resources/ego-runtime.lock.json"
@@ -28,9 +28,10 @@ const EGO_BROWSER_PROTOCOL = `## ego-browser 通用观察协议
 - 截图不是每回合默认动作。仅在页面跳转/登录态变化、保存前后证据不足、或 snapshotText 语义无法区分字段/错误时，才写入 \`05_screenshots/<有意义且唯一的名称>.png\` 并 \`await captureScreenshot(...)\`，随后用 OpenCode 内置 read 读取同一 PNG。禁止无参数 captureScreenshot；禁止对同一稳定表单页每字段截图。不得仅凭路径、cliLog 或旧截图判断页面。
 - 普通文本输入必须使用 fillInput，随后发送真实 Tab；稳定纯文本区应尽量一次填完当前可见可确认字段后再统一读回。编号/注册号/appointment number 等标识字段只能来自材料原文或顾问确认，禁止用分数、成绩或近似字符串推断。只有遮罩输入或 fillInput 无法产生真实按键语义时，才可逐键发送 CDP Input.dispatchKeyEvent，随后同样 Tab 并读取回显。
 - 日期字段优先用 TERRA_POLICY 中的 fillDatePickerByClicks（真实 click 打开日历 → 真实点击切年/月 → 点日 → 点 OK/Apply → 读回）。若平台拒绝键入日期并提示必须用 date picker icon，禁止继续盲打键盘。最多尝试两种策略（icon 路径、相邻 calendar 按钮路径）；两种都失败则记录缺失/blocker 并 handOffTaskSpace 交给顾问，不得在日期控件上反复试错超过 2 个 heredoc。下拉选择必须先 click 打开、重新 snapshot、click 当前可见选项，再重新观察；任何重渲染都会使旧 ref 立即失效。
-- 页面写操作禁止读取或调用 Vue internals、\`$router\`、store，禁止直接 DOM value setter、HTMLElement.click()、向 DOM 派发合成 Event、form.submit()/requestSubmit() 或注入脚本提交。js/cdp 只可观察（含读取日历当前年月文案与元素 getBoundingClientRect）；写入例外是真实键盘/CDP key events、CDP Input.dispatchMouseEvent 坐标点击（与 fillDatePickerByClicks / clickByCoordinates 相同），以及保存审计的 network event 观察。snapshot click 无效时用坐标 CDP 鼠标，禁止合成 DOM 事件。系统原生 alert 不得在 Ego 通道内用 Page.handleJavaScriptDialog 关闭。
+- 页面写操作禁止读取或调用 Vue internals、\`$router\`、store，禁止直接 DOM value setter、HTMLElement.click()、向 DOM 派发合成 Event、form.submit()/requestSubmit() 或注入脚本提交。js/cdp 只可观察（含读取日历当前年月文案与元素 getBoundingClientRect）；写入例外是真实键盘/CDP key events、以及仅在 Ego click('@ref') 已失败且矩形宽高>0 时的 CDP Input.dispatchMouseEvent 坐标点击（fillDatePickerByClicks / clickByCoordinates），还有保存审计的 network event 观察。禁止合成 DOM 事件。系统原生 alert 不得在 Ego 通道内用 Page.handleJavaScriptDialog 关闭。
 - 每一页/弹窗表单（含 Add Institution 一类模态框）在可确认字段都填完、动态复查通过、且本页没有更多可填字段后，必须通过 observePageAction 点击页面上真实可见的本页落盘/前进控件离开或落盘（常见文案如 Save/Continue/Next/保存/继续/Create Application 仅作举例，不以按钮字面量做硬规则）。禁止用代码跳页、JS submit、改 URL、或口头宣称“已保存”。跨页离开且前页有表单活动、又无 record_save_verified 时，record_observation 会给出 PAGE_LEFT_WITHOUT_SAVE_EVIDENCE 提示（仅当该前页确有未落盘表单才需处理；登录→首页一类无表单跳转可忽略）。裸 \`await click(...)\` 会在原生 alert 下永久卡住。
 - 浏览器原生 alert（深色系统框、只有“确定/OK”、文案如 “Major is required.”）不是页面按钮。严禁对裸字符串「确定/OK」做 snapshot click（无 @ 选择器）。网页模态框/日期选择器上带真实选择器的 OK 按钮允许用 observePageAction 点击。本页落盘后若整段 CDP 超时且下一 pageInfo-only 也超时，按疑似校验弹窗处理（evidence=超时原文）→ dismiss_js_alert。可读 dialog.message 的 alert 同样走 record_blocker → dismiss_js_alert → 按文案补字段 → 复查 → 再点本页落盘控件。未走完疑似流程并达限前禁止 handoff/takeOver；达限后才可交接，话术为手动处理→落盘→桌面继续。runtime 弹窗不指望 helper 退出自动消失。confirm/prompt 仍必须交接顾问，期间不抢接管。
+- 网页二级模态框（Start New Application / Add Institution / 页面内 role=dialog 浮层等）不是 pageInfo().dialog，也不是原生 alert。打开后 pageInfo 应无 dialog；必须立刻新 snapshotText，只用本回合新 ref 做 fillInput/click('@ref')。下拉：click('@selectRef') → 新 snapshot → click('@optionRef') → 再观察（interactionMethod: click+snapshot+click-option+reobserve）；禁止先 record_select_verified 再操作，禁止 el.value= / selectedIndex / HTMLElement.click() / 合成 Event。Create Application / Save 等落盘控件：observePageAction(() => click('@freshRef'))。getBoundingClientRect 宽高为 0 表示未布局/错 frame/控件未露出——先 wait、scrollIntoView（仅观察）、重新 snapshot；不得因此改设 value 或 form.submit。clickByCoordinates 仅在「新鲜 @ref 的 Ego click 已试且失败、且矩形宽高>0」时作为末位兜底；坐标为 0 时禁止乱点。Ego helper 名写错时修正 helper 调用，禁止改用“标准 JS”绕过。同一模态框连续两回合真实 click 仍无响应 → handOffTaskSpace 交接，不要继续禁路径试错。
 - 任何选择、添加/删除、自动完成、切换或导航都可能改变可见内容（分支点）。动作后用新的 pageInfo 加 snapshotText 复查；仅当语义不足时再截图。硬规则热点：Academic/Add Institution——Level of Study / Bachelor / Undergraduate 之后若出现 Major / Concentration / Degree title，未填完禁止 Save；Employment/Internship——雇主类型、在职状态、添加另一段经历后必须再观察再填；Research/Publications/Articles——添加条目或切换类型后必须再观察再填。跳出来的动态字段也算当前页必填。DOM required 扫描只是辅助证据。稳定区填完且分支点复查通过后，以 remainingRequiredFields:[] 做一次 record_dynamic_form_verified，才能保存。
 - 遇到校验、超时、服务端错误或结果不明确时，先保留当前页面和观察证据，不得自动刷新、重开链接、重复同一动作或要求重新登录。若属于 observePageAction unknown，必须严格按上一条立即结束，并在下一独立 heredoc 只调用 pageInfo；只有该新观察明确证明动作失败或需要人工处理后，才可记录失败或交接。只有新观察明确显示认证失败或登录页时，才可请求顾问重新登录。
 - 若 Terra 包装器返回 TERRA_EGO_BROWSER_VERSION_CONFLICT、TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE 或 TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE，立即停止，不得重试、调用系统 ego-browser、关闭其他 Ego Lite、猜测 task space，也不得“改用当前冲突中的 Ego”或私自新建 task space。原样调用 application-agent_cua record_failure；请顾问只关闭非 Terra 管理的另一 Ego Lite 后点击“继续任务”。恢复时仍必须先 resume_ego → listTaskSpaces 探测保存 ID；ID 消失则走 retire-and-rebind，不得绕过。
@@ -901,7 +902,9 @@ async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOv
       "",
       "Native Chromium/JS alerts (dark system dialog with only 确定/OK, e.g. \"Major is required.\") are not page widgets. Never bare-click 确定/OK without an @selector. End the ego heredoc immediately when an alert is observed or the CDP channel wedges after a page-commit action. If dialog.message is readable: record_blocker(blockerDisposition: resolved, dialogType: alert, evidence: dialog.message) then dismiss_js_alert. If observePageAction times out/unknown and the next pageInfo-only round also times out: treat as a suspected validation alert — record_blocker with the exact timeout text (never invent a dialog message) then dismiss_js_alert (AX reads the real message; Ego Lite only; single OK/确定, no Cancel). Do not handoff/takeOver until that suspected-alert flow hits its retry limit; only then handoff_to_consultant with: handle the dialog in Ego → finish page commit → desktop Continue. Never close the window or click 重新填写 except for contaminated spaces. Runtime alerts are not auto-cleared by helper exit — that path exists only inside navigateInitialPageCapturingAlerts for load-time alerts. Page modal/date-picker OK buttons with a real @selector may use observePageAction. confirm/prompt still require consultant handoff with no takeOver while the advisor is handling it. beforeunload: end the round and confirm the URL is unchanged on the next pageInfo-only round — never CDP accept/cancel.",
       "",
-      "When snapshot click no-ops on a real page control, read getBoundingClientRect via js (observation only) and click with clickByCoordinates / CDP Input.dispatchMouseEvent — the same primitive fillDatePickerByClicks uses. Never synthesize DOM events or call HTMLElement.click() to fake a commit.",
+      "In-page DOM modals (Start New Application, Add Institution, role=dialog overlays) are NOT pageInfo().dialog and NOT native alerts. After open: fresh snapshotText and only new @refs. Selects must be click+snapshot+click-option+reobserve — never el.value=/selectedIndex, never record_select_verified before the real clicks. Modal Save/Create must use observePageAction(() => click('@freshRef')). If getBoundingClientRect width/height is 0, wait/scrollIntoView (observe only) and re-snapshot; do not set values or form.submit. clickByCoordinates / CDP mouse is last resort only after Ego click('@ref') already failed AND width/height > 0; never coordinate-click at 0,0. If a modal still no-ops after two real-click rounds, handOffTaskSpace — do not escalate to banned shortcuts.",
+      "",
+      "When a fresh @ref Ego click no-ops on a laid-out control (width/height > 0), then clickByCoordinates / CDP Input.dispatchMouseEvent is allowed — the same primitive fillDatePickerByClicks uses. Never synthesize DOM events or call HTMLElement.click() to fake a commit.",
       "",
       "Leaving a page: URL origin+pathname change without record_save_verified yields PAGE_LEFT_WITHOUT_SAVE_EVIDENCE only when the prior page had form activity (filled/verified/dynamic-check/save-attempt). Advisory only — act on it when that prior page still needs a server-confirmed save; ignore for non-form hops (e.g. login→home). Same-URL SPA false-forward stays on the save-evidence gate. Button labels like Save/Continue are examples, not hard word gates.",
       "",
@@ -1041,7 +1044,7 @@ ${task.input.sharedWorkspacePath ? `- 学生共享资料库（只通过申请专
 - 如果看到 OpenCode compaction/summary/上下文压缩相关消息，必须把它当作正常维护动作：先读取最新状态文件恢复任务现场，然后继续执行 todowrite 中未完成的下一步。
 - ego-browser skill 和 ego lite 浏览器都是 Terra-Edu 随软件打包的固定快照。每次运行 ego-browser heredoc 必须使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF'\`，命中 .opencode/bin/ego-browser wrapper；不能调用系统 PATH 中的 ego-browser，不能自动更新、替换、下载或从 ego lite 应用中重新复制。
 - 完整 ego-browser 通用观察协议只维护在工作区 \`.opencode/skills/ego-browser/TERRA_POLICY.md\`；进入填表阶段前必须 read 该文件。启动阶段不要打开浏览器。
-- 填表关键回合规则（细节以 TERRA_POLICY 为准）：稳定纯文本区先填完再统一读回；分支点（选择/添加行等）后强制再观察；日期用 fillDatePickerByClicks，两种策略失败即 handoff；编号字段禁猜；截图仅导航/保存/语义不足时使用；保存必须有网络证据；原生 alert 读文案后结束回合自动消窗。
+- 填表关键回合规则（细节以 TERRA_POLICY 为准）：稳定纯文本区先填完再统一读回；分支点（选择/添加行等）后强制再观察；日期用 fillDatePickerByClicks，两种策略失败即 handoff；编号字段禁猜；截图仅导航/保存/语义不足时使用；保存必须有网络证据；原生 alert / 通道超时走 record_blocker→dismiss_js_alert；达限才可交接。
 
 - 上传文件只能调用 ego-browser 的 uploadFile(selector, absolutePath)，不得用 CDP 直接设置文件、不得改成原生文件选择器操作；上传后必须在新的无 dialog 观察中确认文件名或状态，再调用 application-agent_cua record_upload。
 - 任何可能改变页面结构或可见内容的动作都会使旧复查失效。用最新观察理解新增内容，再以 remainingRequiredFields:[] 调用 application-agent_cua record_dynamic_form_verified；没有这条验证不得 SAVE。
@@ -1164,7 +1167,7 @@ const DEFAULT_APPLICATION_PROMPT = `你是 Terra-Edu 申请 Agent，服务对象
 - 每次调用申请专用 Custom Tool 后，工具会写入 03_state/agent_execution_audit.json。任务总结前必须检查该审计文件，确认关键工具链已经执行。
 - 如果某个 Custom Tool 调用失败，先记录失败原因并告知顾问，再决定是否用普通命令做有限兜底；不能无声绕过工具链。
 - ego-browser skill 和 ego lite 浏览器都是 Terra-Edu 随软件打包的固定快照。每次运行 ego-browser heredoc 必须使用 \`PATH="$PWD/.opencode/bin:$PATH" ego-browser nodejs <<'EOF'\`，命中 .opencode/bin/ego-browser wrapper；不能调用系统 PATH 中的 ego-browser，不能自动更新、替换、下载或从 ego lite 应用中重新复制。
-- 完整浏览器协议见 \`.opencode/skills/ego-browser/TERRA_POLICY.md\`；进入填表前必须 read。稳定纯文本区先填完再查；Academic/Employment/Research 等分支点后强制再观察；日期用 fillDatePickerByClicks，两种策略失败即 handoff；编号字段禁猜；截图仅导航/保存/语义不足时使用；原生 alert 结束回合自动消窗。
+- 完整浏览器协议见 \`.opencode/skills/ego-browser/TERRA_POLICY.md\`；进入填表前必须 read。稳定纯文本区先填完再查；Academic/Employment/Research 等分支点后强制再观察；日期用 fillDatePickerByClicks，两种策略失败即 handoff；编号字段禁猜；截图仅导航/保存/语义不足时使用；原生 alert / 通道超时走 dismiss_js_alert；达限才交接。
 - 任何可能改变页面内容的动作都会使旧复查失效；用新的观察理解页面差异，完成动态表单验证后才可保存。保存记录必须提供 taskSpaceId、当前 URL、标题和观察证据，不能用 record_saved 直接算成功。
 
 安全规则：
@@ -1315,6 +1318,7 @@ const SKILL_DEFINITIONS = [
 2. 完整浏览器协议只维护在 \`.opencode/skills/ego-browser/TERRA_POLICY.md\` 与 ego-browser skill 中；本 skill 不再重复粘贴全文。填表时必须先 read 该协议。任何可能打开弹窗的动作必须用 observePageAction：先启动动作但不 await，同时轮询 pageInfo（iframe 弹窗会阻塞 click Promise）。原生 alert：结束 ego heredoc → record_blocker（blockerDisposition: resolved，dialogType: alert，evidence=dialog.message）→ dismiss_js_alert（只认 pendingJsAlert，macOS Accessibility / 辅助功能，仅 Ego Lite）；不要 handoff/takeOver。beforeunload：结束回合，下一回合 pageInfo 确认 URL。confirm/prompt 才交接顾问。
 3. 首轮先得到 task.id 和无 dialog 的页面观察，再以 taskSpaceId、当前 URL、标题和证据调用 record_observation。后续只依据 student_profile.md 与材料原文中可确认的信息填写；不确定信息记录为缺失，不猜填。编号/注册号/appointment number 只能来自材料或顾问确认，禁止用分数推断。
 4. 稳定纯文本区「先填完再查」：同一可见区块/模态框内尽量一次连续 fillInput+Tab 填完当前可见可确认字段，最后统一读回；中间不做全页动态复查。选择/添加行/自动完成/日期/上传/保存是分支点，必须单独再观察。日期优先 fillDatePickerByClicks；平台要求 date picker icon 时禁止盲打，两种策略失败即 handoff，最多 2 个日期 heredoc。
+4a. 网页二级模态框（Start New Application / Add Institution 等）：不是原生 alert。打开后 pageInfo 无 dialog → 立刻新 snapshotText，只用新 ref；下拉必须 click+snapshot+click-option+reobserve；Create/Save 用 observePageAction+click('@ref')。坐标为 0 时先再观察，禁止设 value / JS submit / 改用“标准 JS”。Ego click 失败且矩形宽高>0 才可用坐标鼠标；两回合仍无响应则 handoff。
 4b. 跳转热点硬规则（未填完新必填项禁止 Save）：Academic/Add Institution——Level of Study / Bachelor / Undergraduate 之后若出现 Major / Concentration / Degree title 必须先填；Employment/Internship——雇主类型、在职、添加另一段后必须再观察再填；Research/Publications/Articles——添加条目、切换类型后必须再观察再填。跳出来的字段也算当前页必填。
 5. 默认用 snapshotText；仅当语义不足、保存前后或导航后需要视觉证据时才截图并 read。不要对稳定表单每字段截图。
 6. alert：record_blocker(dialogType: alert) 写入 pendingJsAlert 后 dismiss_js_alert 自动点掉并补字段，不要为校验 alert 交接顾问。confirm/prompt 或顾问接管：交接前确认 handOffTaskSpace 返回 done:true；登录交接标记 handoffType: login，其他标记 browser_takeover。顾问接管期间保持静默；绝不自动抢回控制，只有顾问明确回复继续后才可 takeOverTaskSpace/claimTaskSpace。
@@ -5523,26 +5527,11 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
     ),
   )
   await rm(join(base, "bin", ["terra", "dialog", "guard"].join("-")), { force: true })
-  const ollamaModelOptions =
-    resolvedModel.providerID === "ollama-cloud"
-      ? {
-          [resolvedModel.modelID]: resolvedModel.modelID.includes("qwen3.5")
-            ? { options: { reasoningEffort: "none" } }
-            : {},
-        }
-      : null
+  const thinking = applicationAgentThinkingConfig(resolvedModel)
   await writeGeneratedJson(join(base, "opencode.json"), {
     $schema: "https://opencode.ai/config.json",
     model: model,
-    ...(ollamaModelOptions
-      ? {
-          provider: {
-            "ollama-cloud": {
-              models: ollamaModelOptions,
-            },
-          },
-        }
-      : {}),
+    provider: thinking.provider,
     permission: {
       "*": "allow",
       read: {
@@ -5580,6 +5569,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
         description: "Terra-Edu 留学申请 Agent，自动整理资料、识别缺失项、生成清单并协助填写申请平台。",
         mode: "primary",
         model: model,
+        variant: thinking.variant,
         prompt: "{file:./prompts/application-agent.md}",
       permission: {
         "*": "allow",

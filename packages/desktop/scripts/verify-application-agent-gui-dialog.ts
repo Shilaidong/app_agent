@@ -714,7 +714,7 @@ if (result.kind === 'dialog') {
   if (result.info.dialog.type !== 'alert' || result.info.dialog.message !== ${JSON.stringify(`${marker}-alert`)}) {
     throw new Error('top-level alert payload was not observed: ' + JSON.stringify(result))
   }
-  // Product path: end the heredoc; never Page.handleJavaScriptDialog. Helper exit auto-clears the alert.
+  // Product path: end the heredoc; never Page.handleJavaScriptDialog. Runtime alerts use dismiss_js_alert (AX), not helper-exit auto-clear.
   cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_OBSERVED')
 } else if (alertState === 'accepted') {
   cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_OBSERVED')
@@ -752,7 +752,7 @@ if (
   result.info.dialog.type !== 'alert' ||
   result.info.dialog.message !== ${JSON.stringify(`${marker}-delayed-alert`)}
 ) throw new Error('alert scheduled 700ms after action resolution was not observed: ' + JSON.stringify(result))
-// Product path: end the heredoc; never CDP accept. Helper exit auto-clears before the next pageInfo-only round.
+// Product path: end the heredoc; never CDP accept. Runtime alerts use dismiss_js_alert before the next pageInfo-only round.
 cliLog('TERRA_EGO_DIALOG_SMOKE_DELAYED_ALERT_AFTER_ACTION')
 `,
   )

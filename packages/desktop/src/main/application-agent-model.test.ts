@@ -4,7 +4,9 @@ import {
   APPLICATION_AGENT_MODEL,
   APPLICATION_AGENT_MODEL_ID,
   APPLICATION_AGENT_MODELS,
+  applicationAgentThinkingConfig,
   resolveApplicationAgentModel,
+  thinkingOptionsForModel,
 } from "./application-agent-model"
 
 describe("application agent models", () => {
@@ -16,6 +18,23 @@ describe("application agent models", () => {
       modelID: "qwen3.7-plus",
       optionID: "opencode-go/qwen3.7-plus",
     })
+  })
+
+  test("enables thinking by default for every curated model", () => {
+    const thinking = applicationAgentThinkingConfig()
+    expect(thinking.variant).toBe("high")
+    for (const option of APPLICATION_AGENT_MODELS) {
+      expect(option.description).toContain("思考模式开启")
+      const entry = thinking.provider[option.providerID]?.models[option.modelID]
+      expect(entry).toBeTruthy()
+      const options = entry!.options as Record<string, unknown>
+      if (option.providerID === "opencode-go" && option.modelID.toLowerCase().includes("qwen")) {
+        expect(options.thinking).toEqual({ type: "enabled", budgetTokens: 16_000 })
+      } else {
+        expect(options).toEqual({ enable_thinking: true, reasoningEffort: "high" })
+      }
+      expect(thinkingOptionsForModel(option).variants.high).toBeTruthy()
+    }
   })
 
   test("routes Qwen 3.5 through Ollama Cloud by option id or model id", () => {

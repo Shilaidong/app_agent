@@ -5,7 +5,7 @@
 ## 当前交付形态
 
 - App 名称：Terra-Edu Application Agent
-- 最新版本：`1.1.20`（先行版 preview：统一 alert dismiss 达限交接出口 / 疑似弹窗通道 / 坐标点击兜底；稳定版 `1.1.17` / tag `desktop-v1.1.17-stable`）
+- 最新版本：`1.1.21`（先行版 preview：网页二级模态框 SOP / 全型号默认思考模式；稳定版 `1.1.17` / tag `desktop-v1.1.17-stable`）
 - 发布页：https://github.com/Shilaidong/app_agent/releases
 - 安装包：macOS arm64 DMG / ZIP
 - 签名：ad-hoc signing
@@ -67,8 +67,8 @@ packages/desktop/dist/release-notes/mac-free.md
 先行版 / 稳定版桌面 tag 示例（与历史 `desktop-v*` 命名一致）：
 
 ```bash
-git tag -a desktop-v1.1.20-preview -m "Terra-Edu Application Agent 1.1.20 (preview)"
-git push origin desktop-v1.1.20-preview
+git tag -a desktop-v1.1.21-preview -m "Terra-Edu Application Agent 1.1.21 (preview)"
+git push origin desktop-v1.1.21-preview
 ```
 
 正式 `v*` 发版也可：确认代码已推到 `main` 后推送版本 tag，GitHub Actions 会自动构建 macOS 包并上传到对应 Release。
