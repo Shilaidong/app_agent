@@ -20,19 +20,25 @@ describe("application agent models", () => {
     })
   })
 
-  test("enables thinking by default for every curated model", () => {
-    const thinking = applicationAgentThinkingConfig()
-    expect(thinking.variant).toBe("high")
+  test("enables thinking for every curated model but only emits the active provider", () => {
+    const go = applicationAgentThinkingConfig({ providerID: "opencode-go", modelID: "qwen3.7-plus" })
+    expect(go.variant).toBe("high")
+    expect(Object.keys(go.provider)).toEqual(["opencode-go"])
+    expect(go.provider["opencode-go"].models["qwen3.7-plus"].options).toEqual({
+      thinking: { type: "enabled", budgetTokens: 16_000 },
+    })
+    expect(go.provider["opencode-go"].models["kimi-k2.6"].options).toEqual({
+      reasoningEffort: "high",
+    })
+
+    const ollama = applicationAgentThinkingConfig({ providerID: "ollama-cloud", modelID: "qwen3.5:397b" })
+    expect(Object.keys(ollama.provider)).toEqual(["ollama-cloud"])
+    expect(ollama.provider["ollama-cloud"].models["qwen3.5:397b"].options).toEqual({
+      enable_thinking: true,
+    })
+
     for (const option of APPLICATION_AGENT_MODELS) {
       expect(option.description).toContain("思考模式开启")
-      const entry = thinking.provider[option.providerID]?.models[option.modelID]
-      expect(entry).toBeTruthy()
-      const options = entry!.options as Record<string, unknown>
-      if (option.providerID === "opencode-go" && option.modelID.toLowerCase().includes("qwen")) {
-        expect(options.thinking).toEqual({ type: "enabled", budgetTokens: 16_000 })
-      } else {
-        expect(options).toEqual({ enable_thinking: true, reasoningEffort: "high" })
-      }
       expect(thinkingOptionsForModel(option).variants.high).toBeTruthy()
     }
   })

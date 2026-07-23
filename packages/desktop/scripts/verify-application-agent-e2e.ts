@@ -302,14 +302,12 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   const applicationAgent = config.agent["application-agent"]
   assert(applicationAgent.variant === "high", "application-agent must default to thinking variant high.")
   assert(isRecord(config.provider) && isRecord(config.provider["opencode-go"]) && isRecord(config.provider["opencode-go"].models), "Generated config must enable thinking options for OpenCode Go models.")
-  assert(isRecord(config.provider["ollama-cloud"]) && isRecord(config.provider["ollama-cloud"].models), "Generated config must enable thinking options for every Ollama Cloud curated model.")
+  assert(!config.provider["ollama-cloud"], "Default Go workspace must not inject an Ollama provider block (that broke Go API readiness).")
   const defaultThinking = config.provider["opencode-go"].models["qwen3.7-plus"]
   assert(isRecord(defaultThinking) && isRecord(defaultThinking.options) && isRecord(defaultThinking.options.thinking) && defaultThinking.options.thinking.type === "enabled", "Default Qwen 3.7 Plus must enable Anthropic thinking by default.")
   const kimiThinking = config.provider["opencode-go"].models["kimi-k2.6"]
-  assert(isRecord(kimiThinking) && isRecord(kimiThinking.options) && kimiThinking.options.enable_thinking === true && kimiThinking.options.reasoningEffort === "high", "Non-Qwen Go models must enable openai-compatible thinking by default.")
-  const ollamaThinking = config.provider["ollama-cloud"].models["qwen3.5:397b"]
-  assert(isRecord(ollamaThinking) && isRecord(ollamaThinking.options) && ollamaThinking.options.enable_thinking === true && ollamaThinking.options.reasoningEffort === "high", "Ollama Cloud models must enable thinking by default.")
-  assert(Object.keys(config.provider["opencode-go"].models).length >= 9 && Object.keys(config.provider["ollama-cloud"].models).length >= 20, "Thinking config must cover the full curated model catalog.")
+  assert(isRecord(kimiThinking) && isRecord(kimiThinking.options) && kimiThinking.options.reasoningEffort === "high" && kimiThinking.options.enable_thinking == null, "Non-Qwen Go models must use reasoningEffort only (no dual enable_thinking).")
+  assert(Object.keys(config.provider["opencode-go"].models).length >= 9, "Thinking config must cover the OpenCode Go curated catalog.")
   assert(isRecord(applicationAgent.permission) && isRecord(applicationAgent.permission.read) && applicationAgent.permission.read["*"] === "allow", "Ordinary application-agent must retain read access to authoritative state.")
   assert(isRecord(applicationAgent.permission.edit), "Ordinary application-agent must define edit protection.")
   const applicationAgentMarkdown = readText(join(workspace, ".opencode/agents/application-agent.md"))

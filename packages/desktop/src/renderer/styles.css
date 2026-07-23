@@ -362,7 +362,7 @@ button {
 
 .application-agent-history {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   height: min(760px, calc(100vh - 48px));
   min-height: min(700px, calc(100vh - 48px));
   overflow: hidden;
@@ -387,6 +387,19 @@ button {
   color: #6b6358;
   font-size: 13px;
   line-height: 1.55;
+}
+
+.history-model-picker {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0 0 14px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #2f5d3e;
+}
+
+.history-model-picker .composer-model-select {
+  max-width: 28rem;
 }
 
 .application-agent-history header button {

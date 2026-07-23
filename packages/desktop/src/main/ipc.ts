@@ -76,6 +76,7 @@ type Deps = {
   installUpdate: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
   startApplicationAgentSession: (task: ApplicationTask, modelId?: string) => Promise<ApplicationAgentSession>
+  openApplicationAgentSession: (task: ApplicationTask, modelId?: string) => Promise<ApplicationAgentSession>
   getApplicationAgentModels: () => Promise<
     readonly { id: string; modelID?: string; providerID?: string; subscription?: string; label: string; description: string }[]
   >
@@ -85,7 +86,7 @@ type Deps = {
   resendApplicationAgentStartPrompt: (session: ApplicationAgentSession, task: ApplicationTask) => Promise<void>
   sendApplicationAgentPrompt: (session: ApplicationAgentSession, prompt: string) => Promise<void>
   getApplicationAgentMessages: (session: ApplicationAgentSession) => Promise<ApplicationAgentChatItem[]>
-  findApplicationAgentSession: (workspacePath: string) => Promise<ApplicationAgentSession | null>
+  findApplicationAgentSession: (workspacePath: string, preferredModelId?: string) => Promise<ApplicationAgentSession | null>
 }
 
 export function registerIpcHandlers(deps: Deps) {
@@ -279,6 +280,9 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("application-agent:start-session", (_event: IpcMainInvokeEvent, task: ApplicationTask, modelId?: string) =>
     deps.startApplicationAgentSession(task, modelId),
   )
+  ipcMain.handle("application-agent:open-session", (_event: IpcMainInvokeEvent, task: ApplicationTask, modelId?: string) =>
+    deps.openApplicationAgentSession(task, modelId),
+  )
   ipcMain.handle(
     "application-agent:start-refill-session",
     (_event: IpcMainInvokeEvent, input: ApplicationAgentRefillRequest) =>
@@ -303,8 +307,8 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("application-agent:list-tasks", (_event: IpcMainInvokeEvent, limit?: number) =>
     listApplicationTasks(limit),
   )
-  ipcMain.handle("application-agent:find-session", (_event: IpcMainInvokeEvent, workspacePath: string) =>
-    deps.findApplicationAgentSession(workspacePath),
+  ipcMain.handle("application-agent:find-session", (_event: IpcMainInvokeEvent, workspacePath: string, preferredModelId?: string) =>
+    deps.findApplicationAgentSession(workspacePath, preferredModelId),
   )
   ipcMain.handle("application-agent:continue-task", (_event: IpcMainInvokeEvent, workspacePath: string) =>
     continueApplicationTask(workspacePath),

@@ -95,10 +95,16 @@ export function resolveApplicationAgentModel(
   return { providerID: fallback.providerID, modelID: fallback.modelID, optionID: fallback.id }
 }
 
-/** Thinking options for one catalog model. Every curated model defaults to thinking on. */
+/**
+ * Thinking options for one catalog model.
+ * OpenCode Go rejects mixing Anthropic `thinking` with `reasoningEffort` / `enable_thinking`
+ * on the same request — use one knob per transport.
+ */
 export function thinkingOptionsForModel(input: { providerID: string; modelID: string }) {
-  // OpenCode Go Qwen Plus uses @ai-sdk/anthropic and needs Anthropic thinking budgets.
-  if (input.providerID === "opencode-go" && input.modelID.toLowerCase().includes("qwen")) {
+  const id = input.modelID.toLowerCase()
+
+  // Go Qwen → Anthropic /messages (models.dev npm @ai-sdk/anthropic)
+  if (input.providerID === "opencode-go" && id.includes("qwen")) {
     const high = { thinking: { type: "enabled" as const, budgetTokens: 16_000 } }
     return {
       options: high,
@@ -110,30 +116,47 @@ export function thinkingOptionsForModel(input: { providerID: string; modelID: st
     }
   }
 
-  // openai-compatible path (Go kimi/mimo, all Ollama Cloud models, etc.)
-  const high = { enable_thinking: true, reasoningEffort: "high" as const }
+  // Go openai-compatible (kimi / mimo / …): only reasoningEffort — never also enable_thinking
+  if (input.providerID === "opencode-go") {
+    const high = { reasoningEffort: "high" as const }
+    return {
+      options: high,
+      variants: {
+        high,
+        medium: { reasoningEffort: "medium" as const },
+        none: { reasoningEffort: "none" as const },
+      },
+    }
+  }
+
+  // Ollama Cloud: enable_thinking alone (do not mix with Anthropic thinking / dual effort)
+  const high = { enable_thinking: true }
   return {
     options: high,
     variants: {
       high,
-      medium: { enable_thinking: true, reasoningEffort: "medium" as const },
-      none: { enable_thinking: false, reasoningEffort: "none" as const },
+      none: { enable_thinking: false },
     },
   }
 }
 
 /**
- * Workspace OpenCode provider block: thinking enabled for every curated model.
- * Agent variant defaults to "high".
+ * Thinking config for workspace opencode.json.
+ * Only emits the active provider — writing both Go and Ollama into every workspace
+ * made OpenCode treat missing credentials as “API broken” for Go models.
  */
-export function applicationAgentThinkingConfig(_selected?: { providerID: string; modelID: string }) {
-  const provider: Record<string, { models: Record<string, ReturnType<typeof thinkingOptionsForModel>> }> = {}
+export function applicationAgentThinkingConfig(selected: { providerID: string; modelID: string }) {
+  const models: Record<string, ReturnType<typeof thinkingOptionsForModel>> = {}
   for (const option of APPLICATION_AGENT_MODELS) {
-    const bucket = provider[option.providerID] || (provider[option.providerID] = { models: {} })
-    bucket.models[option.modelID] = thinkingOptionsForModel(option)
+    if (option.providerID !== selected.providerID) continue
+    models[option.modelID] = thinkingOptionsForModel(option)
   }
+  // Ensure the exact selected model is present even if catalog filter missed it.
+  if (!models[selected.modelID]) models[selected.modelID] = thinkingOptionsForModel(selected)
   return {
     variant: "high",
-    provider,
+    provider: {
+      [selected.providerID]: { models },
+    },
   }
 }

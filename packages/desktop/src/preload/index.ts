@@ -74,6 +74,7 @@ const api: ElectronAPI = {
   downloadApplicationSelectionListTemplate: () =>
     ipcRenderer.invoke("application-agent:download-selection-list-template"),
   startApplicationAgentSession: (task, modelId) => ipcRenderer.invoke("application-agent:start-session", task, modelId),
+  openApplicationAgentSession: (task, modelId) => ipcRenderer.invoke("application-agent:open-session", task, modelId),
   getApplicationAgentModels: () => ipcRenderer.invoke("application-agent:list-models"),
   startApplicationAgentRefillSession: (input) =>
     ipcRenderer.invoke("application-agent:start-refill-session", input),
@@ -83,7 +84,8 @@ const api: ElectronAPI = {
   getApplicationAgentMessages: (session) => ipcRenderer.invoke("application-agent:get-messages", session),
   getApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:get-task", workspacePath),
   listApplicationTasks: (limit) => ipcRenderer.invoke("application-agent:list-tasks", limit),
-  findApplicationAgentSession: (workspacePath) => ipcRenderer.invoke("application-agent:find-session", workspacePath),
+  findApplicationAgentSession: (workspacePath, preferredModelId) =>
+    ipcRenderer.invoke("application-agent:find-session", workspacePath, preferredModelId),
   continueApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:continue-task", workspacePath),
   pauseApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:pause-task", workspacePath),
   resumeApplicationTask: (workspacePath) => ipcRenderer.invoke("application-agent:resume-task", workspacePath),

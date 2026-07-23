@@ -626,16 +626,38 @@ prepare_ego_first_run() {
   /bin/rm -f "$EGO_CONFIG_STAGED"
 }
 
+# Stale Terra-managed Ego leftovers (previous fill / crashed smoke) look like
+# "another Ego" when RUNTIME_APP is not yet running. Kill only processes under
+# Terra's managed runtime roots; never touch a separately installed Ego Lite.
+kill_terra_managed_ego_residuals() {
+  for root in "$RUNTIME_ROOT" "$HOME/Library/Application Support/edu.terra.application-agent/ego-lite-runtime"; do
+    [ -n "$root" ] || continue
+    /usr/bin/pgrep -f "$root/ego lite.app/Contents/" 2>/dev/null | while read -r pid; do
+      [ -n "$pid" ] || continue
+      /bin/kill -KILL "$pid" 2>/dev/null || true
+    done
+  done
+  # Drop a stale launchd registration only when no non-Terra Ego app remains.
+  if ! /usr/bin/pgrep -f 'ego lite.app/Contents/' >/dev/null 2>&1; then
+    USER_ID=$(/usr/bin/id -u)
+    /bin/launchctl bootout "gui/$USER_ID/com.citrolabs.ego.lite.ego-browser" >/dev/null 2>&1 || true
+    /bin/launchctl kill SIGKILL "gui/$USER_ID/com.citrolabs.ego.lite.ego-browser" >/dev/null 2>&1 || true
+  fi
+  sleep 1
+}
+
 # Do not ever launch the immutable source app inside Terra. Its updater payload
 # is disabled, and any legacy vendor updater can only alter the managed runtime
 # copy — never the signed Terra application itself.
 if ! /usr/bin/pgrep -f "$RUNTIME_APP/Contents/MacOS/" >/dev/null 2>&1; then
+  kill_terra_managed_ego_residuals
   USER_ID=$(/usr/bin/id -u)
   if /usr/bin/pgrep -f 'ego lite.app/Contents/' >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_ID" 2>/dev/null | /usr/bin/grep -Fq 'com.citrolabs.ego.lite.ego-browser'; then
     printf '%s\\n' 'TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE: 检测到另一 Ego Lite 浏览器服务正在运行。为保护其登录态和页面，Terra-Edu 未使用、关闭或启动竞争浏览器；请关闭另一 Ego Lite 后点击“继续任务”。' >&2
     exit 76
   fi
   prepare_runtime
+  kill_terra_managed_ego_residuals
   if /usr/bin/pgrep -f 'ego lite.app/Contents/' >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_ID" 2>/dev/null | /usr/bin/grep -Fq 'com.citrolabs.ego.lite.ego-browser'; then
     printf '%s\\n' 'TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE: Ego Lite 在准备运行副本期间被另一进程启动。为保护其登录态和页面，Terra-Edu 未修改首次运行配置或启动竞争浏览器；请关闭另一 Ego Lite 后点击“继续任务”。' >&2
     exit 76

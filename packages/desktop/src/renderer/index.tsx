@@ -1237,8 +1237,7 @@ function ApplicationAgentShell(props: {
     setRestoreNotice(null)
     try {
       const latestTask = await window.api.getApplicationTask(next.workspacePath)
-      const session = await window.api.findApplicationAgentSession(latestTask.workspacePath)
-        ?? await window.api.startApplicationAgentSession(latestTask, selectedModelId())
+      const session = await window.api.openApplicationAgentSession(latestTask, selectedModelId())
       setTask(latestTask)
       setInput(latestTask.input)
       setSupplementalFolder("")
@@ -1571,10 +1570,39 @@ function ApplicationAgentShell(props: {
                   <header>
                     <div>
                       <h2>读取已有申请</h2>
-                      <p>选择一个历史申请后，会回到对应工作台和 OpenCode 会话，继续使用已有工作区与进度文件。</p>
+                      <p>选择模型后打开历史申请；会回到对应工作台和 OpenCode 会话，继续使用已有工作区与进度文件。</p>
                     </div>
                     <button type="button" disabled={busy()} onClick={loadApplicationTasks}>刷新</button>
                   </header>
+                  <label class="history-model-picker">
+                    Agent 模型
+                    <select
+                      class="composer-model-select"
+                      value={selectedModelId()}
+                      disabled={busy()}
+                      title="打开已有申请前选择 API / 模型；打开后按所选模型接入会话"
+                      onChange={(event) => setSelectedModelId(event.currentTarget.value)}
+                    >
+                      <Show
+                        when={agentModels().length > 0}
+                        fallback={<option value={selectedModelId()}>{selectedModelId()}</option>}
+                      >
+                        <For each={modelSubscriptionGroups()}>
+                          {(group) => (
+                            <optgroup label={group.subscription}>
+                              <For each={group.models}>
+                                {(option) => (
+                                  <option value={option.id} title={option.description}>
+                                    {option.label}
+                                  </option>
+                                )}
+                              </For>
+                            </optgroup>
+                          )}
+                        </For>
+                      </Show>
+                    </select>
+                  </label>
                   {renderTaskList()}
                   <Show when={error()}>{(message) => <p class="application-agent-error">{message()}</p>}</Show>
                 </section>

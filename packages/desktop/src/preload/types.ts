@@ -321,6 +321,7 @@ export type ElectronAPI = {
   createApplicationTasksFromSelectionList: (input: ApplicationSelectionListInput) => Promise<ApplicationSelectionListBatch>
   downloadApplicationSelectionListTemplate: () => Promise<string | null>
   startApplicationAgentSession: (task: ApplicationTask, modelId?: string) => Promise<ApplicationAgentSession>
+  openApplicationAgentSession: (task: ApplicationTask, modelId?: string) => Promise<ApplicationAgentSession>
   getApplicationAgentModels: () => Promise<
     readonly { id: string; modelID?: string; providerID?: string; subscription?: string; label: string; description: string }[]
   >
@@ -332,7 +333,7 @@ export type ElectronAPI = {
   getApplicationAgentMessages: (session: ApplicationAgentSession) => Promise<ApplicationAgentChatItem[]>
   getApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   listApplicationTasks: (limit?: number) => Promise<ApplicationTask[]>
-  findApplicationAgentSession: (workspacePath: string) => Promise<ApplicationAgentSession | null>
+  findApplicationAgentSession: (workspacePath: string, preferredModelId?: string) => Promise<ApplicationAgentSession | null>
   continueApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   pauseApplicationTask: (workspacePath: string) => Promise<ApplicationTask>
   resumeApplicationTask: (workspacePath: string) => Promise<ApplicationTask>

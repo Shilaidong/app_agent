@@ -546,7 +546,10 @@ const main = Effect.gen(function* () {
     return sessions.find((item) => item.id === session.sessionID) ?? null
   }
 
-  const findApplicationAgentSession = async (workspacePath: string): Promise<ApplicationAgentSession | null> => {
+  const findApplicationAgentSession = async (
+    workspacePath: string,
+    preferredModelId?: string,
+  ): Promise<ApplicationAgentSession | null> => {
     type SidecarSession = {
       id: string
       directory?: string
@@ -555,28 +558,34 @@ const main = Effect.gen(function* () {
       title?: string
       model?: { id?: string; providerID?: string }
     }
+    const preferred = preferredModelId?.trim() ? resolveApplicationAgentModel(preferredModelId) : null
     // Prefer the session's own model when rewriting workspace config. Preparing
     // with the product default first would clobber a mimo session's opencode.json.
     let sessions = await getSidecarJson<SidecarSession[]>("/session?limit=80", workspacePath).catch(() => [] as SidecarSession[])
     if (sessions.length === 0) {
-      await prepareApplicationAgentConfig(workspacePath)
+      await prepareApplicationAgentConfig(workspacePath, preferred ? { modelId: preferred.optionID } : undefined)
       sessions = await getSidecarJson<SidecarSession[]>("/session?limit=80", workspacePath).catch(() => [] as SidecarSession[])
     }
-    const found = sessions
+    const candidates = sessions
       .filter((item) => item.directory === workspacePath)
-      .sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
-      .find(
+      .filter(
         (item) =>
           item.agent === "application-agent" ||
           item.agent === "application-refill-agent" ||
           item.title?.includes("申请任务") ||
           item.title?.includes("重新填写"),
       )
+      .sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
+    const found =
+      (preferred
+        ? candidates.find((item) => {
+            const resolved = resolveApplicationAgentModel(item.model?.id, item.model?.providerID)
+            return resolved.providerID === preferred.providerID && resolved.modelID === preferred.modelID
+          })
+        : undefined) || (preferred ? undefined : candidates[0])
     if (!found) return null
-    // Reuse the session's original model so restarted prompts keep using it
-    // instead of silently falling back to the default. Fall back to the
-    // default only if the sidecar entry is old enough to lack a model field.
-    const resolved = resolveApplicationAgentModel(found.model?.id, found.model?.providerID)
+    // Reuse this session's model. When a preferred model was requested, found already matches it.
+    const resolved = preferred || resolveApplicationAgentModel(found.model?.id, found.model?.providerID)
     await prepareApplicationAgentConfig(workspacePath, { modelId: resolved.optionID })
     return {
       sessionID: found.id,
@@ -625,6 +634,38 @@ const main = Effect.gen(function* () {
       false,
     )
     return session
+  }
+
+  /** Open or attach a workspace session with the consultant-selected model.
+   * Reuses a matching session; attaches a new model session without re-prompting when
+   * another session already exists; first-ever entry still sends the startup prompt. */
+  const openApplicationAgentSession = async (task: ApplicationTask, modelId?: string): Promise<ApplicationAgentSession> => {
+    const resolved = resolveApplicationAgentModel(modelId)
+    const matching = await findApplicationAgentSession(task.sessionDirectory, resolved.optionID)
+    if (matching) return matching
+    const anyExisting = await findApplicationAgentSession(task.sessionDirectory)
+    if (!anyExisting) return startApplicationAgentSession(task, resolved.optionID)
+    await prepareApplicationAgentConfig(task.sessionDirectory, { modelId: resolved.optionID })
+    await ensureApplicationAgentQuota("open_application_task", task.workspacePath)
+    const created = await postSidecarJson<{ id: string }>(
+      "/session",
+      task.sessionDirectory,
+      {
+        title: `申请任务：${task.input.studentName} / ${task.input.school} / ${task.input.program}`,
+        agent: "application-agent",
+        model: {
+          providerID: resolved.providerID,
+          id: resolved.modelID,
+        },
+      },
+    )
+    return {
+      sessionID: created.id,
+      directory: task.sessionDirectory,
+      workspacePath: task.workspacePath,
+      modelID: resolved.modelID,
+      providerID: resolved.providerID,
+    }
   }
 
   const applicationAgentRefillSessions = new Map<
@@ -911,6 +952,7 @@ const main = Effect.gen(function* () {
     installUpdate: async () => installUpdate(killSidecar),
     setBackgroundColor: (color) => setBackgroundColor(color),
     startApplicationAgentSession,
+    openApplicationAgentSession,
     startApplicationAgentRefillSession,
     resendApplicationAgentStartPrompt,
     sendApplicationAgentPrompt,
