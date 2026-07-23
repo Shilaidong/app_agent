@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, realpathSync, statSync } from "node:fs"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { spawnSync } from "node:child_process"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import egoRuntimeLock from "../resources/ego-runtime.lock.json"
 
@@ -119,6 +119,30 @@ function egoHelperPids() {
   return pids("/Helpers/ego-browser")
 }
 
+const terraManagedEgoRuntime = join(homedir(), "Library/Application Support/edu.terra.application-agent/ego-lite-runtime")
+
+function processCommand(pid: number) {
+  const ps = spawnSync("/bin/ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 2_000 })
+  return (ps.stdout || "").trim()
+}
+
+function isTerraManagedCommand(command: string) {
+  if (!command) return false
+  if (command.includes(`${terraManagedEgoRuntime}/ego lite.app/Contents/`)) return true
+  if (command.includes(`${runtimeRoot}/ego lite.app/Contents/`)) return true
+  return false
+}
+
+function terraManagedResidualPids() {
+  return new Set(
+    [...egoAppPids(), ...egoHelperPids(), ...bundledRuntimePids()].filter((pid) => isTerraManagedCommand(processCommand(pid))),
+  )
+}
+
+function externalEgoResidualPids() {
+  return new Set([...egoAppPids(), ...egoHelperPids()].filter((pid) => !isTerraManagedCommand(processCommand(pid))))
+}
+
 function macUid() {
   const user = spawnSync("/usr/bin/id", ["-u"], { encoding: "utf8" })
   if (user.status !== 0) fail(`could not read the macOS user ID: ${user.stderr || user.error?.message || "unknown error"}`)
@@ -170,10 +194,35 @@ async function purgeDialogSmokeResiduals() {
   return egoAppPids().size === 0 && egoHelperPids().size === 0 && bundledRuntimePids().size === 0 && !hasEgoBrowserService()
 }
 
+// Terra Application Support leftovers and this smoke's own runtime are owned by
+// Terra — always clear them. Never kill a separately installed Ego Lite.
+async function purgeTerraManagedResiduals() {
+  for (let attempt = 1; attempt <= 24; attempt += 1) {
+    const victims = [...terraManagedResidualPids()]
+    for (const pid of victims) spawnSync("/bin/kill", ["-KILL", String(pid)], { encoding: "utf8" })
+    if (externalEgoResidualPids().size === 0) bootoutEgoBrowserService()
+    await Bun.sleep(250)
+    if (terraManagedResidualPids().size === 0 && (externalEgoResidualPids().size > 0 || !hasEgoBrowserService())) return true
+  }
+  return terraManagedResidualPids().size === 0
+}
+
 let existingBundledAppPids = bundledAppPids()
 let existingBundledRuntimePids = bundledRuntimePids()
 let residualActive =
   existingBundledAppPids.size > 0 || existingBundledRuntimePids.size > 0 || egoAppPids().size > 0 || egoHelperPids().size > 0 || hasEgoBrowserService()
+if (residualActive && terraManagedResidualPids().size > 0) {
+  console.log(`GUI dialog smoke: purging Terra-managed Ego leftovers (${describeEgoResiduals()})`)
+  await purgeTerraManagedResiduals()
+  existingBundledAppPids = bundledAppPids()
+  existingBundledRuntimePids = bundledRuntimePids()
+  residualActive =
+    existingBundledAppPids.size > 0 ||
+    existingBundledRuntimePids.size > 0 ||
+    egoAppPids().size > 0 ||
+    egoHelperPids().size > 0 ||
+    hasEgoBrowserService()
+}
 if (residualActive && mayPurgeResiduals) {
   console.log(`GUI dialog smoke: purging pre-existing Ego residuals once (${describeEgoResiduals()})`)
   const cleaned = await purgeDialogSmokeResiduals()

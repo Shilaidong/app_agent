@@ -629,21 +629,69 @@ prepare_ego_first_run() {
 # Stale Terra-managed Ego leftovers (previous fill / crashed smoke) look like
 # "another Ego" when RUNTIME_APP is not yet running. Kill only processes under
 # Terra's managed runtime roots; never touch a separately installed Ego Lite.
-kill_terra_managed_ego_residuals() {
+has_terra_managed_ego_process() {
   for root in "$RUNTIME_ROOT" "$HOME/Library/Application Support/edu.terra.application-agent/ego-lite-runtime"; do
     [ -n "$root" ] || continue
-    /usr/bin/pgrep -f "$root/ego lite.app/Contents/" 2>/dev/null | while read -r pid; do
-      [ -n "$pid" ] || continue
-      /bin/kill -KILL "$pid" 2>/dev/null || true
+    if /usr/bin/pgrep -f "$root/ego lite.app/Contents/" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Exact launchd target only — never grep the whole gui domain (missing-service
+# error text also contains the label and caused false EXTERNAL_SERVICE hits).
+has_ego_browser_launchd_service() {
+  USER_ID=$(/usr/bin/id -u)
+  PRINTED=$(/bin/launchctl print "gui/$USER_ID/com.citrolabs.ego.lite.ego-browser" 2>&1 || true)
+  case "$PRINTED" in
+    *"Could not find service"*|*"no such process"*) return 1 ;;
+  esac
+  case "$PRINTED" in
+    *"= {"*|*"state ="*|*"state="*) return 0 ;;
+  esac
+  return 1
+}
+
+# True external Ego = any ego lite.app not under Terra managed roots.
+has_external_ego_lite_process() {
+  for pid in $(/usr/bin/pgrep -f 'ego lite.app/Contents/' 2>/dev/null || true); do
+    [ -n "$pid" ] || continue
+    CMD=$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)
+    [ -n "$CMD" ] || continue
+    managed=0
+    case "$CMD" in
+      *"$RUNTIME_ROOT/ego lite.app/Contents/"*) managed=1 ;;
+      *"$HOME/Library/Application Support/edu.terra.application-agent/ego-lite-runtime/ego lite.app/Contents/"*) managed=1 ;;
+    esac
+    [ "$managed" -eq 0 ] && return 0
+  done
+  return 1
+}
+
+kill_terra_managed_ego_residuals() {
+  attempt=1
+  while [ "$attempt" -le 8 ]; do
+    for root in "$RUNTIME_ROOT" "$HOME/Library/Application Support/edu.terra.application-agent/ego-lite-runtime"; do
+      [ -n "$root" ] || continue
+      for pid in $(/usr/bin/pgrep -f "$root/ego lite.app/Contents/" 2>/dev/null || true); do
+        [ -n "$pid" ] || continue
+        /bin/kill -KILL "$pid" 2>/dev/null || true
+      done
     done
+    if ! has_terra_managed_ego_process; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.25
   done
   # Drop a stale launchd registration only when no non-Terra Ego app remains.
-  if ! /usr/bin/pgrep -f 'ego lite.app/Contents/' >/dev/null 2>&1; then
+  if ! has_external_ego_lite_process; then
     USER_ID=$(/usr/bin/id -u)
     /bin/launchctl bootout "gui/$USER_ID/com.citrolabs.ego.lite.ego-browser" >/dev/null 2>&1 || true
     /bin/launchctl kill SIGKILL "gui/$USER_ID/com.citrolabs.ego.lite.ego-browser" >/dev/null 2>&1 || true
   fi
-  sleep 1
+  sleep 0.5
 }
 
 # Do not ever launch the immutable source app inside Terra. Its updater payload
@@ -651,15 +699,22 @@ kill_terra_managed_ego_residuals() {
 # copy — never the signed Terra application itself.
 if ! /usr/bin/pgrep -f "$RUNTIME_APP/Contents/MacOS/" >/dev/null 2>&1; then
   kill_terra_managed_ego_residuals
-  USER_ID=$(/usr/bin/id -u)
-  if /usr/bin/pgrep -f 'ego lite.app/Contents/' >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_ID" 2>/dev/null | /usr/bin/grep -Fq 'com.citrolabs.ego.lite.ego-browser'; then
+  if has_external_ego_lite_process; then
     printf '%s\\n' 'TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE: 检测到另一 Ego Lite 浏览器服务正在运行。为保护其登录态和页面，Terra-Edu 未使用、关闭或启动竞争浏览器；请关闭另一 Ego Lite 后点击“继续任务”。' >&2
+    exit 76
+  fi
+  if has_ego_browser_launchd_service || has_terra_managed_ego_process; then
+    printf '%s\\n' 'TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: Terra 管理的 Ego Lite 残留无法清理；没有启动竞争浏览器。请稍后重试或在活动监视器中结束 ego lite 后点击“继续任务”。' >&2
     exit 76
   fi
   prepare_runtime
   kill_terra_managed_ego_residuals
-  if /usr/bin/pgrep -f 'ego lite.app/Contents/' >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_ID" 2>/dev/null | /usr/bin/grep -Fq 'com.citrolabs.ego.lite.ego-browser'; then
+  if has_external_ego_lite_process; then
     printf '%s\\n' 'TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE: Ego Lite 在准备运行副本期间被另一进程启动。为保护其登录态和页面，Terra-Edu 未修改首次运行配置或启动竞争浏览器；请关闭另一 Ego Lite 后点击“继续任务”。' >&2
+    exit 76
+  fi
+  if has_ego_browser_launchd_service || has_terra_managed_ego_process; then
+    printf '%s\\n' 'TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE: Terra 管理的 Ego Lite 残留在准备运行副本后仍无法清理；没有启动竞争浏览器。请稍后重试。' >&2
     exit 76
   fi
   prepare_ego_first_run
