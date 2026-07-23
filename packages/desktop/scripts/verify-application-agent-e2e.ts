@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -291,7 +291,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_TASKSPACE_CLOSE") && wrapperSource.includes("EGO_NODE_STDIN_COMPACT"), "Workspace wrapper must inspect nodejs stdin before launching Ego.")
   assert(wrapperSource.includes("completeTaskSpace 只能使用可验证的字面量") && wrapperSource.includes("keep[[:space:]]*:[[:space:]]*true"), "Workspace wrapper must allow only a mechanically verified literal keep:true completion call.")
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_PAGE_RELOAD") && wrapperSource.includes("grep -Eiq 'closeTab'") && wrapperSource.includes("grep -Eiq 'reload'"), "Workspace wrapper must reject automatic reloads and every direct or aliased programmatic tab close before Ego starts.")
-  assert(wrapperSource.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") && wrapperSource.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") && wrapperSource.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") && wrapperSource.includes("TERRA_EGO_ALERT_MUST_END_ROUND"), "Workspace wrapper must reject scripted submit, bare Save/Continue clicks, native-alert OK clicks, and same-round fill-after-dialog.")
+  assert(wrapperSource.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") && wrapperSource.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") && wrapperSource.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") && wrapperSource.includes("TERRA_EGO_ALERT_MUST_END_ROUND") && wrapperSource.includes("TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED") && wrapperSource.includes("TERRA_EGO_UNAUTHORIZED_TAKEOVER"), "Workspace wrapper must reject scripted submit, bare Save/Continue clicks, native-alert OK clicks, same-round fill-after-dialog, synthetic DOM events, and unauthorized takeOver.")
   assert(wrapperSource.includes('"$HELPER" "$@" <"$EGO_NODE_STDIN"'), "Workspace wrapper must forward the model-authored nodejs source directly to the pinned Ego helper.")
   assert(!wrapperSource.includes("/usr/bin/sandbox-exec") && !wrapperSource.includes("TERRA_EGO_NODE_PERMISSION_"), "Workspace wrapper must not add a sandbox or permission broker around Ego's independent browser service.")
 
@@ -336,17 +336,17 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(terraPolicy.includes("所有 confirm 或 prompt") && terraPolicy.includes("不得由 Agent 猜测"), "Terra policy must hand off every confirm and prompt without guessing.")
   assert(terraPolicy.includes("dialogUrl") && terraPolicy.includes("dialogFrameId"), "Terra policy must keep iframe dialog identity separate from the top-level current URL.")
   assert(terraPolicy.includes("pageInfo() 返回 dialog") && terraPolicy.includes("Page.handleJavaScriptDialog") && terraPolicy.includes("iframe 原生 alert 会阻塞触发它的 click/save Promise") && terraPolicy.includes("pendingJsAlert") && terraPolicy.includes("确认 URL 未变"), "Terra policy must observe dialogs, forbid in-round CDP accept, require pendingJsAlert for AX dismiss, and document beforeunload URL confirmation.")
-  assert(terraPolicy.includes("结果只是“未决”，不是已经失败") && terraPolicy.includes("此时不得调用 application-agent_cua record_failure、不得交接顾问") && terraPolicy.includes("若属于 observePageAction unknown，必须严格按上一条立即结束") && terraPolicy.includes("只有该新观察明确证明动作失败或需要人工处理后，才可记录失败或交接"), "Terra policy must treat unknown actions as pending until a separate pageInfo-only observation proves failure or handoff is necessary.")
-  assert(terraPolicy.includes("helper 回合退出时自动消掉仍未处理的弹窗") && terraPolicy.includes("只在初次导航期间临时替换无选择分支的 window.alert") && terraPolicy.includes("它绝不替换 confirm、prompt 或 beforeunload"), "Terra policy must reflect the observed load-alert detach behavior and limit interception to information-only initial alerts.")
+  assert(terraPolicy.includes("结果只是“未决”") && terraPolicy.includes("疑似原生校验弹窗") && terraPolicy.includes("达重试上限仍未点掉时（且仅此时）才允许 handoff_to_consultant") && terraPolicy.includes("未走完疑似弹窗流程前 handoff"), "Terra policy must treat unknown/timeout as pending, require the suspected-alert path, and allow handoff only after that flow hits its limit.")
+  assert(terraPolicy.includes("helper 回合退出时自动消掉仍未处理的弹窗") && terraPolicy.includes("只在初次导航期间临时替换无选择分支的 window.alert") && terraPolicy.includes("它绝不替换 confirm、prompt 或 beforeunload") && terraPolicy.includes("Runtime alerts are not auto-cleared by helper exit"), "Terra policy must keep load-time navigateInitialPageCapturingAlerts distinct from runtime alerts that are not auto-cleared.")
   assert(terraPolicy.includes("captureScreenshot('05_screenshots/<unique-name>.png')") && terraPolicy.includes("OpenCode `read` on that exact") && terraPolicy.includes("image/png"), "Terra policy must require explicit workspace screenshots followed by exact OpenCode image reads.")
   assert(terraPolicy.includes("fillInput+Tab+readback") && terraPolicy.includes("click+snapshot+click-option+reobserve") && terraPolicy.includes("Vue internals"), "Terra policy must require real generic interactions and ban framework-internal writes.")
-  assert(terraPolicy.includes("必须点击页面上真实可见的 Save / Continue") && terraPolicy.includes("Major is required.") && terraPolicy.includes("dismiss_js_alert") && terraPolicy.includes("先填完再查") && terraPolicy.includes("未填完禁止 Save"), "Terra policy must require real Save/Continue clicks, fill-then-verify, Academic hard-block, and dismiss_js_alert for native alerts.")
+  assert(terraPolicy.includes("本页落盘/前进控件") && terraPolicy.includes("不以按钮字面量做硬规则") && terraPolicy.includes("Major is required.") && terraPolicy.includes("dismiss_js_alert") && terraPolicy.includes("先填完再查") && terraPolicy.includes("未填完禁止 Save") && terraPolicy.includes("clickByCoordinates") && terraPolicy.includes("PAGE_LEFT_WITHOUT_SAVE_EVIDENCE"), "Terra policy must require real page-commit clicks by behavior, coordinate CDP fallback, URL leave warning, fill-then-verify, Academic hard-block, and dismiss_js_alert.")
   assert(terraPolicy.includes("completeTaskSpace(taskSpaceId, { keep: true })") && terraPolicy.includes("一律不得使用 keep:false"), "Terra policy must preserve completed Ego windows instead of exercising the crashing native close path.")
   const cuaSkill = readText(join(workspace, ".opencode/skills/cua-application-filling/SKILL.md"))
   assert(cuaSkill.includes("绝不自动抢回控制"), "CUA skill must forbid automatic task-space takeover.")
   assert(cuaSkill.includes("dismiss_js_alert") && (cuaSkill.includes("Accessibility") || cuaSkill.includes("辅助功能") || cuaSkill.includes("结束回合")), "CUA skill must guide dismiss_js_alert via Accessibility outside Ego CDP.")
-  assert(cuaSkill.includes("必须点击真实可见的 Save / Continue") && cuaSkill.includes("Major is required.") && cuaSkill.includes("Academic/Add Institution") && cuaSkill.includes("先填完再查") && cuaSkill.includes("dismiss_js_alert"), "CUA skill must require Save/Continue, fill-then-verify, Academic hotspots, and dismiss_js_alert.")
-  assert(terraPolicy.includes("不要 handoff、不要 takeOver") || cuaSkill.includes("不要 handoff/takeOver") || cuaSkill.includes("不要为校验 alert 交接顾问"), "Validation alerts must not hand off to the consultant.")
+  assert(cuaSkill.includes("Major is required.") && cuaSkill.includes("Academic/Add Institution") && cuaSkill.includes("先填完再查") && cuaSkill.includes("dismiss_js_alert") && (cuaSkill.includes("本页落盘") || cuaSkill.includes("Save/Continue")), "CUA skill must require page commit, fill-then-verify, Academic hotspots, and dismiss_js_alert.")
+  assert(terraPolicy.includes("未走完疑似弹窗流程并达限前禁止 handoff/takeOver") || cuaSkill.includes("未达疑似重试上限前禁止 handoff/takeOver") || cuaSkill.includes("达限后才可交接") || terraPolicy.includes("达重试上限仍未点掉时（且仅此时）才允许 handoff_to_consultant"), "Validation/suspected alerts must forbid early handoff until dismiss limit.")
   assert(cuaSkill.includes("observePageAction") && cuaSkill.includes("先启动动作但不 await"), "CUA skill must observe iframe dialogs while the triggering action is still pending.")
 
   const prompt = readText(join(workspace, ".opencode/prompts/application-agent.md"))
@@ -358,6 +358,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   for (const action of ["prepare_ego_task", "retire_and_rebind_ego_task", "record_observation", "record_field_verified", "record_select_verified", "record_dynamic_form_verified", "begin_save_attempt", "record_save_verified", "record_blocker", "dismiss_js_alert", "handoff_to_consultant", "complete_ego_task"]) {
     assert(tools.includes(action), `Workspace CUA coordination tool missing action: ${action}`)
   }
+  assert(tools.includes("PENDING_ALERT_DISMISS_REQUIRED") && tools.includes("alertDismissHandoffAllowed") && tools.includes("known-message and suspected"), "Generated tools must share dismiss-limit handoff exit for known and suspected alerts.")
   assert(tools.includes("PENDING_JS_ALERT_REQUIRED") && tools.includes("pendingJsAlert") && tools.includes("Only Terra-managed Ego Lite") && !tools.includes("Fallback: any process"), "Generated tools must require pendingJsAlert and embed Ego-only AX dismiss without all-process fallback.")
   assert(!tools.includes("accept: true") && !tools.includes("accept:true"), "Generated tools must not CDP-accept dialogs.")
   assert(tools.includes("UNVERIFIED_SAVE_RECORDED"), "record_saved must not be treated as a verified save.")
@@ -565,10 +566,51 @@ async function verifyCuaStateTransitions(workspace: string) {
     { input: "cliLog(info.dialog.message)\nawait fillInput('@major', 'Accounting')\n", marker: "TERRA_EGO_ALERT_MUST_END_ROUND" },
     { input: "cliLog(info.dialog.message)\nawait uploadFile('@resume', '/tmp/resume.pdf')\n", marker: "TERRA_EGO_ALERT_MUST_END_ROUND" },
     { input: "const result = await observePageAction(() => click('@save'))\nif (result.kind === 'dialog') cliLog(result.info.dialog.message)\nawait uploadFile('@resume', '/tmp/resume.pdf')\n", marker: "TERRA_EGO_ALERT_MUST_END_ROUND" },
+    { input: "el.dispatchEvent(new MouseEvent('click'))\n", marker: "TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED" },
+    { input: "await takeOverTaskSpace(101)\n", marker: "TERRA_EGO_UNAUTHORIZED_TAKEOVER" },
   ].forEach(({ input, marker }) => {
     const result = spawnSync(wrapper, ["nodejs"], { cwd: workspace, encoding: "utf8", input })
-    assert(result.status === 81 && result.stderr.includes(marker), `Wrapper must reject unsafe save/dialog shortcuts before launching Ego: ${input}`)
+    assert(result.status === 81 || result.status === 84, `Wrapper must reject unsafe save/dialog/takeover shortcuts before launching Ego: ${input}`)
+    assert(result.stderr.includes(marker), `Wrapper must reject unsafe save/dialog/takeover shortcuts before launching Ego: ${input}`)
   })
+  // Authorized takeOver positive path: resume_ego phase-2 flags must clear the gate.
+  const progressForTakeover = readRecord(join(workspace, "03_state/application_progress.json"))
+  progressForTakeover.egoBrowser = {
+    ...(isRecord(progressForTakeover.egoBrowser) ? progressForTakeover.egoBrowser : {}),
+    taskSpaceId: "101",
+    handoffPending: true,
+    takeoverPending: true,
+    resumeAuthorizedAt: new Date().toISOString(),
+  }
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressForTakeover, null, 2))
+  const authorizedTakeover = spawnSync(wrapper, ["nodejs"], {
+    cwd: workspace,
+    encoding: "utf8",
+    input: "await takeOverTaskSpace(101)\ncliLog('AUTHORIZED_TAKEOVER_REACHED_HELPER')\n",
+    timeout: 15_000,
+  })
+  assert(
+    !String(authorizedTakeover.stderr || "").includes("TERRA_EGO_UNAUTHORIZED_TAKEOVER"),
+    "Wrapper must allow takeOverTaskSpace when resumeAuthorizedAt and takeoverPending are both set",
+  )
+  // Clear flags so later CUA fixtures are not stuck in takeover-pending.
+  const progressClearTakeover = readRecord(join(workspace, "03_state/application_progress.json"))
+  if (isRecord(progressClearTakeover.egoBrowser)) {
+    progressClearTakeover.egoBrowser.handoffPending = false
+    progressClearTakeover.egoBrowser.takeoverPending = false
+    delete progressClearTakeover.egoBrowser.resumeAuthorizedAt
+  }
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressClearTakeover, null, 2))
+  // CDP Input.dispatchMouseEvent must remain allowed (date picker / coordinate click).
+  const mouseEventAllowed = spawnSync(wrapper, ["nodejs"], {
+    cwd: workspace,
+    encoding: "utf8",
+    input: "await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: 10, y: 10, button: 'left', clickCount: 1 })\n",
+  })
+  assert(
+    mouseEventAllowed.status !== 81 || !mouseEventAllowed.stderr.includes("TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED"),
+    "Wrapper must not treat Input.dispatchMouseEvent as a banned DOM EventTarget.dispatchEvent call",
+  )
   const observedSaveGate = spawnSync(wrapper, ["nodejs"], {
     cwd: workspace,
     encoding: "utf8",
@@ -691,6 +733,198 @@ async function verifyCuaStateTransitions(workspace: string) {
   assert(!dismissWithoutEgoText.includes('"dismissed": true') && !dismissWithoutEgoText.includes('"dismissed":true'), "CI dismiss_js_alert must not report a successful AX click when no Ego alert is present.")
   const afterDismiss = readRecord(join(workspace, "03_state/application_progress.json"))
   assert(Array.isArray(afterDismiss.dismissedJsAlerts) && afterDismiss.dismissedJsAlerts.some((item: unknown) => isRecord(item) && item.dismissed === false), "dismiss_js_alert attempts must be audited even when no alert is found.")
+
+  const earlyHandoffKnownAlert = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "early handoff while known validation alert pending",
+    handoffType: "browser_takeover",
+    detail: "should be rejected",
+  })
+  assert(
+    String(earlyHandoffKnownAlert).includes("PENDING_ALERT_DISMISS_REQUIRED") || String(earlyHandoffKnownAlert).includes("VALIDATION_ALERT_HANDOFF_FORBIDDEN"),
+    "handoff_to_consultant must reject while a known-message validation alert is still pending and dismiss limit is not reached.",
+  )
+
+  // Exhaust dismiss attempts for the known-message alert (1 already used above).
+  let lastKnownDismiss = ""
+  for (let attempt = 0; attempt < 2; attempt++) {
+    lastKnownDismiss = String(await executeCua({
+      action: "dismiss_js_alert",
+      taskSpaceId: "101",
+      currentUrl: url,
+      pageTitle: title,
+      evidence: "CI known-alert dismiss attempt " + (attempt + 2),
+    }))
+  }
+  assert(
+    lastKnownDismiss.includes("alertDismissHandoffAllowed") || lastKnownDismiss.includes("Retry limit reached") || lastKnownDismiss.includes("handoff_to_consultant"),
+    "After dismiss retry limit on a known-message alert, dismiss_js_alert must open the legal handoff exit.",
+  )
+  const afterKnownLimit = readRecord(join(workspace, "03_state/application_progress.json"))
+  assert(
+    afterKnownLimit.egoBrowser?.alertDismissHandoffAllowed === true || afterKnownLimit.egoBrowser?.pendingJsAlert?.retryLimitReached === true,
+    "Known-alert flow at limit must set alertDismissHandoffAllowed or retryLimitReached.",
+  )
+
+  const legalKnownHandoff = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "known-alert retry limit reached; accessibility_permission_required",
+    handoffType: "browser_takeover",
+    detail: "AX permission denied after reading Major is required.",
+  })
+  assert(
+    String(legalKnownHandoff).includes("已记录顾问接管") && String(legalKnownHandoff).includes("请在 Ego 窗口手动处理") && String(legalKnownHandoff).includes("回桌面点「继续」"),
+    "After known-alert dismiss limit, handoff_to_consultant must succeed with the manual-handle template.",
+  )
+
+  // Reset so later suspected-flow and resume fixtures stay independent.
+  const progressAfterKnownAlert = readRecord(join(workspace, "03_state/application_progress.json"))
+  if (isRecord(progressAfterKnownAlert.egoBrowser)) {
+    progressAfterKnownAlert.egoBrowser.handoffPending = false
+    progressAfterKnownAlert.egoBrowser.takeoverPending = false
+    delete progressAfterKnownAlert.egoBrowser.resumeAuthorizedAt
+    delete progressAfterKnownAlert.egoBrowser.pendingJsAlert
+    delete progressAfterKnownAlert.egoBrowser.alertDismissHandoffAllowed
+  }
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressAfterKnownAlert, null, 2))
+
+  const suspectedBlocker = await executeCua({
+    action: "record_blocker",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    dialogType: "alert",
+    evidence: "observePageAction kind:unknown — CDP request timed out after 8000ms; next pageInfo timed out",
+    detail: "suspected native validation alert after full-channel timeout",
+    blockerDisposition: "resolved",
+  })
+  assert(String(suspectedBlocker).includes("疑似") && String(suspectedBlocker).includes("dismiss_js_alert"), "Timeout evidence with dialogType:alert must open the suspected-alert path.")
+  const suspectedPending = readRecord(join(workspace, "03_state/application_progress.json")).egoBrowser?.pendingJsAlert
+  assert(isRecord(suspectedPending) && suspectedPending.suspected === true && suspectedPending.source === "channel_timeout", "Suspected pendingJsAlert must mark suspected+channel_timeout and keep the exact timeout evidence.")
+  assert(String(suspectedPending.message || "").includes("CDP request timed out"), "Suspected alert evidence must be the timeout text, not an invented dialog message.")
+
+  const earlyHandoffSuspected = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "early handoff before suspected dismiss limit",
+    handoffType: "browser_takeover",
+    detail: "should be rejected until limit",
+  })
+  assert(
+    String(earlyHandoffSuspected).includes("PENDING_ALERT_DISMISS_REQUIRED") || String(earlyHandoffSuspected).includes("SUSPECTED_ALERT_FLOW_REQUIRED"),
+    "handoff_to_consultant must reject until the alert dismiss flow reaches its retry limit.",
+  )
+
+  let lastDismiss = ""
+  for (let attempt = 0; attempt < 3; attempt++) {
+    lastDismiss = String(await executeCua({
+      action: "dismiss_js_alert",
+      taskSpaceId: "101",
+      currentUrl: url,
+      pageTitle: title,
+      evidence: "CI suspected-alert dismiss attempt " + (attempt + 1),
+    }))
+  }
+  assert(lastDismiss.includes("alertDismissHandoffAllowed") || lastDismiss.includes("Retry limit reached") || lastDismiss.includes("handoff_to_consultant"), "After 3 failed suspected dismiss attempts, dismiss_js_alert must open the legal handoff exit.")
+  const afterSuspectedLimit = readRecord(join(workspace, "03_state/application_progress.json"))
+  assert(afterSuspectedLimit.egoBrowser?.alertDismissHandoffAllowed === true || afterSuspectedLimit.egoBrowser?.pendingJsAlert?.retryLimitReached === true, "Suspected flow at limit must set alertDismissHandoffAllowed or retryLimitReached.")
+
+  const legalHandoff = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "suspected-alert retry limit reached; no_alert_found",
+    handoffType: "browser_takeover",
+    detail: "confirm/prompt or unreadable blocker after suspected flow exhausted",
+  })
+  assert(String(legalHandoff).includes("已记录顾问接管") && String(legalHandoff).includes("请在 Ego 窗口手动处理") && String(legalHandoff).includes("回桌面点「继续」"), "After suspected-alert limit, handoff_to_consultant must succeed with the manual-handle → page-commit → desktop Continue template.")
+  assert(!String(legalHandoff).includes("关闭窗口") || String(legalHandoff).includes("禁止关闭窗口"), "Legal handoff copy must forbid closing the window except for contaminated spaces.")
+
+  // Reset handoff so the existing resume-without-handoff assertion stays valid.
+  const progressAfterSuspected = readRecord(join(workspace, "03_state/application_progress.json"))
+  if (isRecord(progressAfterSuspected.egoBrowser)) {
+    progressAfterSuspected.egoBrowser.handoffPending = false
+    progressAfterSuspected.egoBrowser.takeoverPending = false
+    delete progressAfterSuspected.egoBrowser.resumeAuthorizedAt
+    delete progressAfterSuspected.egoBrowser.pendingJsAlert
+    delete progressAfterSuspected.egoBrowser.alertDismissHandoffAllowed
+  }
+  progressAfterSuspected.currentUrl = url
+  progressAfterSuspected.currentPage = title
+  progressAfterSuspected.filledFields = [
+    { at: new Date().toISOString(), kind: "field", label: "Major", value: "Accounting", currentUrl: url, pageTitle: title },
+  ]
+  progressAfterSuspected.lastBrowserObservation = {
+    at: new Date().toISOString(),
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    ...mainFrameContext,
+    evidence: "Seed prior page with form activity before leave-without-save coverage.",
+  }
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressAfterSuspected, null, 2))
+
+  const leftWithoutSave = await executeCua({
+    action: "record_observation",
+    taskSpaceId: "101",
+    currentUrl: "https://fixture.example/application/next",
+    pageTitle: "Next page without save",
+    frameId: "fixture-main-frame",
+    loaderId: "fixture-next-loader",
+    frameUrl: "https://fixture.example/application/next",
+    evidence: "Navigated without server-confirmed save on the prior page.",
+  })
+  assert(String(leftWithoutSave).includes("PAGE_LEFT_WITHOUT_SAVE_EVIDENCE"), "record_observation must warn when URL origin+pathname changes without a prior record_save_verified and the prior page had form activity.")
+
+  // Non-form hop (no filled/verified activity on prior URL) must not warn.
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify({
+    ...readRecord(join(workspace, "03_state/application_progress.json")),
+    filledFields: [],
+    verifiedFields: [],
+    dynamicFormChecks: [],
+    currentUrl: "https://fixture.example/login",
+    currentPage: "Login",
+    lastBrowserObservation: {
+      at: new Date().toISOString(),
+      taskSpaceId: "101",
+      currentUrl: "https://fixture.example/login",
+      pageTitle: "Login",
+      frameId: "fixture-main-frame",
+      loaderId: "fixture-login-loader",
+      frameUrl: "https://fixture.example/login",
+      evidence: "Login page with no form fills recorded.",
+    },
+  }, null, 2))
+  const loginToHome = await executeCua({
+    action: "record_observation",
+    taskSpaceId: "101",
+    currentUrl: "https://fixture.example/home",
+    pageTitle: "Home",
+    frameId: "fixture-main-frame",
+    loaderId: "fixture-home-loader",
+    frameUrl: "https://fixture.example/home",
+    evidence: "Login to home without form activity on the prior page.",
+  })
+  assert(!String(loginToHome).includes("PAGE_LEFT_WITHOUT_SAVE_EVIDENCE"), "record_observation must not warn on non-form URL hops such as login→home.")
+
+  // Restore current URL context for the remaining fill/save fixtures.
+  await executeCua({
+    action: "record_observation",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    ...mainFrameContext,
+    evidence: "Return to fixture form URL after leave-without-save warning coverage.",
+  })
 
   const resumeWithoutHandoff = await executeCua({ action: "resume_ego", taskSpaceId: "101", consultantConfirmed: true })
   assert(String(resumeWithoutHandoff).includes("BROWSER_HANDOFF_REQUIRED"), "resume_ego must reject a task space that was not handed off to the consultant.")

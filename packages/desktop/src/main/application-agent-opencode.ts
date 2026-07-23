@@ -21,16 +21,16 @@ const EGO_BROWSER_PROTOCOL = `## ego-browser 通用观察协议
 - 每个 heredoc 只完成一个短回合：先观察、执行一个逻辑动作组、再结束本回合。稳定纯文本区采用「先填完再查」：同一可见区块/模态框内，把当前已出现、可确认的普通文本字段尽量一次连续 fillInput+Tab 填完，最后统一 snapshot/读回；中间不要做全页动态复查，也不要一字段一回合。选择、添加/删除、自动完成、日期选择器、上传、保存和导航是分支点，必须各自单独复查，不要与下一项高风险动作串在同一批次。
 - 首次使用 task space 时记录返回的数值 task.id，并把它作为唯一可恢复的 taskSpaceId（调用 application-agent_cua 时传该 ID 的字符串形式）。已有保存 ID 的正常连续回合先用 listTaskSpaces 确认该空间仍为 agent ownership，再以该数值 ID 调用 useOrCreateTaskSpace(taskSpaceId)；不得再按名称匹配。若 listTaskSpaces 中已没有这个数值 ID，立即停止，用 retire_and_rebind_ego_task 记录缺失证据并让顾问明确选择“复用指定现有空间”或“新建替代空间”；确认前不得废弃、替换、新建或按名称猜测。主动调用 handOffTaskSpace 且确认 done:true 后，顾问明确继续时必须先调用 application-agent_cua resume_ego（consultantConfirmed:true）；其第一阶段只允许 listTaskSpaces 探测保存 ID 是否仍在。只有再次调用 resume_ego 并传 taskSpacePresent:true 与完整 list 证据后，才可 \`await takeOverTaskSpace(保存的数值 ID)\`（或意外控制丢失时的 claimTaskSpace）；不要读取返回值，紧接着先 pageInfo()。若探测证明保存 ID 已消失，传 taskSpacePresent:false（或 missingTaskSpaceConfirmed:true）进入 retire-and-rebind，严禁私自 useOrCreateTaskSpace 另开空间后继续填表。若未主动交接却意外出现 user ownership、inactive、not assigned 或 user is controlling，立即停止浏览器命令并记录交接；顾问明确确认继续后同样先走 resume_ego 探测，再按官方 API claimTaskSpace。绝不自动抢回控制。
 - 选定 task space 后，每个回合先调用 pageInfo()。同一稳定表单页连续填表时不要每填一个字段就重新 snapshot/观察；只在进入新页、分支点之后、保存前后、或 snapshotText 语义无法区分字段与错误时才观察。稳定纯文本区一个 heredoc 尽量填完当前可见可确认字段后统一读回。首次新建的 task space 已选中一个可观察的空白标签页时，初次申请网址导航必须在这个相同 target 内调用 navigateInitialPageCapturingAlerts；不得用 openOrReuseTab 新建第二个 target。锁定版 Ego 的 Page.navigate 会被同步 load-time alert 阻塞，并在 helper 回合退出时自动消掉仍未处理的弹窗，所以绝不能假设下一回合还能读取该弹窗。navigateInitialPageCapturingAlerts 只在初次导航期间临时替换无选择分支的 window.alert，通过 Ego CDP binding 记录完整 message、URL 和 frameId，并以等价“确定”语义让导航继续；它绝不替换 confirm、prompt 或 beforeunload。返回 kind:alerts 时记录全部文案后立即结束本 heredoc，下一独立回合只复用同一 taskSpaceId 并调用 pageInfo；不得重试导航或刷新。返回 kind:cleanup_failed（contaminated:true）时，临时注入无法确认已移除，该 task space 视为污染：立即硬停止一切导航、填写和保存，不得重试清理；调用 application-agent_cua record_browser_safety_stop（safetyKind:cleanup_failed）结构化写入 progress.egoBrowser.safetyStop，并原样保留 cleanupError、infoError、capturedAlerts、最后 pageInfo 和 taskSpaceId；也可用 TERRA_EGO_TASKSPACE_CONTAMINATED: 前缀的 record_failure 兼容写入同一字段。污染空间不可恢复：顾问只能点击“重新填写”创建全新 taskSpaceId，不得 resume/takeOver/rebind existing，也不得把这次情况记为 record_blocker resolved。返回 kind:alert_evidence_lost 时，注入已清理、空间未被污染，但 iframe load-time alert 可能已被自动确认且文字丢失：同样立即硬停止，不得 snapshot、填写、保存、导航或重试；调用 record_browser_safety_stop（safetyKind:alert_evidence_lost）结构化写入 safetyStop（或 TERRA_EGO_ALERT_EVIDENCE_LOST: 前缀的 record_failure 兼容写入），并用 question 工具明确告知顾问本回合 iframe 弹窗文字可能丢失。顾问只能通过桌面“查看后继续当前空间”按钮授权同空间恢复，或点击“重新填写”；模型传入 consultantConfirmed:true 不能解除。授权后第一回合只能 record_observation，观察成功前禁止填写/保存/complete。这两种硬停止都由 CUA 与 ego-browser wrapper 读取同一 safetyStop 字段强制阻断，不得记为 record_blocker resolved。只有 pageInfo() 没有 dialog 时，才可调用 snapshotText、captureScreenshot、js、click、fillInput、导航或其他页面操作。普通表单优先用 snapshotText 的语义 workflow；语义信息不足时由你根据现场截图改用 visual workflow；DOM/CDP 仅用于有明确观察证据的窄范围操作，不得用它伪造填写结果或直接绕过正常提交。
-- 如果 pageInfo() 返回 dialog：先记录完整 dialog 信息（type/message/url/frameId）和最近一次顶层页面证据；此时不得再调用 snapshotText、captureScreenshot、js、点击/输入/上传/导航，也不得在本回合死等 Page.handleJavaScriptDialog（实测弹窗开着时 CDP 常整段卡死）。type 为 alert 时：立刻结束本 ego heredoc（避免占死通道），先调用 application-agent_cua record_blocker（blockerDisposition: resolved，dialogType: alert，evidence 为 dialog.message），再调用 dismiss_js_alert（只认进度里的 pendingJsAlert；系统 Accessibility 读取文案并点「确定/OK」）；成功则按文案补字段并复查，不要 handoff、不要 takeOver。AX 无权限或失败时降级为 Ego helper 退出自动消窗，下一回合 pageInfo 确认后再补字段。type 为 beforeunload 时：结束本回合，不得 CDP accept/cancel；下一独立 heredoc 只 pageInfo，确认 URL 未变。所有 confirm 或 prompt 都必须 handOffTaskSpace，确认 done:true 后记录 blockerDisposition: handoff 并等待顾问；顾问处理期间绝不 takeOver/claim，不得由 Agent 猜测选项或 prompt 文本。
+- 如果 pageInfo() 返回 dialog：先记录完整 dialog 信息（type/message/url/frameId）和最近一次顶层页面证据；此时不得再调用 snapshotText、captureScreenshot、js、点击/输入/上传/导航，也不得在本回合死等 Page.handleJavaScriptDialog（实测弹窗开着时 CDP 常整段卡死）。type 为 alert 时：立刻结束本 ego heredoc（避免占死通道），先调用 application-agent_cua record_blocker（blockerDisposition: resolved，dialogType: alert，evidence 为 dialog.message），再调用 dismiss_js_alert（只认进度里的 pendingJsAlert；系统 Accessibility 读取文案并点「确定/OK」）；成功则按文案补字段并复查。未走完疑似弹窗流程并达限前禁止 handoff/takeOver。runtime 弹窗不会因 helper 退出而自动消失（那只属于 navigateInitialPageCapturingAlerts 的 load-time 路径）。type 为 beforeunload 时：结束本回合，不得 CDP accept/cancel；下一独立 heredoc 只 pageInfo，确认 URL 未变。所有 confirm 或 prompt 都必须 handOffTaskSpace，确认 done:true 后记录 blockerDisposition: handoff 并等待顾问；顾问处理期间绝不 takeOver/claim，不得由 Agent 猜测选项或 prompt 文本。
 - iframe 原生 alert 会阻塞触发它的 click/save Promise。任何保存、继续、选择、导航、上传等可能改变页面的动作，都必须按 observePageAction 模式执行：先启动动作但不 await，同时轮询 pageInfo；不得写成“await click 后再检查”。
 - observePageAction 返回 dialog 时，保存完整 type、message、url、frameId。调用 record_blocker / dismiss_js_alert 时 currentUrl 始终传最近一次 pageInfo 的顶层 URL，dialog.url 和 frameId 分别传 dialogUrl、dialogFrameId。alert：结束 ego heredoc → record_blocker（blockerDisposition: resolved，dialogType: alert，evidence=dialog.message）写入 pendingJsAlert → dismiss_js_alert（禁止 snapshot click「确定/OK」，也禁止本回合反复 CDP）。beforeunload：结束回合，不得 CDP；下一回合 pageInfo 确认 URL 未变。confirm/prompt：交接顾问，期间不抢接管。
-- observePageAction 返回 unknown、click 拒绝或 Runtime.evaluate 超时时，结果只是“未决”，不是已经失败。记录精确动作、最后 pageInfo 和错误后立即结束本 heredoc；此时不得调用 application-agent_cua record_failure、不得交接顾问（除非已确认是 confirm/prompt）、不得刷新、重开链接、进入 iframe URL、用 JS 直接 submit、重复动作或 takeOver。下一独立 heredoc 只能复用同一 taskSpaceId 并调用 pageInfo。只有这个新观察明确证明动作失败或仍无法观察时，才可记录失败或交接；只有新观察明确显示登录页或认证失败时才请求登录。
+- observePageAction 返回 unknown、timeout，或 click/Runtime.evaluate 超时：结果只是“未决”。记录精确超时/unknown 原文后立即结束本 heredoc；不得 record_failure、不得刷新/重开/JS submit/takeOver，也不得在未走完疑似弹窗流程前 handoff。下一独立 heredoc 只复用同一 taskSpaceId 并 pageInfo。若该 pageInfo-only 回合也超时/读不到 dialog.message（整段 CDP 通道卡死），视为疑似原生校验弹窗：record_blocker（blockerDisposition: resolved，dialogType: alert，evidence=超时原文，不得编造弹窗文案）→ dismiss_js_alert（AX 读真实文案；仅 Ego Lite、仅单确定/OK 无 Cancel）。达重试上限仍未点掉时（且仅此时）才允许 handoff_to_consultant，话术为：请在 Ego 手动处理弹窗或补字段 → 完成本页落盘 → 回桌面点「继续」。禁止关窗/「重新填写」（污染空间除外）。若新观察证明是 confirm/prompt，按 confirm/prompt 交接。只有新观察明确显示登录页时才请求登录。
 - 截图不是每回合默认动作。仅在页面跳转/登录态变化、保存前后证据不足、或 snapshotText 语义无法区分字段/错误时，才写入 \`05_screenshots/<有意义且唯一的名称>.png\` 并 \`await captureScreenshot(...)\`，随后用 OpenCode 内置 read 读取同一 PNG。禁止无参数 captureScreenshot；禁止对同一稳定表单页每字段截图。不得仅凭路径、cliLog 或旧截图判断页面。
 - 普通文本输入必须使用 fillInput，随后发送真实 Tab；稳定纯文本区应尽量一次填完当前可见可确认字段后再统一读回。编号/注册号/appointment number 等标识字段只能来自材料原文或顾问确认，禁止用分数、成绩或近似字符串推断。只有遮罩输入或 fillInput 无法产生真实按键语义时，才可逐键发送 CDP Input.dispatchKeyEvent，随后同样 Tab 并读取回显。
 - 日期字段优先用 TERRA_POLICY 中的 fillDatePickerByClicks（真实 click 打开日历 → 真实点击切年/月 → 点日 → 点 OK/Apply → 读回）。若平台拒绝键入日期并提示必须用 date picker icon，禁止继续盲打键盘。最多尝试两种策略（icon 路径、相邻 calendar 按钮路径）；两种都失败则记录缺失/blocker 并 handOffTaskSpace 交给顾问，不得在日期控件上反复试错超过 2 个 heredoc。下拉选择必须先 click 打开、重新 snapshot、click 当前可见选项，再重新观察；任何重渲染都会使旧 ref 立即失效。
-- 页面写操作禁止读取或调用 Vue internals、\`$router\`、store，禁止直接 DOM value setter、element.click()、form.submit()/requestSubmit() 或注入脚本提交。js/cdp 只可观察（含读取日历当前年月文案），唯一写入例外是真实键盘/CDP key events、用于保存审计的 network event 观察；页面交互仍必须走 click/fillInput/uploadFile/fillDatePickerByClicks 等真实交互 helper。系统原生 alert 不得在 Ego 通道内用 Page.handleJavaScriptDialog 关闭。
-- 每一页/弹窗表单（含 Add Institution 一类模态框）在可确认字段都填完、动态复查通过、且本页没有更多可填字段后，必须点击页面上真实可见的 Save / Continue / Next / 保存 / 继续 / Create Application 等按钮离开或落盘。禁止用代码跳页、JS submit、改 URL、或口头宣称“已保存”。该点击必须包在 observePageAction 里；裸 \`await click(...)\` 保存会被弹窗永久卡住。
-- 浏览器原生 alert（深色系统框、只有“确定/OK”、文案如 “Major is required.”）不是页面按钮。严禁对裸字符串「确定/OK」做 snapshot click（无 @ 选择器）。网页模态框/日期选择器上带真实选择器的 OK 按钮允许用 observePageAction 点击。实测 Ego 通道内 CDP 常卡死：先结束 ego heredoc → record_blocker（dialogType: alert）写入 pendingJsAlert → dismiss_js_alert，由系统 Accessibility 读文案并点「确定/OK」；然后按文案补缺字段（如 Major）→ 动态复查 → 再 observePageAction 点 Save/Continue。AX 失败时降级为 Ego 退出消窗。alert 校验不要 handoff、不要 takeOver。confirm/prompt 仍必须交接顾问，期间不抢接管。
+- 页面写操作禁止读取或调用 Vue internals、\`$router\`、store，禁止直接 DOM value setter、HTMLElement.click()、向 DOM 派发合成 Event、form.submit()/requestSubmit() 或注入脚本提交。js/cdp 只可观察（含读取日历当前年月文案与元素 getBoundingClientRect）；写入例外是真实键盘/CDP key events、CDP Input.dispatchMouseEvent 坐标点击（与 fillDatePickerByClicks / clickByCoordinates 相同），以及保存审计的 network event 观察。snapshot click 无效时用坐标 CDP 鼠标，禁止合成 DOM 事件。系统原生 alert 不得在 Ego 通道内用 Page.handleJavaScriptDialog 关闭。
+- 每一页/弹窗表单（含 Add Institution 一类模态框）在可确认字段都填完、动态复查通过、且本页没有更多可填字段后，必须通过 observePageAction 点击页面上真实可见的本页落盘/前进控件离开或落盘（常见文案如 Save/Continue/Next/保存/继续/Create Application 仅作举例，不以按钮字面量做硬规则）。禁止用代码跳页、JS submit、改 URL、或口头宣称“已保存”。跨页离开且前页有表单活动、又无 record_save_verified 时，record_observation 会给出 PAGE_LEFT_WITHOUT_SAVE_EVIDENCE 提示（仅当该前页确有未落盘表单才需处理；登录→首页一类无表单跳转可忽略）。裸 \`await click(...)\` 会在原生 alert 下永久卡住。
+- 浏览器原生 alert（深色系统框、只有“确定/OK”、文案如 “Major is required.”）不是页面按钮。严禁对裸字符串「确定/OK」做 snapshot click（无 @ 选择器）。网页模态框/日期选择器上带真实选择器的 OK 按钮允许用 observePageAction 点击。本页落盘后若整段 CDP 超时且下一 pageInfo-only 也超时，按疑似校验弹窗处理（evidence=超时原文）→ dismiss_js_alert。可读 dialog.message 的 alert 同样走 record_blocker → dismiss_js_alert → 按文案补字段 → 复查 → 再点本页落盘控件。未走完疑似流程并达限前禁止 handoff/takeOver；达限后才可交接，话术为手动处理→落盘→桌面继续。runtime 弹窗不指望 helper 退出自动消失。confirm/prompt 仍必须交接顾问，期间不抢接管。
 - 任何选择、添加/删除、自动完成、切换或导航都可能改变可见内容（分支点）。动作后用新的 pageInfo 加 snapshotText 复查；仅当语义不足时再截图。硬规则热点：Academic/Add Institution——Level of Study / Bachelor / Undergraduate 之后若出现 Major / Concentration / Degree title，未填完禁止 Save；Employment/Internship——雇主类型、在职状态、添加另一段经历后必须再观察再填；Research/Publications/Articles——添加条目或切换类型后必须再观察再填。跳出来的动态字段也算当前页必填。DOM required 扫描只是辅助证据。稳定区填完且分支点复查通过后，以 remainingRequiredFields:[] 做一次 record_dynamic_form_verified，才能保存。
 - 遇到校验、超时、服务端错误或结果不明确时，先保留当前页面和观察证据，不得自动刷新、重开链接、重复同一动作或要求重新登录。若属于 observePageAction unknown，必须严格按上一条立即结束，并在下一独立 heredoc 只调用 pageInfo；只有该新观察明确证明动作失败或需要人工处理后，才可记录失败或交接。只有新观察明确显示认证失败或登录页时，才可请求顾问重新登录。
 - 若 Terra 包装器返回 TERRA_EGO_BROWSER_VERSION_CONFLICT、TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE 或 TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE，立即停止，不得重试、调用系统 ego-browser、关闭其他 Ego Lite、猜测 task space，也不得“改用当前冲突中的 Ego”或私自新建 task space。原样调用 application-agent_cua record_failure；请顾问只关闭非 Terra 管理的另一 Ego Lite 后点击“继续任务”。恢复时仍必须先 resume_ego → listTaskSpaces 探测保存 ID；ID 消失则走 retire-and-rebind，不得绕过。
@@ -87,6 +87,16 @@ export const EGO_OBSERVE_PAGE_ACTION_SOURCE = `async function observePageAction(
 
 // Real-click calendar helper for portals that reject typed dates. js() is only used to
 // observe the open popup's year/month labels — never to set the field value.
+/** Coordinate CDP mouse click — same primitive fillDatePickerByClicks uses. Prefer when snapshot click no-ops. */
+export const EGO_CLICK_BY_COORDINATES_SOURCE = `async function clickByCoordinates(x, y, { label } = {}) {
+  const px = Number(x)
+  const py = Number(y)
+  if (!(px >= 0) || !(py >= 0)) return { ok: false, reason: 'invalid_coordinates', x, y }
+  await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: px, y: py, button: 'left', clickCount: 1 })
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: px, y: py, button: 'left', clickCount: 1 })
+  return { ok: true, x: px, y: py, label: label || '' }
+}`
+
 export const EGO_FILL_DATE_PICKER_SOURCE = `async function fillDatePickerByClicks(target, desired, { maxMonthSteps = 36 } = {}) {
   const wanted = String(desired || '').trim()
   const match = wanted.match(/^(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})$/) || wanted.match(/^(\\d{1,2})[-/](\\d{1,2})[-/](\\d{4})$/)
@@ -447,12 +457,35 @@ if [ "\${1:-}" = "nodejs" ]; then
   fi
   # Page/modal exit must be a real Save/Continue click under observePageAction — never JS submit or bare await click.
   if /usr/bin/grep -Eiq 'requestSubmit|form[[:space:]]*\\.[[:space:]]*submit|[[:alnum:]_\\$][[:space:]]*\\.[[:space:]]*submit[[:space:]]*\\(' "$EGO_NODE_STDIN_COMPACT"; then
-    printf '%s\\n' 'TERRA_EGO_SCRIPTED_SUBMIT_DENIED: 禁止 form.submit()/requestSubmit() 或脚本提交。填完并复查后必须用 observePageAction 点击页面上真实可见的 Save/Continue/保存/继续 按钮。' >&2
+    printf '%s\\n' 'TERRA_EGO_SCRIPTED_SUBMIT_DENIED: 禁止 form.submit()/requestSubmit() 或脚本提交。填完并复查后必须用 observePageAction 点击页面上真实可见的本页落盘/前进控件。' >&2
+    exit 81
+  fi
+  # Ban DOM EventTarget synthetic events. Pattern requires ".dispatchEvent(" — does not match
+  # Input.dispatchMouseEvent / Input.dispatchKeyEvent (Mouse/Key, not Event).
+  if /usr/bin/grep -Eq '\\.dispatchEvent[[:space:]]*\\(' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED: 禁止向 DOM 派发合成 Event（Element.dispatchEvent）。页面点击必须用真实 click / observePageAction，或 CDP Input.dispatchMouseEvent 坐标点击；日期控件用 fillDatePickerByClicks。' >&2
     exit 81
   fi
   if /usr/bin/grep -Eiq 'click[[:space:]]*\\([^)]*(Save|Continue|Next|保存|继续|Create Application)' "$EGO_NODE_STDIN_COMPACT" && ! /usr/bin/grep -iq 'observePageAction' "$EGO_NODE_STDIN_COMPACT"; then
-    printf '%s\\n' 'TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION: Save/Continue/保存/继续 点击必须包在 observePageAction 内；裸 await click 会被原生 alert 永久卡住且无法读弹窗。' >&2
+    printf '%s\\n' 'TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION: 本页落盘/前进控件点击必须包在 observePageAction 内；裸 await click 会被原生 alert 永久卡住且无法读弹窗。' >&2
     exit 81
+  fi
+  # Unauthorized takeOver/claim: only resume_ego phase 2 sets resumeAuthorizedAt + takeoverPending.
+  # Does not conflict with that legal path; handoff_waiting / resume_probe gates still apply first.
+  if /usr/bin/grep -Eiq 'takeOverTaskSpace|claimTaskSpace' "$EGO_NODE_STDIN_COMPACT"; then
+    TAKEOVER_OK=$(/usr/bin/python3 -c 'import json,sys
+try:
+  progress=json.load(open(sys.argv[1], encoding="utf-8"))
+  browser=progress.get("egoBrowser") or {}
+  if browser.get("resumeAuthorizedAt") and browser.get("takeoverPending") is True:
+    print("ok")
+except Exception:
+  pass
+' "$WORKSPACE/03_state/application_progress.json" 2>/dev/null || true)
+    if [ "$TAKEOVER_OK" != "ok" ]; then
+      printf '%s\\n' 'TERRA_EGO_UNAUTHORIZED_TAKEOVER: 禁止在未走完 resume_ego 第二阶段（resumeAuthorizedAt + takeoverPending）前 takeOver/claim。卡住时先走疑似弹窗流程；未达限前禁止 handoff/takeOver。' >&2
+      exit 84
+    fi
   fi
   # Native Chromium alert OK is not a page widget — never bare snapshot-click 确定/OK.
   # Page modals/date pickers with a real @selector may use observePageAction + click('@ok', …).
@@ -835,6 +868,12 @@ async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOv
       "cliLog(JSON.stringify(dateResult, null, 2))",
       "```",
       "",
+      "If a real page control's snapshot click no-ops, use the coordinate CDP mouse helper from TERRA_POLICY.md (same primitive as the date picker):",
+      "",
+      "```js",
+      EGO_CLICK_BY_COORDINATES_SOURCE,
+      "```",
+      "",
       "Fresh managed navigation uses this direct-Ego alert capture because Chromium discards a still-blocked load-time alert when the helper round detaches:",
       "",
       "```js",
@@ -860,7 +899,11 @@ async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOv
       "",
       "Page/modal completion: after verified fields are filled and no further fillable fields remain on the current page or modal, you must click the real visible Save / Continue / Next / 保存 / 继续 / Create button through observePageAction. Never mark a page complete, navigate by URL/JS, call form.submit/requestSubmit, or leave a modal without that real button click. A bare `await click(...)` on Save/Continue is forbidden because a native alert will hang the Promise forever.",
       "",
-      "Native Chromium/JS alerts (dark system dialog with only 确定/OK, e.g. \"Major is required.\") are not page widgets. Never bare-click 确定/OK without an @selector. End the ego heredoc immediately when an alert is observed or the channel wedges, call record_blocker(blockerDisposition: resolved, dialogType: alert, evidence: dialog.message) to write pendingJsAlert, then dismiss_js_alert so Terra can click 确定/OK through macOS Accessibility on Ego Lite only. Use the message to fill missing fields (e.g. Major), re-verify, and retry Save/Continue. Page modal/date-picker OK buttons with a real @selector may use observePageAction. If Accessibility is denied or no Ego alert is found, fall back to Ego helper-exit auto-clear. Do not hand off or takeOver for validation alerts. confirm/prompt still require consultant handoff with no takeOver while the advisor is handling it. beforeunload: end the round and confirm the URL is unchanged on the next pageInfo-only round — never CDP accept/cancel.",
+      "Native Chromium/JS alerts (dark system dialog with only 确定/OK, e.g. \"Major is required.\") are not page widgets. Never bare-click 确定/OK without an @selector. End the ego heredoc immediately when an alert is observed or the CDP channel wedges after a page-commit action. If dialog.message is readable: record_blocker(blockerDisposition: resolved, dialogType: alert, evidence: dialog.message) then dismiss_js_alert. If observePageAction times out/unknown and the next pageInfo-only round also times out: treat as a suspected validation alert — record_blocker with the exact timeout text (never invent a dialog message) then dismiss_js_alert (AX reads the real message; Ego Lite only; single OK/确定, no Cancel). Do not handoff/takeOver until that suspected-alert flow hits its retry limit; only then handoff_to_consultant with: handle the dialog in Ego → finish page commit → desktop Continue. Never close the window or click 重新填写 except for contaminated spaces. Runtime alerts are not auto-cleared by helper exit — that path exists only inside navigateInitialPageCapturingAlerts for load-time alerts. Page modal/date-picker OK buttons with a real @selector may use observePageAction. confirm/prompt still require consultant handoff with no takeOver while the advisor is handling it. beforeunload: end the round and confirm the URL is unchanged on the next pageInfo-only round — never CDP accept/cancel.",
+      "",
+      "When snapshot click no-ops on a real page control, read getBoundingClientRect via js (observation only) and click with clickByCoordinates / CDP Input.dispatchMouseEvent — the same primitive fillDatePickerByClicks uses. Never synthesize DOM events or call HTMLElement.click() to fake a commit.",
+      "",
+      "Leaving a page: URL origin+pathname change without record_save_verified yields PAGE_LEFT_WITHOUT_SAVE_EVIDENCE only when the prior page had form activity (filled/verified/dynamic-check/save-attempt). Advisory only — act on it when that prior page still needs a server-confirmed save; ignore for non-form hops (e.g. login→home). Same-URL SPA false-forward stays on the save-evidence gate. Button labels like Save/Continue are examples, not hard word gates.",
       "",
       "For save evidence: first record_observation with the top-level page plus the active form frame's frameId, loaderId, and frameUrl from Page.getFrameTree. Call `Network.enable`, drain old events, record actionStartedAt immediately before one real save click through observePageAction, settle briefly, then drain new events and record eventsDrainedAt. Join `Network.requestWillBeSent` and `Network.responseReceived` by the same non-empty requestId. Pass only compact evidence to record_save_verified: source page/title/frame/loader, the action window, request={requestId,method,url,observedAt,frameId,loaderId}, and response={requestId,status,url,resourceType,observedAt,frameId?,loaderId?,redirected?}. The request event supplies the authoritative frame/loader context; retain response frameId/loaderId only when the drained response event actually provides them, and never invent missing fields. Any provided response IDs must match that same request. XHR/fetch must stay on the frozen source frame+loader. A same-frame document POST may acquire a new request loader; the freshly observed destination frame URL/loader must match that request loader and final 2xx response. This covers ordinary document POST and iframe redirects without comparing an iframe URL to the top-level URL. Strip query/hash from every evidence URL. Never retain or pass headers, postData, body, cookies, or payloads.",
       "",
@@ -884,11 +927,22 @@ async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOv
       "",
       "Try at most two date strategies in two heredocs. If the portal rejects typed dates and both strategies fail, handOffTaskSpace instead of looping.",
       "",
+      "## Canonical coordinate click fallback",
+      "",
+      "```js",
+      EGO_CLICK_BY_COORDINATES_SOURCE,
+      "",
+      "const box = await js(\"(() => { const el = document.querySelector('[data-action=continue]'); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()\")",
+      "if (box) await observePageAction(() => clickByCoordinates(box.x, box.y, { label: 'page commit' }))",
+      "```",
+      "",
       "## Canonical initial navigation",
       "",
       "```js",
       EGO_INITIAL_NAVIGATION_SOURCE,
       "```",
+      "",
+      "Load-time alerts during navigateInitialPageCapturingAlerts are captured and accepted through the temporary Ego CDP binding in that helper only. That is distinct from runtime validation alerts after page-commit clicks, which must use record_blocker + dismiss_js_alert (and the suspected channel-timeout path when CDP is fully wedged).",
       "",
       EGO_BROWSER_PROTOCOL,
       "",
@@ -1940,6 +1994,40 @@ function browserUrlWithoutQuery(value: unknown) {
   const url = new URL(text)
   return url.origin + url.pathname
 }
+
+/** Timeout / unknown evidence that may stand in for an unreadable native validation alert. */
+function isSuspectedAlertTimeoutEvidence(evidence: string) {
+  const text = String(evidence || "")
+  return /CDP request timed out|pageInfo timed out|timed out after\s*\d|observePageAction[\s\S]{0,80}(timeout|unknown)|kind:\s*['"]?unknown['"]?|TERRA_EGO_SUSPECTED_ALERT/i.test(text)
+}
+
+function pageHasServerConfirmedSave(progress: any, pageUrl: string) {
+  const target = browserUrlWithoutQuery(pageUrl)
+  if (!target) return false
+  return Array.isArray(progress?.savedPages) && progress.savedPages.some((page: any) =>
+    page?.serverConfirmed === true && browserUrlWithoutQuery(page?.url || page?.sourceUrl || page?.currentUrl) === target,
+  )
+}
+
+/** Handoff exit after dismiss retry limit — applies to both known-message and suspected alerts. */
+function alertDismissHandoffAllowed(progress: any) {
+  const pending = progress?.egoBrowser?.pendingJsAlert
+  if (!pending || pending.type !== "alert") return Boolean(progress?.egoBrowser?.alertDismissHandoffAllowed)
+  return Boolean(pending.retryLimitReached) || Number(pending.attempts || 0) >= ${MAX_DISMISS_JS_ALERT_ATTEMPTS} || Boolean(progress?.egoBrowser?.alertDismissHandoffAllowed)
+}
+
+function pageHasFormActivity(progress: any, pageUrl: string) {
+  const target = browserUrlWithoutQuery(pageUrl)
+  if (!target) return false
+  const onPage = (item: any) => browserUrlWithoutQuery(item?.currentUrl || item?.url || item?.sourceUrl) === target
+  return (Array.isArray(progress?.filledFields) && progress.filledFields.some(onPage))
+    || (Array.isArray(progress?.verifiedFields) && progress.verifiedFields.some(onPage))
+    || (Array.isArray(progress?.dynamicFormChecks) && progress.dynamicFormChecks.some(onPage))
+    || (progress?.pendingSaveAttempt && onPage(progress.pendingSaveAttempt))
+}
+
+const CONSULTANT_HANDOFF_GUIDANCE =
+  "请在 Ego 窗口手动处理弹窗或补齐字段 → 完成本页落盘（点击页面上真实的本页落盘控件）→ 回桌面点「继续」，Agent 将接续。禁止关闭窗口或「重新填写」（污染空间除外）。"
 
 function browserCompletionGateError(progress: any, input: any) {
   const taskSpaceId = String(input.taskSpaceId || "").trim()
@@ -4361,6 +4449,24 @@ export const cua = {
         await appendAudit(workspace, "cua", auditAction, "failed", auditError)
         return auditError
       }
+      // URL gate (cross-page only): leaving a page without server-confirmed save is a warning.
+      // Same-URL SPA false-forward is covered by the save-evidence gate, not this check.
+      const previousPageUrl = browserUrlWithoutQuery(progress.lastBrowserObservation?.currentUrl || progress.currentUrl)
+      const nextPageUrl = browserUrlWithoutQuery(currentUrl)
+      const leftWithoutSave =
+        Boolean(previousPageUrl && nextPageUrl && previousPageUrl !== nextPageUrl) &&
+        !pageHasServerConfirmedSave(progress, previousPageUrl) &&
+        pageHasFormActivity(progress, previousPageUrl)
+      if (leftWithoutSave) {
+        appendLimited(progress, "failedActions", {
+          at: new Date().toISOString(),
+          action: auditAction,
+          reason: "PAGE_LEFT_WITHOUT_SAVE_EVIDENCE",
+          fromUrl: previousPageUrl,
+          toUrl: nextPageUrl,
+          page: progress.currentPage || "",
+        })
+      }
       progress.browserBackend = "ego-browser"
       progress.currentPage = pageTitle
       progress.currentUrl = currentUrl
@@ -4413,8 +4519,10 @@ export const cua = {
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       await appendLog(workspace, "cua", (takeoverCompleted || rebindCompleted ? "ego-browser 已实际恢复并记录首个页面/frame 观察：" : safetyObservationCompleted ? "alert_evidence_lost 恢复后的首次观察已记录，安全门已解除：" : "ego-browser 页面/frame 观察已记录：") + (progress.currentPage || "申请平台页面"))
       await saveTask(workspace, task, "正在填写申请平台", takeoverCompleted || rebindCompleted ? "已成功恢复 task space 并记录首个 page/frame 观察。" : safetyObservationCompleted ? "已完成恢复后的首次观察，可继续小步填写。" : "已通过 ego-browser snapshot/pageInfo/frameTree 观察当前页面，准备继续小步填写。")
-      await appendAudit(workspace, "cua", auditAction, "completed", takeoverCompleted ? "completed authorized ego-browser takeover" : rebindCompleted ? "completed consultant-authorized task-space rebind" : safetyObservationCompleted ? "cleared safety observation gate" : "recorded ego-browser observation")
-      return "ego-browser 页面观察已记录。基于这次观察完成一个逻辑动作组后必须再次 pageInfo()；无 dialog 时再 snapshotText 或截图验证并结束本回合。"
+      await appendAudit(workspace, "cua", auditAction, "completed", takeoverCompleted ? "completed authorized ego-browser takeover" : rebindCompleted ? "completed consultant-authorized task-space rebind" : safetyObservationCompleted ? "cleared safety observation gate" : leftWithoutSave ? "recorded observation with PAGE_LEFT_WITHOUT_SAVE_EVIDENCE" : "recorded ego-browser observation")
+      return leftWithoutSave
+        ? "PAGE_LEFT_WITHOUT_SAVE_EVIDENCE: observed URL left " + previousPageUrl + " for " + nextPageUrl + " without record_save_verified, and the prior page had form activity. Observation was still recorded. Only if that prior page still has unfinished form work should you return to finish a server-confirmed save; ignore this advisory for non-form transitions (e.g. login→home)."
+        : "ego-browser 页面观察已记录。基于这次观察完成一个逻辑动作组后必须再次 pageInfo()；无 dialog 时再 snapshotText 或截图验证并结束本回合。"
     }
     if (input.action === "record_field_verified" || input.action === "record_select_verified") {
       ensureCuaProgress(progress)
@@ -4586,11 +4694,14 @@ export const cua = {
       const evidence = String(input.evidence || input.text || input.detail || "dismiss_js_alert").trim()
       const pending = progress.egoBrowser?.pendingJsAlert
       const attempts = Number(pending?.attempts || 0)
+      const suspectedPending = pending?.suspected === true || pending?.source === "channel_timeout"
       const auditError =
         (taskSpaceId ? requireNumericTaskSpaceId(taskSpaceId) : "") ||
         (taskSpaceId ? browserTaskSpaceMismatch(progress, taskSpaceId) : "") ||
-        (!pending || pending.type !== "alert" ? "PENDING_JS_ALERT_REQUIRED: call record_blocker(blockerDisposition: resolved, dialogType: alert, evidence: dialog.message) before dismiss_js_alert." : "") ||
-        (attempts >= ${MAX_DISMISS_JS_ALERT_ATTEMPTS} ? "DISMISS_JS_ALERT_RETRY_LIMIT: pending alert already failed " + ${MAX_DISMISS_JS_ALERT_ATTEMPTS} + " times; end ego heredoc for Ego exit auto-clear and do not keep calling dismiss_js_alert." : "")
+        (!pending || pending.type !== "alert" ? "PENDING_JS_ALERT_REQUIRED: call record_blocker(blockerDisposition: resolved, dialogType: alert, evidence: dialog.message or exact channel-timeout text) before dismiss_js_alert." : "") ||
+        (attempts >= ${MAX_DISMISS_JS_ALERT_ATTEMPTS}
+          ? "DISMISS_JS_ALERT_RETRY_LIMIT: pending alert already failed " + ${MAX_DISMISS_JS_ALERT_ATTEMPTS} + " times; do not call dismiss_js_alert again. handoff_to_consultant is now allowed with the manual-handle template (known-message and suspected alerts share this exit)."
+          : "")
       if (auditError) {
         appendLimited(progress, "failedActions", { at: new Date().toISOString(), action: auditAction, reason: auditError, page: progress.currentPage || "" })
         await writeJson(join(workspace, "03_state/application_progress.json"), progress)
@@ -4600,6 +4711,7 @@ export const cua = {
       }
       const ax = await dismissJsAlertViaAx(8000)
       const nextAttempts = attempts + 1
+      const retryLimitReached = nextAttempts >= ${MAX_DISMISS_JS_ALERT_ATTEMPTS}
       appendLimited(progress, "dismissedJsAlerts", {
         at: new Date().toISOString(),
         taskSpaceId: taskSpaceId || undefined,
@@ -4611,6 +4723,7 @@ export const cua = {
         error: ax.error || "",
         evidence,
         attempt: nextAttempts,
+        suspected: suspectedPending || undefined,
         backend: "terra-js-alert-ax",
       }, ${MAX_DISMISSED_JS_ALERTS})
       if (ax.dismissed) {
@@ -4620,10 +4733,13 @@ export const cua = {
           lastAlertDismissedAt: new Date().toISOString(),
           lastAlertDismissMethod: ax.method,
           pendingJsAlert: undefined,
+          alertDismissHandoffAllowed: false,
         }
       } else {
         // Keep pendingJsAlert after the retry limit so the next dismiss call still
         // returns DISMISS_JS_ALERT_RETRY_LIMIT instead of PENDING_JS_ALERT_REQUIRED.
+        // Limit opens the legal handoff exit for both known-message and suspected alerts
+        // (AX may fail for permission / confirm/prompt / no_alert_found).
         progress.egoBrowser = {
           ...(progress.egoBrowser || {}),
           pendingJsAlert: {
@@ -4631,8 +4747,9 @@ export const cua = {
             attempts: nextAttempts,
             lastAttemptAt: new Date().toISOString(),
             lastError: ax.error || "no_alert_found",
-            retryLimitReached: nextAttempts >= ${MAX_DISMISS_JS_ALERT_ATTEMPTS},
+            retryLimitReached,
           },
+          ...(retryLimitReached ? { alertDismissHandoffAllowed: true } : {}),
         }
       }
       // Alert may have changed required fields; invalidate stale checks.
@@ -4643,17 +4760,28 @@ export const cua = {
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       if (ax.dismissed) {
         await appendLog(workspace, "cua", "已用 Accessibility 点掉 JS alert：" + (ax.message || pending.message || "(无文案)"))
-        await saveTask(workspace, task, "正在填写申请平台", "原生 alert 已自动点掉。请按文案补字段后重新观察并复查，不要交接顾问。")
+        await saveTask(workspace, task, "正在填写申请平台", "原生 alert 已用 Accessibility 点掉。请按文案补字段后重新观察并复查，不要交接顾问。")
         await appendAudit(workspace, "cua", auditAction, "completed", ax.message || pending.message || "ax dismissed")
         return JSON.stringify({
           dismissed: true,
           method: "ax",
           message: ax.message || pending.message || "",
-          nextAction: "Do not handoff. Fill the missing field named by message (e.g. Major), record_dynamic_form_verified, then retry Save/Continue via observePageAction.",
+          nextAction: "Do not handoff. Fill the missing field named by message (e.g. Major), record_dynamic_form_verified, then retry the page-commit control via observePageAction.",
         }, null, 2)
       }
-      await appendLog(workspace, "cua", "Accessibility 未能点掉 alert，降级 Ego 退出消窗：" + (ax.error || "unknown"))
-      await saveTask(workspace, task, "正在填写申请平台", "原生 alert 未能用 Accessibility 点掉；请确认本回合 ego heredoc 已结束以便 Ego 退出消窗，下一回合 pageInfo 后按已知文案补字段。不要 takeOver。")
+      const limitHandoff = retryLimitReached
+      const alertKind = suspectedPending ? "suspected" : "known"
+      await appendLog(workspace, "cua", limitHandoff
+        ? "弹窗 dismiss 达限（" + alertKind + "），允许交接顾问：" + (ax.error || "unknown")
+        : "Accessibility 未能点掉 alert（" + alertKind + "）：" + (ax.error || "unknown"))
+      await saveTask(
+        workspace,
+        task,
+        limitHandoff ? "等待顾问接管浏览器" : "正在填写申请平台",
+        limitHandoff
+          ? CONSULTANT_HANDOFF_GUIDANCE
+          : "原生 alert 未能用 Accessibility 点掉。结束本回合 ego heredoc；下一回合只 pageInfo。未达 dismiss 重试上限前不要 handoff/takeOver。",
+      )
       await appendAudit(workspace, "cua", auditAction, "completed", ax.error || "ego_exit_fallback")
       return JSON.stringify({
         dismissed: false,
@@ -4661,9 +4789,12 @@ export const cua = {
         message: ax.message || pending.message || "",
         error: ax.error || "no_alert_found",
         attempts: nextAttempts,
-        nextAction: nextAttempts >= ${MAX_DISMISS_JS_ALERT_ATTEMPTS}
-          ? "Retry limit reached. End any open ego heredoc so Ego can auto-clear the alert. Next round: pageInfo only, then fill missing fields from pending message. Do not call dismiss_js_alert again."
-          : "End any open ego heredoc so Ego can auto-clear the alert. Next round: pageInfo only, then fill missing fields from pending message. Do not handoff for validation alerts. If Accessibility permission is required, ask the consultant to enable it for Terra-Edu Application Agent.",
+        suspected: suspectedPending,
+        alertKind,
+        alertDismissHandoffAllowed: limitHandoff,
+        nextAction: limitHandoff
+          ? "Dismiss retry limit reached (known-message and suspected share this exit). Call handoff_to_consultant with browser_takeover. Tell the consultant: " + CONSULTANT_HANDOFF_GUIDANCE + " Do not close the window or click 重新填写 except for contaminated spaces. Do not call dismiss_js_alert again."
+          : "AX dismiss failed (e.g. accessibility_permission_required, no_alert_found for confirm/prompt, or no single-OK alert). End the ego heredoc; next round pageInfo only. Do not handoff/takeOver until dismiss_js_alert hits its retry limit. If Accessibility permission is required, ask the consultant to enable it for Terra-Edu Application Agent. Runtime alerts are not auto-cleared by helper exit — that auto-accept path exists only for navigateInitialPageCapturingAlerts load-time alerts.",
       }, null, 2)
     }
     if (input.action === "record_blocker") {
@@ -4722,7 +4853,9 @@ export const cua = {
             }
           : {}),
         // Only an explicit dialogType:alert creates a pending AX dismiss target.
-        ...(disposition === "resolved" && dialogType === "alert" && evidence
+      // Suspected path: CDP fully wedged so dialog.message is unavailable; evidence must be
+      // the exact timeout/unknown text from observePageAction then pageInfo-only rounds.
+      ...(disposition === "resolved" && dialogType === "alert" && evidence
           ? {
               pendingJsAlert: {
                 type: "alert",
@@ -4731,7 +4864,11 @@ export const cua = {
                 dialogFrameId: dialogFrameId || undefined,
                 at: new Date().toISOString(),
                 attempts: 0,
+                ...(isSuspectedAlertTimeoutEvidence(evidence)
+                  ? { suspected: true, source: "channel_timeout" }
+                  : {}),
               },
+              alertDismissHandoffAllowed: false,
             }
           : disposition === "handoff" || dialogType === "confirm" || dialogType === "prompt" || dialogType === "beforeunload"
             ? { pendingJsAlert: undefined }
@@ -4746,24 +4883,29 @@ export const cua = {
       delete progress.pendingSaveAttempt
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       if (disposition === "resolved") {
+        const suspected = isSuspectedAlertTimeoutEvidence(evidence)
         await appendLog(workspace, "cua", "ego-browser 已安全处理阻塞：" + (input.detail || "未命名浏览器阻塞"))
         await saveTask(
           workspace,
           task,
           "正在填写申请平台",
           dialogType === "alert"
-            ? "已记录待点掉的原生 alert。下一步调用 dismiss_js_alert，不要交接顾问。"
+            ? suspected
+              ? "已按通道超时记录疑似原生校验弹窗。下一步立即 dismiss_js_alert（AX 读真实文案）；未达重试上限前不要 handoff/takeOver。"
+              : "已记录待点掉的原生 alert。下一步调用 dismiss_js_alert，不要交接顾问。"
             : "浏览器阻塞已安全处理。下一轮必须重新观察页面后再继续。",
         )
         await appendAudit(workspace, "cua", auditAction, "completed", input.detail || "resolved ego-browser blocker")
         return dialogType === "alert"
-          ? "已记录 pendingJsAlert。请立即调用 dismiss_js_alert；不要 handoff/takeOver。"
+          ? suspected
+            ? "已记录疑似弹窗 pendingJsAlert（evidence=超时原文）。请立即 dismiss_js_alert；AX 成功后按返回 message 补字段。未走完疑似流程并达限前禁止 handoff/takeOver。"
+            : "已记录 pendingJsAlert。请立即调用 dismiss_js_alert；不要 handoff/takeOver。"
           : "已记录已解决的浏览器阻塞。请结束当前 heredoc；下一轮从 pageInfo() 开始重新观察。"
       }
       await appendLog(workspace, "cua", "ego-browser 阻塞已交给顾问：" + (input.detail || "需要人工处理。"))
-      await saveTask(workspace, task, "等待顾问接管浏览器", input.detail || "请顾问在 ego lite 中处理当前浏览器阻塞，然后明确回复继续。")
+      await saveTask(workspace, task, "等待顾问接管浏览器", (input.detail ? String(input.detail) + " " : "") + CONSULTANT_HANDOFF_GUIDANCE)
       await appendAudit(workspace, "cua", auditAction, "completed", input.detail || "handoff required for ego-browser blocker")
-      return "浏览器阻塞已记录为顾问接管。不要再运行浏览器命令；顾问明确继续后，先以保存的 taskSpaceId 调用 resume_ego，再在新 heredoc 中 takeOverTaskSpace。"
+      return "浏览器阻塞已记录为顾问接管。" + CONSULTANT_HANDOFF_GUIDANCE + " 顾问明确继续后，先以保存的 taskSpaceId 调用 resume_ego，再在新 heredoc 中 takeOverTaskSpace。"
     }
     if (input.action === "handoff_to_consultant") {
       ensureCuaProgress(progress)
@@ -4771,7 +4913,15 @@ export const cua = {
       const currentUrl = String(input.currentUrl || progress.currentUrl || "").trim()
       const pageTitle = String(input.pageTitle || progress.currentPage || "").trim()
       const evidence = String(input.evidence || input.text || "").trim()
+      const pendingAlert = progress.egoBrowser?.pendingJsAlert
+      const alertPending = pendingAlert?.type === "alert"
+      const suspectedPending = alertPending && (pendingAlert.suspected === true || pendingAlert.source === "channel_timeout")
+      const handoffBlocked =
+        alertPending && !alertDismissHandoffAllowed(progress)
+          ? "PENDING_ALERT_DISMISS_REQUIRED: pendingJsAlert still open. Finish dismiss_js_alert attempts first. Handoff is allowed only after the dismiss retry limit (forbid early handoff until the alert dismiss flow is exhausted; known-message and suspected share this gate)."
+          : ""
       const auditError =
+        handoffBlocked ||
         browserAuditError(auditAction, { taskSpaceId, currentUrl, pageTitle, evidence }) ||
         requireNumericTaskSpaceId(taskSpaceId) ||
         browserTaskSpaceMismatch(progress, taskSpaceId)
@@ -4786,6 +4936,7 @@ export const cua = {
       const controlLossKind = input.controlLossKind === "unexpected_control_loss" || /TERRA_EGO_TASKSPACE_CONTROL_LOST/.test(evidence + " " + String(input.detail || ""))
         ? "unexpected_control_loss"
         : "deliberate_handoff"
+      const afterDismissLimit = alertDismissHandoffAllowed(progress)
       progress.currentUrl = currentUrl
       progress.currentPage = pageTitle
       progress.egoBrowser = {
@@ -4798,20 +4949,30 @@ export const cua = {
         handoffReason: input.detail || "需要顾问接管 ego-browser Space。",
         handoffType,
         controlLossKind,
+        ...(afterDismissLimit
+          ? {
+              pendingJsAlert: undefined,
+              alertDismissHandoffAllowed: false,
+              alertDismissHandoffAt: new Date().toISOString(),
+            }
+          : {}),
       }
       delete progress.pendingSaveAttempt
       await writeJson(join(workspace, "03_state/application_progress.json"), progress)
       await appendLog(workspace, "cua", "已交接 ego-browser task space 给顾问：" + (input.detail || "需要人工登录/验证。"))
+      const handoffGuidance = handoffType === "login"
+        ? "请顾问在 ego lite Space 中完成登录后回复继续。"
+        : CONSULTANT_HANDOFF_GUIDANCE
       await saveTask(
         workspace,
         task,
         handoffType === "login" ? "等待顾问登录" : "等待顾问接管浏览器",
-        input.detail || (handoffType === "login" ? "请顾问在 ego lite Space 中完成登录后回复继续。" : "请顾问在 ego lite Space 中处理当前浏览器状态后回复继续。"),
+        (input.detail ? String(input.detail) + " " : "") + handoffGuidance,
       )
       await appendAudit(workspace, "cua", auditAction, "completed", "handoff to consultant")
       return controlLossKind === "unexpected_control_loss"
         ? "已记录意外控制丢失。不得调用 handOffTaskSpace 或自动接管；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true）。第一阶段只 listTaskSpaces；确认 ID 仍在后再 claimTaskSpace 并先 pageInfo。若 ID 消失则走 retire-and-rebind，禁止私自新建空间。"
-        : "已记录顾问接管。确认 ego-browser 脚本中的 handOffTaskSpace(task.id) 已返回 done:true；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true）。第一阶段只 listTaskSpaces；确认 ID 仍在后再 takeOverTaskSpace（不读取返回）并先 pageInfo。若 ID 消失则走 retire-and-rebind，禁止私自新建空间。"
+        : "已记录顾问接管。" + handoffGuidance + " 确认 ego-browser 脚本中的 handOffTaskSpace(task.id) 已返回 done:true；顾问明确继续后，使用保存的 taskSpaceId 调用 resume_ego（consultantConfirmed:true）。第一阶段只 listTaskSpaces；确认 ID 仍在后再 takeOverTaskSpace（不读取返回）并先 pageInfo。若 ID 消失则走 retire-and-rebind，禁止私自新建空间。"
     }
     if (input.action === "record_save_verified") {
       ensureCuaProgress(progress)

@@ -834,6 +834,18 @@ if (!handedOffTask || handedOffTask.ownership === 'agent') throw new Error('conf
 cliLog('TERRA_EGO_DIALOG_SMOKE_CONFIRMATION_HANDOFF:' + handedOffTask.ownership)
 `,
   )
+  {
+    const progressPath = join(directory, "03_state/application_progress.json")
+    const progress = JSON.parse(await Bun.file(progressPath).text()) as Record<string, any>
+    progress.egoBrowser = {
+      ...(progress.egoBrowser || {}),
+      taskSpaceId: String(taskId),
+      handoffPending: true,
+      takeoverPending: true,
+      resumeAuthorizedAt: new Date().toISOString(),
+    }
+    await writeFile(progressPath, JSON.stringify(progress, null, 2) + "\n")
+  }
   tryWrapperRound(
     "consultant-authorized confirmation takeover",
     `
@@ -878,6 +890,18 @@ if (!handedOffTask || handedOffTask.ownership === 'agent') throw new Error('prom
 cliLog('TERRA_EGO_DIALOG_SMOKE_PROMPT_HANDOFF:' + handedOffTask.ownership)
 `,
   )
+  {
+    const progressPath = join(directory, "03_state/application_progress.json")
+    const progress = JSON.parse(await Bun.file(progressPath).text()) as Record<string, any>
+    progress.egoBrowser = {
+      ...(progress.egoBrowser || {}),
+      taskSpaceId: String(taskId),
+      handoffPending: true,
+      takeoverPending: true,
+      resumeAuthorizedAt: new Date().toISOString(),
+    }
+    await writeFile(progressPath, JSON.stringify(progress, null, 2) + "\n")
+  }
   tryWrapperRound(
     "consultant-authorized prompt takeover",
     `
