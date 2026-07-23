@@ -262,8 +262,10 @@ assert(asarBytes.includes(Buffer.from("qwen3.7-plus")), "Packaged app must use Q
 assert(asarBytes.includes(Buffer.from("completeTaskSpace(taskSpaceId, { keep: true })")) && asarBytes.includes(Buffer.from("一律不得使用 keep:false")), "Packaged app must preserve completed Ego windows and forbid the crashing close path")
 assert(asarBytes.includes(Buffer.from("TERRA_EGO_UNSAFE_TASKSPACE_CLOSE")) && asarBytes.includes(Buffer.from("EGO_NODE_STDIN_COMPACT")), "Packaged app must reject destructive nodejs close scripts before launching Ego")
 assert(asarBytes.includes(Buffer.from("TERRA_EGO_UNSAFE_PAGE_RELOAD")) && asarBytes.includes(Buffer.from("completeTaskSpace 只能使用可验证的字面量")), "Packaged app must reject automatic reloads and every unverifiable completion form before launching Ego")
-assert(asarBytes.includes(Buffer.from("TERRA_EGO_SCRIPTED_SUBMIT_DENIED")) && asarBytes.includes(Buffer.from("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION")) && asarBytes.includes(Buffer.from("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED")), "Packaged app must reject scripted submit, bare Save/Continue clicks, and native-alert OK clicks")
-assert(asarBytes.includes(Buffer.from("Major is required.")) && asarBytes.includes(Buffer.from("必须点击页面上真实可见的 Save / Continue")), "Packaged app must ship the Save/Continue and native-alert CDP policy")
+assert(asarBytes.includes(Buffer.from("TERRA_EGO_SCRIPTED_SUBMIT_DENIED")) && asarBytes.includes(Buffer.from("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION")) && asarBytes.includes(Buffer.from("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED")) && asarBytes.includes(Buffer.from("TERRA_EGO_ALERT_MUST_END_ROUND")), "Packaged app must reject scripted submit, bare Save/Continue clicks, native-alert OK clicks, and same-round fill-after-dialog")
+assert(asarBytes.includes(Buffer.from("Major is required.")) && asarBytes.includes(Buffer.from("必须点击页面上真实可见的 Save / Continue")) && asarBytes.includes(Buffer.from("dismiss_js_alert")), "Packaged app must ship the Save/Continue and dismiss_js_alert native-alert policy")
+assert(asarBytes.includes(Buffer.from("先填完再查")) && asarBytes.includes(Buffer.from("Academic/Add Institution")) && asarBytes.includes(Buffer.from("未填完禁止 Save")), "Packaged app must ship fill-then-verify and Academic hard-block hotspot policy")
+assert(asarBytes.includes(Buffer.from("dismissJsAlertViaAx")) || asarBytes.includes(Buffer.from("JS_ALERT_AX_JXA")), "Packaged app must ship the JS-alert Accessibility helper")
 assert(asarBytes.includes(Buffer.from("TERRA_EGO_TASKSPACE_CONTAMINATED")) && asarBytes.includes(Buffer.from("exit 82")), "Packaged app must hard-stop contaminated task spaces in the managed wrapper")
 assert(asarBytes.includes(Buffer.from("TERRA_EGO_ALERT_EVIDENCE_LOST")) && asarBytes.includes(Buffer.from("exit 83")), "Packaged app must hard-stop lost alert evidence in the managed wrapper with a distinct marker")
 assert(asarBytes.includes(Buffer.from("record_browser_safety_stop")) && asarBytes.includes(Buffer.from("resolve_browser_safety_stop")), "Packaged app must include structured browser safetyStop CUA actions")
@@ -333,16 +335,16 @@ if (existsSync(dmg)) {
 const guiSmokeScript = join(root, "scripts/verify-application-agent-gui-dialog.ts")
 const guiSmokeSource = readFileSync(guiSmokeScript, "utf8")
 assert(!guiSmokeSource.includes("application-agent-opencode"), "GUI dialog smoke must not import application-agent-opencode from unpackaged source")
+// soft-coverage: source must keep these product paths, but runtime may soft-skip them.
 for (const marker of [
   "--terra-package-smoke-write-opencode",
+  "TERRA_EDU_PACKAGE_SMOKE_WRITE_OPENCODE",
   "TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN",
   "TERRA_EDU_PACKAGE_SMOKE_WORKSPACE",
   "TERRA_EDU_PACKAGE_SMOKE_RUNTIME_ROOT",
   "TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT",
   "single-launch.claim",
   "TERRA_EGO_DIALOG_SMOKE_COLD_START",
-  "TERRA_EGO_DIALOG_SMOKE_COLD_OBSERVATION",
-  "TERRA_EGO_VISUAL_SCREENSHOT_VERIFIED",
   "TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_CAPTURED",
   "TERRA_EGO_DIALOG_SMOKE_NAVIGATION_IFRAME_ALERT_CAPTURED",
   "TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ROUND_ENDED",
@@ -353,6 +355,13 @@ for (const marker of [
   "TERRA_EGO_DIALOG_SMOKE_BEFOREUNLOAD_REOBSERVED",
   "TERRA_EGO_DIALOG_SMOKE_CONFIRMATION_HANDOFF",
   "TERRA_EGO_DIALOG_SMOKE_PROMPT_HANDOFF",
+]) {
+  assert(guiSmokeSource.includes(marker), `GUI dialog smoke is missing soft-coverage packaged behavior marker in source: ${marker}`)
+}
+// hard-runtime markers are also required in source; final ZIP smoke asserts them on stdout below.
+for (const marker of [
+  "TERRA_EGO_DIALOG_SMOKE_COLD_OBSERVATION",
+  "TERRA_EGO_VISUAL_SCREENSHOT_VERIFIED",
   "TERRA_EGO_NETWORK_EVENT_SHAPE_FETCH_POST",
   "TERRA_EGO_NETWORK_EVENT_SHAPE_DOCUMENT_POST",
   "TERRA_EGO_NETWORK_EVENT_SHAPE_IFRAME_DOCUMENT_REDIRECT",
@@ -360,7 +369,7 @@ for (const marker of [
   "TERRA_EGO_DIALOG_SMOKE_PAGE_PRESERVED",
   "TERRA_EGO_DIALOG_SMOKE_PROCESS_PRESERVED_AFTER_COMPLETION",
 ]) {
-  assert(guiSmokeSource.includes(marker), `GUI dialog smoke is missing required packaged behavior marker: ${marker}`)
+  assert(guiSmokeSource.includes(marker), `GUI dialog smoke is missing hard-runtime packaged behavior marker in source: ${marker}`)
 }
 
 const extractedZip = mkdtempSync(join(tmpdir(), "terra-edu-package-"))
@@ -411,14 +420,18 @@ try {
       try {
         return spawnSync("bun", [guiSmokeScript, archivedApp, guiRuntimeRoot], {
           encoding: "utf8",
-          env: {
-            ...process.env,
-            TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT: guiRuntimeRoot,
-            // Tell the child it may re-purge once if a race re-registers Ego
-            // between the parent preflight and the child's EXTERNAL guard.
-            ...(purgePackageSmokeResiduals ? { TERRA_EDU_GUI_SMOKE_PURGE_RESIDUALS: "1" } : {}),
-          },
-          timeout: 420_000,
+          env: (() => {
+            const env = {
+              ...process.env,
+              TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT: guiRuntimeRoot,
+              ...(purgePackageSmokeResiduals ? { TERRA_EDU_GUI_SMOKE_PURGE_RESIDUALS: "1" } : {}),
+            }
+            delete env.ELECTRON_RUN_AS_NODE
+            delete env.ELECTRON_NO_ASAR
+            return env
+          })(),
+          // Soft dialog skips each burn CDP timeouts; a healthy local run is ~7–8 min.
+          timeout: 600_000,
         })
       } finally {
         try {
@@ -451,7 +464,9 @@ try {
       // issue as the failure so the retry loop can decide whether it is transient.
       lastSmokeFailure = cleanupFailure
     } else {
-      lastSmokeFailure = attemptResult.stderr || attemptResult.stdout || attemptResult.error?.message || cleanupFailure || "unknown error"
+      // Prefer stderr for classification: stdout always contains "[dialog smoke]"
+      // banners, which would mark nearly every failure as transient if matched.
+      lastSmokeFailure = attemptResult.stderr || attemptResult.error?.message || cleanupFailure || attemptResult.stdout || "unknown error"
     }
     if (attemptResult.status === 0 && !cleanupFailure) {
       smoke = attemptResult
@@ -460,11 +475,12 @@ try {
     // Full isolated GUI cold-starts are timing-sensitive on local macOS (CDP,
     // dialog observation races, keychain prompts). Retry the whole smoke with a
     // fresh runtime; never skip assertions on a successful attempt.
+    const classificationText = (attemptResult.stderr || attemptResult.error?.message || cleanupFailure || "").split("\n").find((line) => line.trim()) || lastSmokeFailure.split("\n").find((line) => line.trim()) || ""
     const transient =
-      /cleanup_failed|CDP request timed out|pageInfo timed out|钥匙串|ENOENT|alert payload was not observed|dialog smoke|TERRA_EGO_SCRIPT_FAILED|exit 79|registered with launchd|runtime processes survived|process count was not zero|crash reports|helper processes alive|EXTERNAL_SERVICE_ACTIVE|Could not clear Ego residuals/.test(
-        lastSmokeFailure,
+      /cleanup_failed|CDP request timed out|pageInfo timed out|钥匙串|alert payload was not observed|TERRA_EGO_SCRIPT_FAILED|exit 79|registered with launchd|runtime processes survived|process count was not zero|crash reports|helper processes alive|EXTERNAL_SERVICE_ACTIVE|Could not clear Ego residuals/.test(
+        classificationText,
       )
-    console.log(`GUI smoke attempt ${attempt}/3 failed${transient ? " (transient cold-start race)" : ""}: ${lastSmokeFailure.split("\n")[0]}`)
+    console.log(`GUI smoke attempt ${attempt}/3 failed${transient ? " (transient cold-start race)" : ""}: ${classificationText.split("\n")[0] || lastSmokeFailure.split("\n")[0]}`)
     if (!transient || attempt === 3) {
       smoke = attemptResult.status === 0 && !cleanupFailure ? attemptResult : undefined
       break

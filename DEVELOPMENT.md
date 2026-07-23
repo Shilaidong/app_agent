@@ -87,16 +87,22 @@ packages/desktop/dist/
 
 为了让客户和新开发电脑“开箱即用”，以下内容是有意提交的：
 
-- `packages/desktop/resources/private/opencode-go-key.txt`
-- `packages/desktop/resources/private/supabase-public.json`
+- `packages/desktop/resources/private/supabase-public.json`（Supabase anon/public 配置，设计上可公开）
 - `packages/desktop/resources/vendor/ego-lite/ego lite.app`
 
-这意味着当前仓库应当作为 private repo 维护。不要把它镜像到公开仓库；如果必须公开，需要先替换或移除私有运行配置，并重新设计 AI key / Supabase 授权方式。
+以下 **不入库**，打包前手工放到 `packages/desktop/resources/private/`（本地与 CI 各放一份），由 `electron-builder` `extraResources` 打进安装包：
+
+- `opencode-go-key.txt`
+- `ollama-cloud-key.txt`
+
+公开仓库历史里可能仍有旧的 `opencode-go-key.txt` 快照；新提交不得再包含它。额度与轮换由服务端侧管理。
 
 ## 不要提交什么
 
 这些内容应该保持本地化：
 
+- `packages/desktop/resources/private/opencode-go-key.txt`
+- `packages/desktop/resources/private/ollama-cloud-key.txt`
 - `node_modules/`
 - `packages/desktop/out/`
 - `packages/desktop/dist/`

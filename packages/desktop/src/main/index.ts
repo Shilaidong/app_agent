@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs"
+import { writeFile } from "node:fs/promises"
 import * as http from "node:http"
 import { createServer } from "node:net"
 import { homedir, tmpdir } from "node:os"
@@ -76,6 +77,7 @@ const APP_IDS: Record<string, string> = {
 }
 const TEST_ONBOARDING = process.env.OPENCODE_TEST_ONBOARDING === "1"
 const PACKAGE_SMOKE_CONFIG_FLAG = "--terra-package-smoke-write-opencode"
+const PACKAGE_SMOKE_CONFIG_ENV = "TERRA_EDU_PACKAGE_SMOKE_WRITE_OPENCODE"
 
 let logger: ReturnType<typeof initLogging>
 let mainWindow: BrowserWindow | null = null
@@ -89,8 +91,8 @@ const pendingDeepLinks: string[] = []
 async function runPackageSmokeConfigProbe() {
   if (!app.isPackaged) throw new Error("The package smoke config probe is available only in a packaged app.")
 
-  const workspace = resolve(process.env.TERRA_EDU_PACKAGE_SMOKE_WORKSPACE || "")
-  const runtimeRoot = resolve(process.env.TERRA_EDU_PACKAGE_SMOKE_RUNTIME_ROOT || "")
+  const workspace = realpathSync(resolve(process.env.TERRA_EDU_PACKAGE_SMOKE_WORKSPACE || ""))
+  const runtimeRoot = realpathSync(resolve(process.env.TERRA_EDU_PACKAGE_SMOKE_RUNTIME_ROOT || ""))
   const temporaryRoot = realpathSync(tmpdir())
   if (
     !runtimeRoot.startsWith(join(temporaryRoot, "terra-edu-direct-dialog-runtime-")) ||
@@ -104,6 +106,9 @@ async function runPackageSmokeConfigProbe() {
     egoRuntimeRoot: runtimeRoot,
     egoBrowserSingleLaunchSentinel: join(runtimeRoot, "single-launch.claim"),
   })
+  // Packaged macOS GUI binaries often do not attach stdout to the parent spawn.
+  // Persist a workspace sentinel so package smoke can confirm without relying on pipes.
+  await writeFile(join(workspace, "03_state/package_smoke_config_written"), "TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN\n")
   process.stdout.write("TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN\n")
 }
 
@@ -1025,16 +1030,23 @@ const main = Effect.gen(function* () {
   overlay?.close()
 })
 
-if (process.argv.includes(PACKAGE_SMOKE_CONFIG_FLAG)) {
+// Electron 41+ rejects unknown Chromium CLI switches before JS runs ("bad option").
+// Packaged smoke therefore triggers via env; argv remains supported for older probes.
+if (
+  process.env[PACKAGE_SMOKE_CONFIG_ENV] === "1" ||
+  process.argv.includes(PACKAGE_SMOKE_CONFIG_FLAG)
+) {
   void app.whenReady()
     .then(runPackageSmokeConfigProbe)
-    .then(
-      () => app.exit(0),
-      (error) => {
-        process.stderr.write(`TERRA_EDU_PACKAGE_SMOKE_CONFIG_FAILED: ${error instanceof Error ? error.message : String(error)}\n`)
-        app.exit(1)
-      },
-    )
+    .then(async () => {
+      // Give stdout/sentinel writes a tick before quitting; macOS GUI apps often drop pipes.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      app.exit(0)
+    })
+    .catch((error) => {
+      process.stderr.write(`TERRA_EDU_PACKAGE_SMOKE_CONFIG_FAILED: ${error instanceof Error ? error.message : String(error)}\n`)
+      app.exit(1)
+    })
 } else {
   Effect.runFork(main)
 }

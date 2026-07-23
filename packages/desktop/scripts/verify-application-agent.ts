@@ -215,12 +215,22 @@ assert(source.includes("completeTaskSpace"), "ego-browser completion SOP is miss
 assert(source.includes("completeTaskSpace(taskSpaceId, { keep: true })") && source.includes("一律不得使用 keep:false"), "Application Agent must preserve the completed Ego window and forbid the crashing keep:false close path")
 assert(source.includes("只有顾问明确回复继续") && source.includes("await takeOverTaskSpace(taskSpaceId)"), "ego-browser SOP must require explicit consultant consent before takeover")
 assert(source.includes("绝不自动抢回控制"), "ego-browser SOP must forbid automatic task-space takeover")
-assert(source.includes("type 为 alert 时使用 accept:true"), "ego-browser SOP must accept validation alerts before rescanning")
-assert(source.includes("type 为 beforeunload 时一律 accept:false"), "ego-browser SOP must cancel beforeunload dialogs")
-assert(source.includes("唯一例外是 Page.handleJavaScriptDialog"), "ego-browser SOP must stop all other actions while a native dialog is open")
+assert(source.includes("type 为 alert 时") && source.includes("dismiss_js_alert") && source.includes("pendingJsAlert"), "ego-browser SOP must route validation alerts through record_blocker pendingJsAlert then dismiss_js_alert")
+assert(source.includes("type 为 beforeunload 时") && source.includes("确认 URL 未变"), "ego-browser SOP must end the round on beforeunload and confirm the URL is unchanged on the next pageInfo-only round")
+assert(source.includes("不得再调用 snapshotText、captureScreenshot、js、点击/输入/上传/导航") || source.includes("也不得在本回合死等 Page.handleJavaScriptDialog"), "ego-browser SOP must stop page actions while a native dialog is open")
+assert(!ipcSource.includes("application-agent:dismiss-js-alert") && !ipcSource.includes("dismissJsAlertViaAx"), "Half-finished dismiss-js-alert IPC must be removed; AX dismiss is CUA-only")
 assert(source.includes("必须点击页面上真实可见的 Save / Continue") && source.includes("该点击必须包在 observePageAction 里"), "ego-browser SOP must require a real Save/Continue click after verified page completion")
-assert(source.includes("Major is required.") && source.includes("严禁对“确定/OK”做 snapshot click"), "ego-browser SOP must dismiss native validation alerts via CDP instead of clicking 确定")
-assert(source.includes("任何可能改变页面结构或可见内容的动作都会使旧复查失效"), "ego-browser SOP must invalidate prior form checks after dynamic changes")
+assert(source.includes("Major is required.") && source.includes("严禁对裸字符串「确定/OK」做 snapshot click") && source.includes("dismiss_js_alert"), "ego-browser SOP must dismiss native validation alerts via dismiss_js_alert outside Ego CDP")
+assert(source.includes("先填完再查") && source.includes("Academic/Add Institution") && source.includes("Employment/Internship") && source.includes("Research/Publications") && source.includes("未填完禁止 Save"), "ego-browser SOP must fill stable fields first and hard-block Save on Academic/Employment/Research branch gaps")
+assert(source.includes("JS_ALERT_AX_JXA") && source.includes("dismissJsAlertViaAx"), "Generated tools must embed the Terra JS-alert Accessibility helper")
+assert(source.includes('"dismiss_js_alert"') && source.includes("PENDING_JS_ALERT_REQUIRED"), "CUA must expose dismiss_js_alert and require pendingJsAlert")
+assert(source.includes("不要 handoff、不要 takeOver") || source.includes("Do not hand off or takeOver for validation alerts"), "Validation alerts must not hand off to the consultant")
+assert(existsSync(join(root, "src/main/js-alert-ax.ts")), "Desktop must ship js-alert-ax helper")
+const jsAlertAxSource = readFileSync(join(root, "src/main/js-alert-ax.ts"), "utf8")
+assert(jsAlertAxSource.includes("Only Terra-managed Ego Lite") && !jsAlertAxSource.includes("Fallback: any process"), "JS-alert AX must target Ego Lite only with no all-process fallback scan")
+const jsAlertAxTestSource = readFileSync(join(root, "src/main/js-alert-ax.test.ts"), "utf8")
+assert(jsAlertAxTestSource.includes("Only Terra-managed Ego Lite") && !jsAlertAxTestSource.includes("osascript") && !jsAlertAxTestSource.includes("await dismissJsAlertViaAx"), "Unit tests must shape-check AX source and must not invoke live osascript dismiss")
+assert(source.includes("任何可能改变页面结构或可见内容的动作都会使旧复查失效") || source.includes("分支点"), "ego-browser SOP must invalidate prior form checks after dynamic changes")
 assert(source.includes("writeEgoBrowserSkill"), "Workspace generator must install bundled ego-browser skill")
 assert(source.includes("readAuthoritativeEgoBrowserResource") && source.includes("officialSkill.sha256"), "Workspace generator must load and hash-check the current vendored Ego skill")
 assert(source.includes("TERRA_POLICY.md"), "Generated upstream Ego skill must point to a separate Terra policy")
@@ -246,10 +256,11 @@ assert(source.includes("observePageAction") && source.includes("先启动动作�
 assert(source.includes("pageInfoTimeoutMs = 1500") && source.includes("settleMs = 2000") && source.includes("pageInfo produced no bounded post-action observation"), "Application Agent must bound pageInfo calls and preserve a post-action quiet window")
 assert(source.includes("const actionPromise = Promise.resolve()") && source.includes("Promise.resolve().then(() => pageInfo())"), "Application Agent must start the page-changing action before concurrently polling pageInfo")
 assert(source.includes("return { kind: 'dialog', info: lastInfo, actionPromise }"), "Application Agent must return a detected Ego dialog without waiting for the blocked iframe action")
-assert(source.includes("Page.handleJavaScriptDialog") && source.includes("dialog.type === 'alert'") && source.includes("dialog.type === 'beforeunload'"), "Application Agent must handle Ego-reported alerts and beforeunload dialogs directly through CDP")
+assert(opencodeSource.includes("Do not Page.handleJavaScriptDialog here") && opencodeSource.includes("never CDP accept") && opencodeSource.includes("confirm URL unchanged"), "kind:dialog branch must end the round without CDP accept and document beforeunload URL confirmation")
+assert(!opencodeSource.includes("accept: true") && !opencodeSource.includes("accept:true"), "application-agent-opencode must not CDP-accept any dialog")
 assert(source.includes("所有 confirm 或 prompt 都必须 handOffTaskSpace") && source.includes("dialogUrl") && source.includes("dialogFrameId"), "Application Agent must hand off confirm/prompt and keep iframe dialog identity separate from the top-level URL")
 assert(source.includes("takeoverPending: true") && source.includes("resumeAuthorizedAt") && source.includes("completed authorized ego-browser takeover"), "Consultant-authorized task-space recovery must remain pending until the first post-takeover observation")
-assert(source.includes("不得刷新、重开链接、进入 iframe URL、用 JS 直接 submit 或重复动作"), "Unknown browser outcomes must not trigger destructive recovery")
+assert(source.includes("不得刷新、重开链接、进入 iframe URL、用 JS 直接 submit") && source.includes("重复动作"), "Unknown browser outcomes must not trigger destructive recovery")
 assert(!source.includes("export const native_dialog") && !source.includes("application-agent_native_dialog") && !source.includes("TERRA_EGO_NATIVE_DIALOG"), "Application Agent must not expose the retired native Accessibility dialog sidecar")
 assert(source.includes("Terra-Edu material review is pending"), "Terra ego-browser wrapper must block browser startup before material review")
 assert(source.includes("PATH=\"$PWD/.opencode/bin:$PATH\" ego-browser nodejs"), "Prompts/tools must invoke Terra ego-browser wrapper before PATH fallback")
@@ -364,7 +375,7 @@ assert(source.includes('task: "deny"') && source.includes('"application-agent_st
 assert(source.includes("preparationCompleteAt"), "Supplemental content must be applied before a refill can start")
 assert(source.includes("freshTaskSpaceAuthorizedBy: \"consultant_refill_click\""), "Refill attempts must persist explicit consultant authorization for a fresh Ego space")
 assert(source.includes("03_state/filling_attempts.json"), "Refill attempts must have a durable lineage record")
-assert(mainSource.includes("--terra-package-smoke-write-opencode") && mainSource.includes("TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN") && mainSource.includes("runPackageSmokeConfigProbe"), "Packaged main process must expose the isolated no-window config-generation smoke probe")
+assert(mainSource.includes("--terra-package-smoke-write-opencode") && mainSource.includes("TERRA_EDU_PACKAGE_SMOKE_WRITE_OPENCODE") && mainSource.includes("TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN") && mainSource.includes("runPackageSmokeConfigProbe"), "Packaged main process must expose the isolated no-window config-generation smoke probe")
 assert(prebuildSource.includes("MODELS_DEV_API_JSON"), "Desktop prebuild must use a local models.dev snapshot")
 assert(prebuildSource.includes("models-api.json"), "Desktop prebuild must point MODELS_DEV_API_JSON to the vendored fixture")
 const qwenCatalogModel = modelsCatalog["opencode-go"]?.models?.["qwen3.7-plus"]
@@ -382,7 +393,9 @@ assert(packageVerifySource.includes("terra-paddleocr") && packageVerifySource.in
 assert(packageVerifySource.includes("--no-default-browser-check") && packageVerifySource.includes("--no-first-run"), "package verification must inspect first-run/default-browser protections")
 assert(packageVerifySource.includes("codesign") && packageVerifySource.includes("unzip") && packageVerifySource.includes("ditto"), "package verification must inspect both app and final ZIP archive")
 assert(packageVerifySource.includes('const guiSmokeScript = join(root, "scripts/verify-application-agent-gui-dialog.ts")') && packageVerifySource.includes('[guiSmokeScript, archivedApp, guiRuntimeRoot]') && packageVerifySource.includes("Final ZIP app post-smoke code-signature verification"), "package verification must run the GUI smoke against the app extracted from the final ZIP")
-assert(guiDialogVerifySource.includes("Page.handleJavaScriptDialog"), "GUI dialog smoke must exercise the native dialog protocol")
+assert(guiDialogVerifySource.includes("TERRA_EGO_DIALOG_SMOKE_ALERT_OBSERVED") && guiDialogVerifySource.includes("never Page.handleJavaScriptDialog") && !guiDialogVerifySource.includes("accept: true") && !guiDialogVerifySource.includes("accept:true"), "GUI dialog smoke must observe alerts and end the round without CDP accept:true")
+assert(guiDialogVerifySource.includes("TERRA_EGO_DIALOG_SMOKE_BEFOREUNLOAD_OBSERVED") && guiDialogVerifySource.includes("never CDP accept/cancel") && guiDialogVerifySource.includes("pageInfo-only round confirms URL unchanged"), "GUI dialog smoke must end beforeunload rounds without CDP and confirm URL on the next pageInfo-only round")
+assert(guiDialogVerifySource.includes("Page.handleJavaScriptDialog") && guiDialogVerifySource.includes("Smoke-only fixture teardown") && guiDialogVerifySource.includes("accept: false"), "GUI dialog smoke may use CDP only for modeled consultant/fixture teardown, never Agent alert handling")
 assert(guiDialogVerifySource.includes("beforeunload") && guiDialogVerifySource.includes("dialog-frame.html") && guiDialogVerifySource.includes("unknown confirmation"), "GUI dialog smoke must cover beforeunload, a real same-origin iframe alert, and an unknown confirmation")
 assert(guiDialogVerifySource.includes("TERRA_EGO_DIALOG_SMOKE_COLD_START") && guiDialogVerifySource.includes("cold-start fixture was contaminated") && guiDialogVerifySource.includes("product wrapper did not create Ego first-run state"), "GUI dialog smoke must cold-start the managed Ego runtime and onboarding state through the packaged product wrapper")
 assert(guiDialogVerifySource.includes("TERRA_EGO_VISUAL_SCREENSHOT_VERIFIED") && guiDialogVerifySource.includes("captureScreenshot") && guiDialogVerifySource.includes("valid PNG"), "GUI dialog smoke must preserve the direct Ego visual screenshot workflow")
@@ -439,7 +452,7 @@ assert(
     !guiDialogVerifySource.includes("keep: false"),
   "GUI dialog smoke must avoid Ego NSWindow teardown and kill only its exact disposable runtime",
 )
-assert(guiDialogVerifySource.includes("--terra-package-smoke-write-opencode") && guiDialogVerifySource.includes("TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN") && !guiDialogVerifySource.includes('from "../src/main/application-agent-opencode"'), "GUI dialog smoke must execute the config generator from the packaged app instead of repository source")
+assert(guiDialogVerifySource.includes("TERRA_EDU_PACKAGE_SMOKE_WRITE_OPENCODE") && guiDialogVerifySource.includes("TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN") && guiDialogVerifySource.includes("spawnSync(appExecutable, []") && !guiDialogVerifySource.includes('from "../src/main/application-agent-opencode"'), "GUI dialog smoke must execute the config generator from the packaged app via env (Electron rejects unknown CLI switches)")
 assert(guiDialogVerifySource.includes("stopSmokeLaunchedApps") && guiDialogVerifySource.includes("existingBundledAppPids") && guiDialogVerifySource.includes("sourceSignature") && guiDialogVerifySource.includes("runtimeSignature"), "GUI dialog smoke must preserve the packaged Ego source, verify the wrapper-created runtime, and clean up only the isolated runtime")
 assert(guiDialogVerifySource.includes("originalMainPid") && guiDialogVerifySource.includes("singleLaunchClaim") && guiDialogVerifySource.includes("requireOriginalMainProcess"), "GUI dialog smoke must prove all rounds remain on its single original Ego process")
 assert(packageVerifySource.includes("TERRA_EDU_GUI_SMOKE_RUNTIME_ROOT") && packageVerifySource.includes("killExactRuntimeProcesses") && packageVerifySource.includes("newStableEgoCrashReports") && packageVerifySource.includes("waitForEgoBrowserLaunchdServiceRemoval"), "The package verifier must own cleanup and crash detection even when the GUI child times out")
@@ -473,8 +486,8 @@ assert(source.includes("complete_ego_task"), "ego-browser completion action is m
 assert(source.includes("findExistingApplicationTask"), "Duplicate application task guard is missing")
 assert(source.includes("reusedExisting"), "Duplicate application task reuse marker is missing")
 assert(source.includes("platformLastOpenedAt"), "Application platform open debounce is missing")
-assert(source.includes("beforeunload") && source.includes("accept:false"), "CUA beforeunload handling is missing")
-assert(source.includes("下一回合先确认 URL 未变化"), "CUA beforeunload handling must require a fresh URL-preservation check")
+assert(source.includes("beforeunload") && source.includes("确认 URL 未变") && !opencodeSource.includes("accept:false") && !opencodeSource.includes("accept: false"), "CUA beforeunload handling must end the round and confirm URL unchanged without CDP accept/cancel")
+assert(source.includes("下一回合确认 URL 未变") || source.includes("下一回合先确认 URL 未变化") || source.includes("下一独立 heredoc 只 pageInfo，确认 URL 未变") || source.includes("confirm URL unchanged"), "CUA beforeunload handling must require a fresh URL-preservation check")
 assert(source.includes("UNVERIFIED_SAVE_RECORDED"), "record_saved must not mark a page as verified saved")
 assert(source.includes("remainingRequiredFields") && source.includes("UNVERIFIED_DYNAMIC_FORM"), "Dynamic-form verification must gate verified saves")
 assert(source.includes("DYNAMIC_FORM_OBSERVATION_REQUIRED"), "Dynamic-form verification must require a matching fresh observation")
@@ -506,13 +519,16 @@ assert(
     source.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") &&
     source.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") &&
     source.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") &&
+    source.includes("TERRA_EGO_ALERT_MUST_END_ROUND") &&
+    source.includes('dialog\\\\.message"') &&
+    !source.includes("dialog\\\\.message|kind:") &&
     source.includes("completeTaskSpace 只能使用可验证的字面量") &&
     source.includes("EGO_NODE_STDIN_COMPACT") &&
     source.includes('"$HELPER" "$@" <"$EGO_NODE_STDIN"') &&
     !opencodeSource.includes("/usr/bin/sandbox-exec") &&
     !opencodeSource.includes("NODE_OPTIONS=") &&
     !opencodeSource.includes("TERRA_EGO_NODE_PERMISSION_"),
-  "The managed Ego wrapper must reject destructive closure, scripted submit, bare Save clicks, and native-alert OK clicks while preserving a direct pinned-helper execution path",
+  "The managed Ego wrapper must reject destructive closure, scripted submit, bare Save clicks, native-alert OK clicks, and same-round fill-after-dialog while preserving a direct pinned-helper execution path",
 )
 assert(
   opencodeSource.includes("TERRA_EGO_NODE_CAPABILITY_DENIED") &&

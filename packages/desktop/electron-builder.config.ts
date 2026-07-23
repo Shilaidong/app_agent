@@ -105,7 +105,7 @@ const getBase = (): Configuration => ({
     output: "dist",
     buildResources: "resources",
   },
-  files: ["out/**/*", "resources/**/*", "!resources/vendor/**"],
+  files: ["out/**/*", "resources/**/*", "!resources/vendor/**", "!resources/private/**"],
   extraResources: [
     {
       from: "resources/private/",

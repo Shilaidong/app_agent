@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
-import { writeOpenCodeConfig } from "../src/main/application-agent-opencode"
+import { EGO_OBSERVE_PAGE_ACTION_SOURCE, writeOpenCodeConfig } from "../src/main/application-agent-opencode"
 import { readEgoRuntimeLock } from "./ego-runtime-lock"
 
 const requestedWorkspace = process.env.APPLICATION_AGENT_WORKSPACE?.trim()
@@ -291,7 +291,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_TASKSPACE_CLOSE") && wrapperSource.includes("EGO_NODE_STDIN_COMPACT"), "Workspace wrapper must inspect nodejs stdin before launching Ego.")
   assert(wrapperSource.includes("completeTaskSpace 只能使用可验证的字面量") && wrapperSource.includes("keep[[:space:]]*:[[:space:]]*true"), "Workspace wrapper must allow only a mechanically verified literal keep:true completion call.")
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_PAGE_RELOAD") && wrapperSource.includes("grep -Eiq 'closeTab'") && wrapperSource.includes("grep -Eiq 'reload'"), "Workspace wrapper must reject automatic reloads and every direct or aliased programmatic tab close before Ego starts.")
-  assert(wrapperSource.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") && wrapperSource.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") && wrapperSource.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED"), "Workspace wrapper must reject scripted submit, bare Save/Continue clicks, and native-alert OK clicks.")
+  assert(wrapperSource.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") && wrapperSource.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") && wrapperSource.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") && wrapperSource.includes("TERRA_EGO_ALERT_MUST_END_ROUND"), "Workspace wrapper must reject scripted submit, bare Save/Continue clicks, native-alert OK clicks, and same-round fill-after-dialog.")
   assert(wrapperSource.includes('"$HELPER" "$@" <"$EGO_NODE_STDIN"'), "Workspace wrapper must forward the model-authored nodejs source directly to the pinned Ego helper.")
   assert(!wrapperSource.includes("/usr/bin/sandbox-exec") && !wrapperSource.includes("TERRA_EGO_NODE_PERMISSION_"), "Workspace wrapper must not add a sandbox or permission broker around Ego's independent browser service.")
 
@@ -335,17 +335,18 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(egoSkill.includes("return { kind: 'dialog', info: lastInfo, actionPromise }"), "ego-browser skill must expose an iframe dialog while the triggering action remains pending.")
   assert(terraPolicy.includes("所有 confirm 或 prompt") && terraPolicy.includes("不得由 Agent 猜测"), "Terra policy must hand off every confirm and prompt without guessing.")
   assert(terraPolicy.includes("dialogUrl") && terraPolicy.includes("dialogFrameId"), "Terra policy must keep iframe dialog identity separate from the top-level current URL.")
-  assert(terraPolicy.includes("pageInfo() 返回 dialog") && terraPolicy.includes("Page.handleJavaScriptDialog") && terraPolicy.includes("iframe 原生 alert 会阻塞触发它的 click/save Promise"), "Terra policy must use direct Ego pageInfo/CDP handling for iframe dialogs.")
+  assert(terraPolicy.includes("pageInfo() 返回 dialog") && terraPolicy.includes("Page.handleJavaScriptDialog") && terraPolicy.includes("iframe 原生 alert 会阻塞触发它的 click/save Promise") && terraPolicy.includes("pendingJsAlert") && terraPolicy.includes("确认 URL 未变"), "Terra policy must observe dialogs, forbid in-round CDP accept, require pendingJsAlert for AX dismiss, and document beforeunload URL confirmation.")
   assert(terraPolicy.includes("结果只是“未决”，不是已经失败") && terraPolicy.includes("此时不得调用 application-agent_cua record_failure、不得交接顾问") && terraPolicy.includes("若属于 observePageAction unknown，必须严格按上一条立即结束") && terraPolicy.includes("只有该新观察明确证明动作失败或需要人工处理后，才可记录失败或交接"), "Terra policy must treat unknown actions as pending until a separate pageInfo-only observation proves failure or handoff is necessary.")
   assert(terraPolicy.includes("helper 回合退出时自动消掉仍未处理的弹窗") && terraPolicy.includes("只在初次导航期间临时替换无选择分支的 window.alert") && terraPolicy.includes("它绝不替换 confirm、prompt 或 beforeunload"), "Terra policy must reflect the observed load-alert detach behavior and limit interception to information-only initial alerts.")
   assert(terraPolicy.includes("captureScreenshot('05_screenshots/<unique-name>.png')") && terraPolicy.includes("OpenCode `read` on that exact") && terraPolicy.includes("image/png"), "Terra policy must require explicit workspace screenshots followed by exact OpenCode image reads.")
   assert(terraPolicy.includes("fillInput+Tab+readback") && terraPolicy.includes("click+snapshot+click-option+reobserve") && terraPolicy.includes("Vue internals"), "Terra policy must require real generic interactions and ban framework-internal writes.")
-  assert(terraPolicy.includes("必须点击页面上真实可见的 Save / Continue") && terraPolicy.includes("Major is required.") && terraPolicy.includes("Page.handleJavaScriptDialog accept:true"), "Terra policy must require real Save/Continue clicks and CDP dismissal of native validation alerts.")
+  assert(terraPolicy.includes("必须点击页面上真实可见的 Save / Continue") && terraPolicy.includes("Major is required.") && terraPolicy.includes("dismiss_js_alert") && terraPolicy.includes("先填完再查") && terraPolicy.includes("未填完禁止 Save"), "Terra policy must require real Save/Continue clicks, fill-then-verify, Academic hard-block, and dismiss_js_alert for native alerts.")
   assert(terraPolicy.includes("completeTaskSpace(taskSpaceId, { keep: true })") && terraPolicy.includes("一律不得使用 keep:false"), "Terra policy must preserve completed Ego windows instead of exercising the crashing native close path.")
   const cuaSkill = readText(join(workspace, ".opencode/skills/cua-application-filling/SKILL.md"))
   assert(cuaSkill.includes("绝不自动抢回控制"), "CUA skill must forbid automatic task-space takeover.")
-  assert(cuaSkill.includes("Page.handleJavaScriptDialog"), "CUA skill must guide native dialog handling.")
-  assert(cuaSkill.includes("必须点击真实可见的 Save / Continue") && cuaSkill.includes("Major is required."), "CUA skill must require Save/Continue clicks and native-alert CDP handling after page completion.")
+  assert(cuaSkill.includes("dismiss_js_alert") && (cuaSkill.includes("Accessibility") || cuaSkill.includes("辅助功能") || cuaSkill.includes("结束回合")), "CUA skill must guide dismiss_js_alert via Accessibility outside Ego CDP.")
+  assert(cuaSkill.includes("必须点击真实可见的 Save / Continue") && cuaSkill.includes("Major is required.") && cuaSkill.includes("Academic/Add Institution") && cuaSkill.includes("先填完再查") && cuaSkill.includes("dismiss_js_alert"), "CUA skill must require Save/Continue, fill-then-verify, Academic hotspots, and dismiss_js_alert.")
+  assert(terraPolicy.includes("不要 handoff、不要 takeOver") || cuaSkill.includes("不要 handoff/takeOver") || cuaSkill.includes("不要为校验 alert 交接顾问"), "Validation alerts must not hand off to the consultant.")
   assert(cuaSkill.includes("observePageAction") && cuaSkill.includes("先启动动作但不 await"), "CUA skill must observe iframe dialogs while the triggering action is still pending.")
 
   const prompt = readText(join(workspace, ".opencode/prompts/application-agent.md"))
@@ -354,9 +355,11 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(!prompt.includes("申请平台密码："), "Generated prompt must not collect an application-platform password.")
 
   const tools = readText(join(workspace, ".opencode/tools/application-agent.ts"))
-  for (const action of ["prepare_ego_task", "retire_and_rebind_ego_task", "record_observation", "record_field_verified", "record_select_verified", "record_dynamic_form_verified", "begin_save_attempt", "record_save_verified", "record_blocker", "handoff_to_consultant", "complete_ego_task"]) {
+  for (const action of ["prepare_ego_task", "retire_and_rebind_ego_task", "record_observation", "record_field_verified", "record_select_verified", "record_dynamic_form_verified", "begin_save_attempt", "record_save_verified", "record_blocker", "dismiss_js_alert", "handoff_to_consultant", "complete_ego_task"]) {
     assert(tools.includes(action), `Workspace CUA coordination tool missing action: ${action}`)
   }
+  assert(tools.includes("PENDING_JS_ALERT_REQUIRED") && tools.includes("pendingJsAlert") && tools.includes("Only Terra-managed Ego Lite") && !tools.includes("Fallback: any process"), "Generated tools must require pendingJsAlert and embed Ego-only AX dismiss without all-process fallback.")
+  assert(!tools.includes("accept: true") && !tools.includes("accept:true"), "Generated tools must not CDP-accept dialogs.")
   assert(tools.includes("UNVERIFIED_SAVE_RECORDED"), "record_saved must not be treated as a verified save.")
   assert(tools.includes("browserBackend = \"ego-browser\""), "Workspace CUA tool must record the ego-browser backend.")
   assert(!tools.includes("export const native_dialog") && !tools.includes("application-agent_native_dialog") && !tools.includes("TERRA_EGO_NATIVE_DIALOG"), "Workspace tools must not expose the retired native Accessibility dialog sidecar.")
@@ -558,7 +561,10 @@ async function verifyCuaStateTransitions(workspace: string) {
     { input: "await click('@save', { label: 'Save' })\n", marker: "TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION" },
     { input: "await click('@continue', { label: 'Continue' })\n", marker: "TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION" },
     { input: "await click('确定')\n", marker: "TERRA_EGO_NATIVE_ALERT_CLICK_DENIED" },
-    { input: "await click('@ok', { label: 'OK' })\n", marker: "TERRA_EGO_NATIVE_ALERT_CLICK_DENIED" },
+    { input: "await click('OK')\n", marker: "TERRA_EGO_NATIVE_ALERT_CLICK_DENIED" },
+    { input: "cliLog(info.dialog.message)\nawait fillInput('@major', 'Accounting')\n", marker: "TERRA_EGO_ALERT_MUST_END_ROUND" },
+    { input: "cliLog(info.dialog.message)\nawait uploadFile('@resume', '/tmp/resume.pdf')\n", marker: "TERRA_EGO_ALERT_MUST_END_ROUND" },
+    { input: "const result = await observePageAction(() => click('@save'))\nif (result.kind === 'dialog') cliLog(result.info.dialog.message)\nawait uploadFile('@resume', '/tmp/resume.pdf')\n", marker: "TERRA_EGO_ALERT_MUST_END_ROUND" },
   ].forEach(({ input, marker }) => {
     const result = spawnSync(wrapper, ["nodejs"], { cwd: workspace, encoding: "utf8", input })
     assert(result.status === 81 && result.stderr.includes(marker), `Wrapper must reject unsafe save/dialog shortcuts before launching Ego: ${input}`)
@@ -572,15 +578,19 @@ async function verifyCuaStateTransitions(workspace: string) {
     observedSaveGate.status !== 81 || !observedSaveGate.stderr.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION"),
     "Wrapper must not apply TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION when observePageAction is present in the same heredoc",
   )
-  const cdpAlertGate = spawnSync(wrapper, ["nodejs"], {
-    cwd: workspace,
-    encoding: "utf8",
-    input: "await click('确定')\nawait cdp('Page.handleJavaScriptDialog', { accept: true })\n",
+  ;[
+    "await observePageAction(() => click('@ok', { label: 'OK' }))\n",
+    "await observePageAction(() => click('@confirm', { label: '确定' }))\n",
+    "const info = await pageInfo()\nif (info.dialog) return\nawait uploadFile('@resume', '/tmp/resume.pdf')\n",
+    // Canonical observer source contains `kind: 'dialog'` but not dialog.message; upload must stay allowed.
+    `${EGO_OBSERVE_PAGE_ACTION_SOURCE}\nawait uploadFile('@resume', '/tmp/resume.pdf')\n`,
+  ].forEach((input) => {
+    const result = spawnSync(wrapper, ["nodejs"], { cwd: workspace, encoding: "utf8", input })
+    assert(
+      result.status !== 81 || (!result.stderr.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") && !result.stderr.includes("TERRA_EGO_ALERT_MUST_END_ROUND")),
+      `Wrapper must allow observePageAction+@selector OK clicks, bare info.dialog guards, and canonical observer+uploadFile: ${input.slice(0, 120)}`,
+    )
   })
-  assert(
-    cdpAlertGate.status !== 81 || !cdpAlertGate.stderr.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED"),
-    "Wrapper must not apply TERRA_EGO_NATIVE_ALERT_CLICK_DENIED when handleJavaScriptDialog is present in the same heredoc",
-  )
   ;[
     "const fs = require('fs')\nfs.writeFileSync('03_state/x.json', '{}')\n",
     'const cp = require("child_process")\n',
@@ -636,13 +646,51 @@ async function verifyCuaStateTransitions(workspace: string) {
         message: "Fixture validation alert\n- Date must use dd/mm/yyyy",
       },
     }),
-    detail: "Direct Ego Page.handleJavaScriptDialog acknowledged the single-button validation alert.",
+    detail: "Initial navigation load-time alert text captured through direct Ego CDP binding (kind:alerts).",
     blockerDisposition: "resolved",
   })
-  assert(String(resolvedDialog).includes("已记录已解决"), "A directly handled Ego dialog must flow through resolved blocker recording.")
+  assert(String(resolvedDialog).includes("已记录已解决"), "A resolved load-time alert audit must flow through resolved blocker recording without pendingJsAlert.")
   const resolvedProgress = readRecord(join(workspace, "03_state/application_progress.json"))
   assert(Array.isArray(resolvedProgress.blockedDialogs), "Resolved direct-Ego dialogs must be retained in the audit state.")
   assert(JSON.stringify(resolvedProgress.blockedDialogs).includes("Date must use dd/mm/yyyy"), "Resolved blocker evidence must preserve the complete validation message.")
+  assert(!resolvedProgress.egoBrowser?.pendingJsAlert, "kind:alerts-style record_blocker without dialogType:alert must not create pendingJsAlert.")
+
+  const dismissWithoutPending = await executeCua({
+    action: "dismiss_js_alert",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "attempt without pendingJsAlert",
+  })
+  assert(String(dismissWithoutPending).includes("PENDING_JS_ALERT_REQUIRED"), "dismiss_js_alert must reject when progress has no pendingJsAlert.")
+
+  const pendingAlert = await executeCua({
+    action: "record_blocker",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    dialogType: "alert",
+    dialogUrl: "https://fixture.example/frame",
+    dialogFrameId: "fixture-frame",
+    evidence: "Major is required.",
+    detail: "observePageAction returned kind:dialog alert",
+    blockerDisposition: "resolved",
+  })
+  assert(String(pendingAlert).includes("pendingJsAlert") && String(pendingAlert).includes("dismiss_js_alert"), "record_blocker(dialogType: alert) must write pendingJsAlert and instruct dismiss_js_alert.")
+  assert(readRecord(join(workspace, "03_state/application_progress.json")).egoBrowser?.pendingJsAlert?.message === "Major is required.", "pendingJsAlert must store the observed alert message.")
+
+  const dismissWithoutEgo = await executeCua({
+    action: "dismiss_js_alert",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "CI environment has no Ego Lite alert dialog",
+  })
+  const dismissWithoutEgoText = String(dismissWithoutEgo)
+  assert(dismissWithoutEgoText.includes("ego_exit_fallback") || dismissWithoutEgoText.includes("no_alert_found") || dismissWithoutEgoText.includes("accessibility_permission_required"), "Without Ego Lite, dismiss_js_alert must return no_alert_found / ego_exit_fallback and must not claim a successful click.")
+  assert(!dismissWithoutEgoText.includes('"dismissed": true') && !dismissWithoutEgoText.includes('"dismissed":true'), "CI dismiss_js_alert must not report a successful AX click when no Ego alert is present.")
+  const afterDismiss = readRecord(join(workspace, "03_state/application_progress.json"))
+  assert(Array.isArray(afterDismiss.dismissedJsAlerts) && afterDismiss.dismissedJsAlerts.some((item: unknown) => isRecord(item) && item.dismissed === false), "dismiss_js_alert attempts must be audited even when no alert is found.")
 
   const resumeWithoutHandoff = await executeCua({ action: "resume_ego", taskSpaceId: "101", consultantConfirmed: true })
   assert(String(resumeWithoutHandoff).includes("BROWSER_HANDOFF_REQUIRED"), "resume_ego must reject a task space that was not handed off to the consultant.")
@@ -1639,7 +1687,8 @@ async function verifyCuaStateTransitions(workspace: string) {
   assert(String(freshDirectNavigation).includes("navigateInitialPageCapturingAlerts") && String(freshDirectNavigation).includes("Page.addScriptToEvaluateOnNewDocument") && String(freshDirectNavigation).includes("Runtime.addBinding"), "Initial school navigation must capture information-only load alerts on the same selected target through direct Ego CDP.")
   assert(!String(freshDirectNavigation).includes("openOrReuseTab"), "Initial school navigation must not create a second target whose load-time dialog would be invisible from the selected blank tab.")
   assert(String(freshDirectNavigation).includes("globalThis.alert=wrapped") && !String(freshDirectNavigation).includes("globalThis.confirm=") && !String(freshDirectNavigation).includes("globalThis.prompt="), "Initial navigation must auto-accept only alert while preserving advisor choice for confirm and prompt.")
-  assert(String(freshDirectNavigation).includes("Page.handleJavaScriptDialog"), "Initial navigation must still handle a dialog that was already visible before navigation.")
+  assert(String(freshDirectNavigation).includes("Do not Page.handleJavaScriptDialog here") && String(freshDirectNavigation).includes("never CDP accept") && String(freshDirectNavigation).includes("confirm URL unchanged"), "kind:dialog branch must end the round without CDP accept and document beforeunload URL confirmation.")
+  assert(!String(freshDirectNavigation).includes("accept: true") && !String(freshDirectNavigation).includes("accept:true"), "kind:dialog branch must not include accept:true.")
   assert(String(freshDirectNavigation).includes("kind: 'dialog', dialog, capturedAlerts: navigation.capturedAlerts, cleanupError: navigation.cleanupError, infoError: navigation.infoError, handoff"), "Initial navigation must preserve the complete Ego dialog payload plus any already-captured load alerts and cleanup diagnostics.")
   assert(String(freshDirectNavigation).includes("kind: 'action', info, frameTree, snapshot, cleanupError: navigation.cleanupError, infoError: navigation.infoError"), "The successful action branch must still surface cleanup and observation diagnostics instead of dropping them.")
   assert(String(freshDirectNavigation).includes("kind: 'cleanup_failed', contaminated: true") && String(freshDirectNavigation).includes("TERRA_EGO_TASKSPACE_CONTAMINATED:"), "A failed injection cleanup must be reported as a contaminated hard stop with consultant-confirmed recovery, never as a successful round.")

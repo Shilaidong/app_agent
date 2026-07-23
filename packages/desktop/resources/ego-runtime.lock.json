@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "terraPolicyRevision": "2026-07-22-save-continue-native-alert-v1",
+  "terraPolicyRevision": "2026-07-22-js-alert-ax-dismiss-preview",
   "version": "0.4.4.15",
   "bundleVersion": "4.4.15",
   "bundleIdentifier": "com.citrolabs.ego.lite",

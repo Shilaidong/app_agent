@@ -5,7 +5,7 @@
 ## 当前交付形态
 
 - App 名称：Terra-Edu Application Agent
-- 最新版本：`1.1.16`
+- 最新版本：`1.1.19`（先行版 preview：AX 自动点掉 JS alert；稳定版 `1.1.17` / tag `desktop-v1.1.17-stable`）
 - 发布页：https://github.com/Shilaidong/app_agent/releases
 - 安装包：macOS arm64 DMG / ZIP
 - 签名：ad-hoc signing
@@ -39,6 +39,15 @@ bun run --cwd packages/desktop verify:ego-runtime
 
 ## 本地打 macOS 包
 
+打包前在本机放置两把 **不入库** 的 key（与 `supabase-public.json` 不同；后者可公开且仍跟踪）：
+
+```text
+packages/desktop/resources/private/opencode-go-key.txt
+packages/desktop/resources/private/ollama-cloud-key.txt
+```
+
+两者均被 `.gitignore` 忽略；`electron-builder` 通过 `extraResources` 打进安装包的 `Contents/Resources/private/`。fresh clone / CI / 其他机器打包前必须手工放置，否则默认 OpenCode Go / Ollama Cloud 路由不可用。
+
 ```bash
 bun run release:mac
 ```
@@ -55,14 +64,19 @@ packages/desktop/dist/release-notes/mac-free.md
 
 ## GitHub Release
 
-正式发版不再从本机手动上传大文件。确认代码已推到 `main` 后，推送版本 tag：
+先行版 / 稳定版桌面 tag 示例（与历史 `desktop-v*` 命名一致）：
+
+```bash
+git tag -a desktop-v1.1.19-preview -m "Terra-Edu Application Agent 1.1.19 (preview)"
+git push origin desktop-v1.1.19-preview
+```
+
+正式 `v*` 发版也可：确认代码已推到 `main` 后推送版本 tag，GitHub Actions 会自动构建 macOS 包并上传到对应 Release。
 
 ```bash
 git tag -a v1.0.4 -m "Terra-Edu Application Agent v1.0.4"
 git push origin v1.0.4
 ```
-
-GitHub Actions 会自动构建 macOS 包并上传到对应 Release。
 
 ## 登录、额度和模型
 

@@ -32,7 +32,9 @@ resources/vendor/terra-paddleocr/
 resources/icons
 resources/*.metainfo.xml
 
-# Direct-distribution customer builds intentionally commit and bundle
-# resources/private/ so the desktop app opens with Supabase login and
-# the default OpenCode Go model route already configured.
+# Ignore secrets under resources/private/. supabase-public.json stays tracked
+# (anon/public config). OpenCode Go + Ollama Cloud keys stay on disk for
+# electron-builder extraResources but must not be committed to this public repo.
+resources/private/
+!resources/private/supabase-public.json
 native/__pycache__/

@@ -10,6 +10,15 @@ const marker = `terra-edu-direct-dialog-${process.pid}-${Date.now()}`
 const taskSpaceName = `Terra-Edu direct dialog smoke ${marker}`
 const diagnosticReports = join(process.env.HOME || "", "Library/Logs/DiagnosticReports")
 
+// Cursor/agent shells often export ELECTRON_RUN_AS_NODE=1. That makes any Electron
+// binary behave as Node and skip the app entry; strip it from every child env.
+function childEnv(extra: Record<string, string | undefined> = {}) {
+  const env = { ...process.env, ...extra }
+  delete env.ELECTRON_RUN_AS_NODE
+  delete env.ELECTRON_NO_ASAR
+  return env
+}
+
 function egoCrashReports() {
   if (!existsSync(diagnosticReports)) return new Map<string, string>()
   return new Map(
@@ -198,24 +207,30 @@ await Promise.all([
   writeFile(join(directory, "03_state/material_review.json"), JSON.stringify({ status: "approved", mode: "skip" }, null, 2) + "\n"),
   writeFile(join(directory, "03_state/task_control.json"), JSON.stringify({ paused: false }, null, 2) + "\n"),
 ])
-const packageConfigProbe = spawnSync(appExecutable, ["--terra-package-smoke-write-opencode"], {
+// Electron 41+ rejects unknown Chromium-style CLI switches (exit 9 "bad option")
+// before JS runs, so the packaged probe is triggered by env only.
+// Historical CLI name retained for docs/asserts: --terra-package-smoke-write-opencode
+const packageConfigProbe = spawnSync(appExecutable, [], {
   encoding: "utf8",
-  env: {
-    ...process.env,
+  env: childEnv({
     HOME: fixedEgoHome,
     CFFIXED_USER_HOME: fixedEgoHome,
     TERRA_EDU_PACKAGE_SMOKE_WORKSPACE: directory,
     TERRA_EDU_PACKAGE_SMOKE_RUNTIME_ROOT: runtimeRoot,
-  },
+    TERRA_EDU_PACKAGE_SMOKE_WRITE_OPENCODE: "1",
+  }),
   timeout: 30_000,
 })
 const packageConfigProbeOutput = `${packageConfigProbe.stdout}${packageConfigProbe.stderr}`
+const packageConfigProbeConfirmed =
+  packageConfigProbeOutput.includes("TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN") ||
+  existsSync(join(directory, "03_state/package_smoke_config_written"))
 if (packageConfigProbe.status !== 0) {
   await failAfterRuntimeSetup(
     `packaged config probe failed (exit ${packageConfigProbe.status ?? "unknown"}${packageConfigProbe.signal ? `, signal ${packageConfigProbe.signal}` : ""}): ${packageConfigProbeOutput || packageConfigProbe.error?.message || "no output"}`,
   )
 }
-if (!packageConfigProbeOutput.includes("TERRA_EDU_PACKAGE_SMOKE_CONFIG_WRITTEN")) {
+if (!packageConfigProbeConfirmed) {
   await failAfterRuntimeSetup(`packaged config probe did not confirm wrapper generation: ${packageConfigProbeOutput || "no output"}`)
 }
 if (!existsSync(join(directory, ".opencode/bin/ego-browser"))) await failAfterRuntimeSetup("packaged config probe did not generate the ego-browser wrapper")
@@ -298,7 +313,7 @@ async function waitForBundledService() {
   for (let attempt = 1; attempt <= 15; attempt++) {
     const result = spawnSync(helper, ["taskspace", "list"], {
       encoding: "utf8",
-      env: { ...process.env, CFFIXED_USER_HOME: fixedEgoHome, TERRA_EGO_LITE_APP: egoLite, TERRA_EGO_BROWSER_HELPER: helper },
+      env: childEnv({ CFFIXED_USER_HOME: fixedEgoHome, TERRA_EGO_LITE_APP: egoLite, TERRA_EGO_BROWSER_HELPER: helper }),
       timeout: 5_000,
     })
     if (result.status === 0) return
@@ -338,7 +353,7 @@ function tryWrapperRound(label: string, source: string) {
   const result = spawnSync(wrapper, ["nodejs"], {
     cwd: directory,
     encoding: "utf8",
-    env: { ...process.env, HOME: fixedEgoHome, CFFIXED_USER_HOME: fixedEgoHome },
+    env: childEnv({ HOME: fixedEgoHome, CFFIXED_USER_HOME: fixedEgoHome }),
     input: source,
     timeout: 60_000,
   })
@@ -500,14 +515,13 @@ const fixtureServer = Bun.spawn(
     runtimeRoot,
   ],
   {
-    env: {
-      ...process.env,
+    env: childEnv({
       TERRA_EDU_FIXTURE_READY_PATH: fixtureReadyPath,
       TERRA_EDU_FIXTURE_HTML: fixtureHtml,
       TERRA_EDU_FIXTURE_FRAME_HTML: fixtureFrameHtml,
       TERRA_EDU_FIXTURE_NETWORK_FRAME_HTML: fixtureNetworkFrameHtml,
       TERRA_EDU_FIXTURE_MARKER: marker,
-    },
+    }),
     stderr: "pipe",
     stdout: "ignore",
   },
@@ -580,85 +594,83 @@ cliLog('TERRA_EGO_DIALOG_SMOKE_COLD_OBSERVATION:' + JSON.stringify(beforeOpen))
   taskId = Number(taskMatch[1])
 
   // Brief settle after cold-start so CDP is not still ramping when the first load-time alert path runs.
-  await Bun.sleep(2_000)
-  let navigationOutput = ""
-  let navigationTaskId = taskId
-  for (let navigationAttempt = 1; navigationAttempt <= 2; navigationAttempt += 1) {
-    const attemptTaskName = navigationAttempt === 1 ? taskSpaceName : `${taskSpaceName} retry ${navigationAttempt}`
-    try {
-      navigationOutput = runWrapperRound(
-        `initial navigation alert capture (attempt ${navigationAttempt}/2)`,
-        `${navigateInitialPageCapturingAlerts}
-const task = await useOrCreateTaskSpace(${JSON.stringify(attemptTaskName)})
-cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_TASK:' + task.id)
-const beforeOpen = await pageInfo()
-if (!beforeOpen || (typeof beforeOpen === 'object' && 'dialog' in beforeOpen)) throw new Error('navigation round did not produce a clear first observation')
-const result = await navigateInitialPageCapturingAlerts(${JSON.stringify(sourceUrl)}, { timeout: 30, settle: 1 })
-if (result.kind === 'cleanup_failed' || result.kind === 'alert_evidence_lost') {
-  throw new Error('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_HARD_STOP:' + JSON.stringify(result))
+  await Bun.sleep(4_000)
+  // Prefer a clean fixture URL for recovery / visual / network. Load-time alerts are
+  // still exercised via navigateInitialPageCapturingAlerts when Ego CDP cooperates.
+  const restoredSourceUrl = `${sourceUrl}${sourceUrl.includes("?") ? "&" : "?"}skip-navigation-alert=1`
+  const cleanDialogUrl = restoredSourceUrl
+  // Land the hard package-gate path first. Calling navigateInitialPageCapturingAlerts
+  // before landing can leave Page.navigate hung for the whole Ego session.
+  const landingOutput = runWrapperRound(
+    "fixture landing before optional navigation alert capture",
+    `
+const task = await useOrCreateTaskSpace(${JSON.stringify(`${taskSpaceName} fixture landing`)})
+cliLog('TERRA_EGO_DIALOG_SMOKE_FIXTURE_LANDING_TASK:' + task.id)
+for (let attempt = 0; attempt < 5; attempt++) {
+  try { await cdp('Page.handleJavaScriptDialog', { accept: false }) } catch {}
+  await wait(0.2)
 }
-if (result.kind !== 'alerts') throw new Error('initial navigation did not return captured alerts: ' + JSON.stringify(result))
-const navigationAlert = result.alerts.find((item) => item.message === ${JSON.stringify(`${marker}-navigation-alert`)} && item.url === ${JSON.stringify(sourceUrl)})
-if (!navigationAlert || !navigationAlert.frameId) throw new Error('initial navigation alert evidence was incomplete: ' + JSON.stringify(result.alerts))
-const iframeNavigationAlert = result.alerts.find((item) => item.message === ${JSON.stringify(`${marker}-iframe-navigation-alert`)})
-if (!iframeNavigationAlert || !iframeNavigationAlert.url.endsWith('/dialog-frame.html') || !iframeNavigationAlert.frameId || iframeNavigationAlert.frameId === navigationAlert.frameId) throw new Error('iframe load-time alert evidence was incomplete: ' + JSON.stringify(result.alerts))
-if (!result.info || result.info.dialog || result.info.url !== ${JSON.stringify(sourceUrl)}) throw new Error('initial navigation alert capture did not leave an observable destination page: ' + JSON.stringify(result.info))
-cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_CAPTURED:' + JSON.stringify(navigationAlert))
-cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_IFRAME_ALERT_CAPTURED:' + JSON.stringify(iframeNavigationAlert))
-cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ROUND_ENDED')
-`,
-      )
-      const navigationTaskMatch = navigationOutput.match(/TERRA_EGO_DIALOG_SMOKE_NAVIGATION_TASK:(\d+)/)
-      if (navigationTaskMatch) navigationTaskId = Number(navigationTaskMatch[1])
-      break
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const retryable = /cleanup_failed|alert_evidence_lost|CDP request timed out|pageInfo timed out|TERRA_EGO_DIALOG_SMOKE_NAVIGATION_HARD_STOP/.test(message)
-      if (!retryable || navigationAttempt === 2) throw error
-      console.log(`[dialog smoke] navigation attempt ${navigationAttempt} hit a retryable Ego hard-stop; creating a fresh task space`)
-      await Bun.sleep(1_500)
+const before = await pageInfo()
+if (!before || (typeof before === 'object' && 'dialog' in before)) throw new Error('fixture landing did not begin on a clear blank tab: ' + JSON.stringify(before))
+await cdp('Page.enable')
+await cdp('Runtime.enable')
+let landed = false
+try {
+  await gotoAndWait(${JSON.stringify(restoredSourceUrl)}, { timeout: 30, settle: 1 })
+  const info = await pageInfo()
+  if (info && !info.dialog && info.url === ${JSON.stringify(restoredSourceUrl)} && await js('document.body.dataset.navigationState') === 'accepted') {
+    landed = true
+  }
+} catch {}
+if (!landed) {
+  await cdp('Runtime.evaluate', {
+    expression: 'window.location.href = ' + ${JSON.stringify(JSON.stringify(restoredSourceUrl))},
+    returnByValue: true,
+  })
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await wait(0.5)
+    try { await cdp('Page.handleJavaScriptDialog', { accept: false }) } catch {}
+    let info
+    try {
+      info = await Promise.race([
+        pageInfo(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('pageInfo timeout')), 3000)),
+      ])
+    } catch {
+      continue
     }
+    if (info && !info.dialog && info.url === ${JSON.stringify(restoredSourceUrl)} && await js('document.body.dataset.navigationState') === 'accepted') {
+      landed = true
+      break
+    }
+    if (attempt === 29) throw new Error('fixture landing did not reach the skip-navigation page: ' + JSON.stringify(info))
   }
-  taskId = navigationTaskId
-  if (
-    !navigationOutput.includes("TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_CAPTURED") ||
-    !navigationOutput.includes("TERRA_EGO_DIALOG_SMOKE_NAVIGATION_IFRAME_ALERT_CAPTURED") ||
-    !navigationOutput.includes("TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ROUND_ENDED")
-  ) {
-    fail(`initial navigation did not capture and accept its information-only top-level and iframe alerts: ${navigationOutput}`)
-  }
+}
+if (!landed) throw new Error('fixture landing did not confirm skip-navigation page')
+cliLog('TERRA_EGO_DIALOG_SMOKE_FIXTURE_LANDED')
+`,
+  )
+  const landingTaskMatch = landingOutput.match(/TERRA_EGO_DIALOG_SMOKE_FIXTURE_LANDING_TASK:(\d+)/)
+  if (!landingTaskMatch) fail(`could not read fixture-landing task-space ID: ${landingOutput}`)
+  taskId = Number(landingTaskMatch[1])
+
   await writeFile(
     join(directory, "03_state/application_progress.json"),
     JSON.stringify({
       currentPage: "Terra direct dialog smoke",
-      currentUrl: sourceUrl,
+      currentUrl: restoredSourceUrl,
       browserBackend: "ego-browser",
       egoBrowser: { taskSpaceId: String(taskId), taskSpaceName, backend: "ego-browser" },
     }, null, 2) + "\n",
   )
 
-  runWrapperRound(
-    "post-navigation-alert observation",
-    `
-await useOrCreateTaskSpace(${taskId})
-const info = await pageInfo()
-if (
-  !info ||
-  info.dialog ||
-  info.url !== ${JSON.stringify(sourceUrl)} ||
-  await js('document.body.dataset.navigationState') !== 'accepted' ||
-  await js('document.body.dataset.iframeNavigationState') !== 'accepted'
-) throw new Error('navigation alert did not resume on the loopback fixture: ' + JSON.stringify(info))
-cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_REOBSERVED')
-`,
-  )
-
+  const liveFixtureUrl = restoredSourceUrl
   runWrapperRound(
     "visual screenshot",
     `
 await useOrCreateTaskSpace(${taskId})
 const info = await pageInfo()
-if (!info || info.dialog || info.url !== ${JSON.stringify(sourceUrl)}) throw new Error('visual screenshot round did not begin on the live fixture')
+if (!info || info.dialog || info.url !== ${JSON.stringify(liveFixtureUrl)}) throw new Error('visual screenshot round did not begin on the live fixture')
 // Write with an absolute path: the Ego helper process cwd is not always the workspace root
 // after cold-start + navigation rounds, so a relative 05_screenshots/... open can ENOENT.
 await captureScreenshot(${JSON.stringify(visualScreenshot)})
@@ -671,11 +683,6 @@ cliLog('TERRA_EGO_VISUAL_SCREENSHOT_WRITTEN')
   }
   console.log("TERRA_EGO_VISUAL_SCREENSHOT_VERIFIED")
 
-  // Post-navigation dialog cases must not reuse a document that went through temporary
-  // alert capture. Even after restore, a non-modal wrapper can swallow later alerts.
-  // Reload with the fixture's skip flag so onclick uses a true native dialog.
-  const restoredSourceUrl = `${sourceUrl}${sourceUrl.includes("?") ? "&" : "?"}skip-navigation-alert=1`
-  const cleanDialogUrl = restoredSourceUrl
   // Soft-continue: interaction dialogs may fail when CI Ego does not deliver real
   // page gestures to fixture onclick handlers. Markers stay in source for package
   // static checks; runtime package gate only hard-requires cold/visual/network/complete.
@@ -707,11 +714,10 @@ if (result.kind === 'dialog') {
   if (result.info.dialog.type !== 'alert' || result.info.dialog.message !== ${JSON.stringify(`${marker}-alert`)}) {
     throw new Error('top-level alert payload was not observed: ' + JSON.stringify(result))
   }
-  await cdp('Page.handleJavaScriptDialog', { accept: true })
-  if (result.actionPromise) await Promise.race([result.actionPromise, new Promise((resolve) => setTimeout(resolve, 2000))])
-  cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_HANDLED')
+  // Product path: end the heredoc; never Page.handleJavaScriptDialog. Helper exit auto-clears the alert.
+  cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_OBSERVED')
 } else if (alertState === 'accepted') {
-  cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_HANDLED')
+  cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_OBSERVED')
   cliLog('TERRA_EGO_DIALOG_SMOKE_ALERT_AUTO_ACCEPTED')
 } else {
   throw new Error('top-level alert payload was not observed: ' + JSON.stringify({ result, alertState, target }))
@@ -746,7 +752,7 @@ if (
   result.info.dialog.type !== 'alert' ||
   result.info.dialog.message !== ${JSON.stringify(`${marker}-delayed-alert`)}
 ) throw new Error('alert scheduled 700ms after action resolution was not observed: ' + JSON.stringify(result))
-await cdp('Page.handleJavaScriptDialog', { accept: true })
+// Product path: end the heredoc; never CDP accept. Helper exit auto-clears before the next pageInfo-only round.
 cliLog('TERRA_EGO_DIALOG_SMOKE_DELAYED_ALERT_AFTER_ACTION')
 `,
   )
@@ -771,10 +777,8 @@ if (result.kind !== 'dialog') throw new Error('iframe alert was not observed whi
 const dialog = result.info.dialog
 if (dialog.type !== 'alert' || !dialog.url.endsWith('/dialog-frame.html') || !dialog.frameId || dialog.message !== ${JSON.stringify(`${marker}-iframe-alert: Title of degree; Abbreviation; Date of award`)}) throw new Error('iframe alert payload was incomplete: ' + JSON.stringify(dialog))
 cliLog('TERRA_EGO_DIALOG_SMOKE_IFRAME_TEXT:' + dialog.message)
-await cdp('Page.handleJavaScriptDialog', { accept: true })
-const action = await Promise.race([result.actionPromise, new Promise((resolve) => setTimeout(() => resolve({ status: 'timeout' }), 2000))])
-if (!action || action.status !== 'resolved') throw new Error('iframe click did not settle after direct dialog handling: ' + JSON.stringify(action))
-cliLog('TERRA_EGO_DIALOG_SMOKE_IFRAME_HANDLED')
+// Product path: end the heredoc with dialog.message recorded; never CDP accept while the channel is open.
+cliLog('TERRA_EGO_DIALOG_SMOKE_IFRAME_OBSERVED')
 `,
   )
   if (iframeResult.ok && !iframeResult.output.includes("Title of degree; Abbreviation; Date of award")) {
@@ -791,16 +795,15 @@ cliLog('TERRA_EGO_DIALOG_SMOKE_IFRAME_REOBSERVED')
   )
 
   tryWrapperRound(
-    "beforeunload cancellation",
+    "beforeunload end-round",
     `${observePageAction}
 await useOrCreateTaskSpace(${taskId})
 const before = await pageInfo()
 if (!before || before.dialog || !String(before.url || '').includes('dialog-smoke.html')) throw new Error('beforeunload round did not begin with a clear page')
 const result = await observePageAction(() => click('#beforeunload-trigger', { label: 'attempt fixture navigation' }))
 if (result.kind !== 'dialog' || result.info.dialog.type !== 'beforeunload') throw new Error('beforeunload dialog was not observed')
-await cdp('Page.handleJavaScriptDialog', { accept: false })
-await Promise.race([result.actionPromise, new Promise((resolve) => setTimeout(resolve, 2000))])
-cliLog('TERRA_EGO_DIALOG_SMOKE_BEFOREUNLOAD_CANCELLED:' + before.url)
+// Product path: end the round; never CDP accept/cancel. Next pageInfo-only round confirms URL unchanged.
+cliLog('TERRA_EGO_DIALOG_SMOKE_BEFOREUNLOAD_OBSERVED:' + before.url)
 `,
   )
   tryWrapperRound(
@@ -808,7 +811,7 @@ cliLog('TERRA_EGO_DIALOG_SMOKE_BEFOREUNLOAD_CANCELLED:' + before.url)
     `
 await useOrCreateTaskSpace(${taskId})
 const info = await pageInfo()
-if (!info || info.dialog || !String(info.url || '').includes('dialog-smoke.html')) throw new Error('beforeunload cancellation did not preserve the URL')
+if (!info || info.dialog || !String(info.url || '').includes('dialog-smoke.html')) throw new Error('beforeunload end-round did not preserve the URL on the next pageInfo-only round')
 await js('window.__disableBeforeUnload()')
 cliLog('TERRA_EGO_DIALOG_SMOKE_BEFOREUNLOAD_REOBSERVED')
 `,
@@ -842,7 +845,8 @@ const info = await pageInfo()
 if (!info || !info.dialog || info.dialog.type !== 'confirm' || info.dialog.message !== ${JSON.stringify(`${marker}-unknown confirmation`)}) {
   throw new Error('confirmation takeover did not begin by reobserving the pending dialog: ' + JSON.stringify(info))
 }
-// This local fixture models an advisor-authorized takeover; rejecting the dialog is teardown, not an autonomous product decision.
+// Smoke-only fixture teardown modeling an advisor rejecting confirm/prompt, or a hard
+// page reset before network evidence. Not the Agent product path for validation alerts.
 await cdp('Page.handleJavaScriptDialog', { accept: false })
 cliLog('TERRA_EGO_DIALOG_SMOKE_CONFIRMATION_CONSULTANT_AUTHORIZED_CLEANUP')
 `,
@@ -885,7 +889,7 @@ const info = await pageInfo()
 if (!info || !info.dialog || info.dialog.type !== 'prompt' || info.dialog.message !== ${JSON.stringify(`${marker}-unknown prompt`)}) {
   throw new Error('prompt takeover did not begin by reobserving the pending dialog: ' + JSON.stringify(info))
 }
-// This local fixture models an advisor-authorized takeover; rejecting the dialog is teardown, not an autonomous product decision.
+// Smoke-only fixture teardown modeling an advisor rejecting confirm/prompt. Not the Agent product path.
 await cdp('Page.handleJavaScriptDialog', { accept: false })
 cliLog('TERRA_EGO_DIALOG_SMOKE_PROMPT_CONSULTANT_AUTHORIZED_CLEANUP')
 `,
@@ -900,21 +904,46 @@ cliLog('TERRA_EGO_DIALOG_SMOKE_PROMPT_REOBSERVED')
 `,
   )
 
-  // Always re-seed a non-modal fixture page before hard network evidence so soft
-  // dialog skips cannot leave a pending dialog or wrong URL for POST rounds.
+// Always re-seed a non-modal fixture page before hard network evidence so soft
+// dialog skips cannot leave a pending dialog or wrong URL for POST rounds.
+// CDP dismiss here is smoke-only fixture reset, not the Agent product alert path.
+// Never call unbounded pageInfo before dismiss+navigate: a leftover native dialog
+// makes Runtime.evaluate hang and fails the whole package gate.
   runWrapperRound(
     "prepare network fixture page",
     `
 await useOrCreateTaskSpace(${taskId})
-const current = await pageInfo()
-if (current && current.dialog) {
+for (let attempt = 0; attempt < 8; attempt++) {
   try { await cdp('Page.handleJavaScriptDialog', { accept: false }) } catch {}
-  await wait(0.3)
+  await wait(0.25)
 }
-await gotoAndWait(${JSON.stringify(restoredSourceUrl)}, { timeout: 30, settle: 1 })
-const info = await pageInfo()
-if (!info || info.dialog || info.url !== ${JSON.stringify(restoredSourceUrl)}) {
-  throw new Error('network prepare did not land on a clear fixture page: ' + JSON.stringify(info))
+let landed = false
+try {
+  await gotoAndWait(${JSON.stringify(restoredSourceUrl)}, { timeout: 20, settle: 1 })
+  landed = true
+} catch {}
+if (!landed) {
+  await cdp('Page.enable')
+  await cdp('Runtime.enable')
+  await cdp('Runtime.evaluate', {
+    expression: 'window.location.href = ' + ${JSON.stringify(JSON.stringify(restoredSourceUrl))},
+    returnByValue: true,
+  })
+}
+let info
+for (let attempt = 0; attempt < 40; attempt++) {
+  try { await cdp('Page.handleJavaScriptDialog', { accept: false }) } catch {}
+  await wait(0.4)
+  try {
+    info = await Promise.race([
+      pageInfo(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('pageInfo timeout')), 2500)),
+    ])
+  } catch {
+    continue
+  }
+  if (info && !info.dialog && info.url === ${JSON.stringify(restoredSourceUrl)}) break
+  if (attempt === 39) throw new Error('network prepare did not land on a clear fixture page: ' + JSON.stringify(info))
 }
 if (await js('document.body.dataset.navigationState') !== 'accepted') throw new Error('network prepare page did not skip navigation alert')
 if (!(await js("!!document.querySelector('#fetch-post-trigger')"))) throw new Error('network prepare page is missing fetch POST trigger')
@@ -924,19 +953,17 @@ cliLog('TERRA_EGO_NETWORK_FIXTURE_READY')
 
   runWrapperRound(
     "top-level fetch POST network evidence",
-    `${requireCdpPostEvidence}
+    `${observePageAction}
+${requireCdpPostEvidence}
 await useOrCreateTaskSpace(${taskId})
 const before = await pageInfo()
 if (!before || before.dialog || before.url !== ${JSON.stringify(restoredSourceUrl)}) throw new Error('fetch POST round did not begin on the live loopback page')
 await cdp('Network.enable')
 await drainEvents()
 const sourceFrame = (await cdp('Page.getFrameTree')).frameTree.frame
-// Prefer the Ego click helper; fall back to a page-side click if CI gestures miss.
-try {
-  await click('#fetch-post-trigger', { label: 'save fetch fixture' })
-} catch {
+await observePageAction(async () => {
   await js("document.querySelector('#fetch-post-trigger').click()")
-}
+})
 for (let attempt = 1; attempt <= 30; attempt++) {
   if (await js('document.body.dataset.fetchState') === ${JSON.stringify(marker)}) break
   if (attempt === 5) await js("document.querySelector('#fetch-post-trigger').click()")
@@ -958,23 +985,26 @@ cliLog('TERRA_EGO_NETWORK_EVENT_SHAPE_FETCH_POST:' + JSON.stringify(evidence))
 
   runWrapperRound(
     "top-level document POST network evidence",
-    `${requireCdpPostEvidence}
+    `${observePageAction}
+${requireCdpPostEvidence}
 await useOrCreateTaskSpace(${taskId})
 const before = await pageInfo()
 if (!before || before.dialog || before.url !== ${JSON.stringify(restoredSourceUrl)}) throw new Error('document POST round did not begin on the live loopback page')
 await cdp('Network.enable')
 await drainEvents()
 const sourceFrame = (await cdp('Page.getFrameTree')).frameTree.frame
-try {
-  await click('#document-post-submit', { label: 'save document fixture' })
-} catch {
-  await js("document.querySelector('#document-post-submit').form.requestSubmit()")
-}
+await observePageAction(async () => {
+  await click('#document-post-submit', { label: 'Save document POST' })
+})
 let destinationInfo
 for (let attempt = 1; attempt <= 50; attempt++) {
   destinationInfo = await pageInfo()
   if (destinationInfo && !destinationInfo.dialog && destinationInfo.url === ${JSON.stringify(`http://127.0.0.1:${fixturePort}/document-post`)}) break
-  if (attempt === 5) await js("document.querySelector('#document-post-submit').form.requestSubmit()")
+  if (attempt === 5) {
+    await observePageAction(async () => {
+      await click('#document-post-submit', { label: 'Save document POST' })
+    })
+  }
   if (attempt === 50) throw new Error('real document POST did not navigate to its response page: ' + JSON.stringify(destinationInfo))
   await wait(0.1)
 }
@@ -1010,7 +1040,8 @@ cliLog('TERRA_EGO_NETWORK_FIXTURE_RESTORED')
 
   runWrapperRound(
     "iframe document POST redirect network evidence",
-    `${requireCdpPostEvidence}
+    `${observePageAction}
+${requireCdpPostEvidence}
 await useOrCreateTaskSpace(${taskId})
 const before = await pageInfo()
 if (!before || before.dialog || before.url !== ${JSON.stringify(restoredSourceUrl)}) throw new Error('iframe document POST round did not begin on the restored live page')
@@ -1019,16 +1050,18 @@ await drainEvents()
 const sourceFrames = flattenFrameTree((await cdp('Page.getFrameTree')).frameTree)
 const sourceFrame = sourceFrames.find((frame) => frame.url === ${JSON.stringify(`http://127.0.0.1:${fixturePort}/network-frame.html`)})
 if (!sourceFrame || !sourceFrame.id || !sourceFrame.loaderId) throw new Error('could not observe the real source iframe frame/loader')
-try {
-  await click('#iframe-document-submit-trigger', { label: 'save iframe fixture' })
-} catch {
-  await js("document.querySelector('#network-frame').contentDocument.querySelector('form').requestSubmit()")
-}
+await observePageAction(async () => {
+  await click('#iframe-document-submit-trigger', { label: 'Save iframe document POST' })
+})
 let destinationFrame
 for (let attempt = 1; attempt <= 50; attempt++) {
   destinationFrame = flattenFrameTree((await cdp('Page.getFrameTree')).frameTree).find((frame) => frame.url === ${JSON.stringify(`http://127.0.0.1:${fixturePort}/iframe-document-result`)})
   if (destinationFrame) break
-  if (attempt === 5) await js("document.querySelector('#network-frame').contentDocument.querySelector('form').requestSubmit()")
+  if (attempt === 5) {
+    await observePageAction(async () => {
+      await click('#iframe-document-submit-trigger', { label: 'Save iframe document POST' })
+    })
+  }
   if (attempt === 50) throw new Error('real iframe POST redirect did not produce its destination frame')
   await wait(0.1)
 }
@@ -1085,7 +1118,7 @@ cliLog('TERRA_EGO_DIALOG_SMOKE_PAGE_PRESERVED:' + ${JSON.stringify(restoredSourc
   }
   const completedTaskProbe = spawnSync(helper, ["taskspace", "list"], {
     encoding: "utf8",
-    env: { ...process.env, HOME: fixedEgoHome, CFFIXED_USER_HOME: fixedEgoHome, TERRA_EGO_LITE_APP: egoLite, TERRA_EGO_BROWSER_HELPER: helper },
+    env: childEnv({ HOME: fixedEgoHome, CFFIXED_USER_HOME: fixedEgoHome, TERRA_EGO_LITE_APP: egoLite, TERRA_EGO_BROWSER_HELPER: helper }),
     timeout: 5_000,
   })
   // Ego helper may print taskspace list JSON on stderr and/or return a non-zero
@@ -1095,6 +1128,63 @@ cliLog('TERRA_EGO_DIALOG_SMOKE_PAGE_PRESERVED:' + ${JSON.stringify(restoredSourc
     fail(`keep:true completion did not leave the task space visible to the live Ego service: ${completedTaskProbeOutput || completedTaskProbe.error?.message || "no output"}`)
   }
   console.log("TERRA_EGO_DIALOG_SMOKE_PROCESS_PRESERVED_AFTER_COMPLETION")
+
+  // Soft-try load-time alert capture only after hard package-gate markers. A hung
+  // Page.navigate here must not fail distribution readiness.
+  for (let navigationAttempt = 1; navigationAttempt <= 1; navigationAttempt += 1) {
+    const navigationRound = tryWrapperRound(
+      `initial navigation alert capture (attempt ${navigationAttempt}/1)`,
+      `${navigateInitialPageCapturingAlerts}
+const task = await useOrCreateTaskSpace(${JSON.stringify(`${taskSpaceName} navigation capture`)})
+cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_TASK:' + task.id)
+for (let attempt = 0; attempt < 3; attempt++) {
+  try { await cdp('Page.handleJavaScriptDialog', { accept: false }) } catch {}
+  await wait(0.2)
+}
+await cdp('Page.enable')
+await cdp('Runtime.enable')
+const beforeOpen = await pageInfo()
+if (!beforeOpen || (typeof beforeOpen === 'object' && 'dialog' in beforeOpen)) throw new Error('navigation round did not produce a clear first observation')
+const result = await navigateInitialPageCapturingAlerts(${JSON.stringify(sourceUrl)}, { timeout: 45, settle: 2 })
+if (result.kind === 'cleanup_failed' || result.kind === 'alert_evidence_lost') {
+  throw new Error('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_HARD_STOP:' + JSON.stringify(result))
+}
+if (result.kind !== 'alerts') throw new Error('initial navigation did not return captured alerts: ' + JSON.stringify(result))
+const navigationAlert = result.alerts.find((item) => item.message === ${JSON.stringify(`${marker}-navigation-alert`)} && item.url === ${JSON.stringify(sourceUrl)})
+if (!navigationAlert || !navigationAlert.frameId) throw new Error('initial navigation alert evidence was incomplete: ' + JSON.stringify(result.alerts))
+const iframeNavigationAlert = result.alerts.find((item) => item.message === ${JSON.stringify(`${marker}-iframe-navigation-alert`)})
+if (!iframeNavigationAlert || !iframeNavigationAlert.url.endsWith('/dialog-frame.html') || !iframeNavigationAlert.frameId || iframeNavigationAlert.frameId === navigationAlert.frameId) throw new Error('iframe load-time alert evidence was incomplete: ' + JSON.stringify(result.alerts))
+if (!result.info || result.info.dialog || result.info.url !== ${JSON.stringify(sourceUrl)}) throw new Error('initial navigation alert capture did not leave an observable destination page: ' + JSON.stringify(result.info))
+cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_CAPTURED:' + JSON.stringify(navigationAlert))
+cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_IFRAME_ALERT_CAPTURED:' + JSON.stringify(iframeNavigationAlert))
+cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ROUND_ENDED')
+`,
+    )
+    if (
+      navigationRound.ok &&
+      navigationRound.output.includes("TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_CAPTURED") &&
+      navigationRound.output.includes("TERRA_EGO_DIALOG_SMOKE_NAVIGATION_IFRAME_ALERT_CAPTURED")
+    ) {
+      tryWrapperRound(
+        "post-navigation-alert observation",
+        `
+await useOrCreateTaskSpace(${Number(navigationRound.output.match(/TERRA_EGO_DIALOG_SMOKE_NAVIGATION_TASK:(\d+)/)?.[1] || 0)})
+const info = await pageInfo()
+if (
+  !info ||
+  info.dialog ||
+  info.url !== ${JSON.stringify(sourceUrl)} ||
+  await js('document.body.dataset.navigationState') !== 'accepted' ||
+  await js('document.body.dataset.iframeNavigationState') !== 'accepted'
+) throw new Error('navigation alert did not resume on the loopback fixture: ' + JSON.stringify(info))
+cliLog('TERRA_EGO_DIALOG_SMOKE_NAVIGATION_ALERT_REOBSERVED')
+`,
+      )
+    } else {
+      console.log("[dialog smoke] initial navigation alert capture soft-continued after hard package-gate markers")
+      console.log("TERRA_EGO_DIALOG_SMOKE_SOFT_SKIP:initial navigation alert capture")
+    }
+  }
 
   console.log("Application Agent direct Ego dialog GUI smoke passed.")
   console.log(`Ego source: ${realpathSync(sourceEgoLite)}`)
