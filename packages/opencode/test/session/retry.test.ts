@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import type { NamedError } from "@opencode-ai/core/util/error"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { APICallError } from "ai"
 import { setTimeout as sleep } from "node:timers/promises"
 import { Effect, Layer, Schedule, Schema } from "effect"
@@ -377,6 +377,20 @@ describe("session.message-v2.fromError", () => {
     const retryable = SessionRetry.retryable(error, retryProvider)
     expect(retryable).toBeDefined()
     expect(retryable).toEqual({ message: "Connection reset by server" })
+  })
+
+  test("converts undici terminated stream errors to retryable APIError", () => {
+    const result = MessageV2.fromError(new TypeError("terminated"), { providerID })
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(true)
+    expect(result.data.message).toBe("Model stream connection terminated")
+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "Model stream connection terminated" })
+  })
+
+  test("retries legacy UnknownError terminated payloads", () => {
+    const error = new NamedError.Unknown({ message: "terminated" }).toObject()
+    expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Model stream connection terminated" })
   })
 
   test("marks OpenAI 404 status codes as retryable", () => {

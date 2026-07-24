@@ -190,6 +190,106 @@ export function mergeAgentMessages(current: ApplicationAgentChatItem[], next: Ap
   return changed ? merged : current
 }
 
+export function isTechnicalAgentMessage(message: ApplicationAgentChatItem) {
+  if (message.question) return false
+  if (message.title.includes("需要顾问确认") || message.title.includes("顾问确认问题")) return false
+  if (message.title.includes("Agent 思考过程")) return false
+  if (message.role === "tool") return true
+  const title = message.title.trim()
+  if (/^(已完成|正在执行|执行中|失败|错误|Completed|Running|Failed|Error)\s*[:：]/i.test(title)) return true
+  if (/^(bash|edit|read|write|glob|grep|ls|cat|node|python|application-agent_|cua)/i.test(title)) return true
+  return false
+}
+
+export function isReasoningAgentMessage(message: ApplicationAgentChatItem) {
+  return message.title.includes("Agent 思考过程")
+}
+
+export type AgentDisplayItem =
+  | { kind: "message"; id: string; message: ApplicationAgentChatItem }
+  | { kind: "technical-group"; id: string; messages: ApplicationAgentChatItem[] }
+
+export function groupAgentMessages(messages: ApplicationAgentChatItem[]): AgentDisplayItem[] {
+  const items: AgentDisplayItem[] = []
+  let technical: ApplicationAgentChatItem[] = []
+
+  const flushTechnical = () => {
+    if (technical.length === 0) return
+    // Stable id from the first tool only — appending tools must not remount the group
+    // (old ids included last.id + length and caused chat jump/flash on every poll).
+    items.push({
+      kind: "technical-group",
+      id: `technical:${technical[0].id}`,
+      messages: technical,
+    })
+    technical = []
+  }
+
+  for (const message of messages) {
+    if (isTechnicalAgentMessage(message)) {
+      technical.push(message)
+      continue
+    }
+    flushTechnical()
+    items.push({ kind: "message", id: message.id, message })
+  }
+
+  flushTechnical()
+  return items
+}
+
+export function technicalGroupStatus(messages: ApplicationAgentChatItem[]) {
+  if (messages.some((message) => message.status === "error")) return "需查看"
+  if (messages.some((message) => message.status === "running" || message.status === "pending")) return "执行中"
+  return "已折叠"
+}
+
+export function technicalGroupIsRunning(messages: ApplicationAgentChatItem[]) {
+  return messages.some((message) => message.status === "running" || message.status === "pending")
+}
+
+export function pruneLocalAgentNotices(notices: ApplicationAgentChatItem[], live: ApplicationAgentChatItem[]) {
+  const now = Date.now()
+  return notices.filter((notice) => {
+    const age = now - (notice.time ?? now)
+    if (age > 60_000) return false
+    const laterActivity = live.some((item) => {
+      if ((item.time ?? 0) <= (notice.time ?? 0)) return false
+      if (item.role === "assistant" || item.role === "tool") return true
+      return item.role === "system" && (item.title.includes("正在运行") || item.title.includes("可能卡住"))
+    })
+    if (laterActivity && age > 1500) return false
+    return true
+  })
+}
+
+export function createContinueProgressNotice(reason: "continue-task" | "question-reply" | "prompt" = "continue-task"): ApplicationAgentChatItem {
+  const detail =
+    reason === "question-reply"
+      ? "顾问已确认选项。Agent 正在继续执行；若需恢复浏览器，会先探测 task space 再接管，期间可能先出现工具记录。"
+      : reason === "prompt"
+        ? "指令已发送。Agent 正在处理，工具执行记录默认折叠，正文会在有叙述时显示。"
+        : "顾问已确认继续。Agent 正在探测 task space 并接管浏览器；期间可能先出现工具记录，有进展后会显示正文。"
+  return {
+    id: `local:continue:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    role: "system",
+    title: "正在恢复 / 继续执行",
+    body: detail,
+    status: "running",
+    time: Date.now(),
+  }
+}
+
+/** True when chat error is a transient model-stream disconnect that desktop may auto-continue once. */
+export function isRecoverableModelStreamError(item: ApplicationAgentChatItem) {
+  if (item.role !== "system" || item.status !== "error") return false
+  if (!/OpenCode 异常/.test(item.title)) return false
+  return /terminated|流式连接中断|Model stream connection terminated|ECONNRESET|socket hang up|UND_ERR_/i.test(item.body || "")
+}
+
+export const MODEL_STREAM_RECOVER_PROMPT =
+  "上一轮模型流式连接中断（terminated）。这不是申请页错误。请从断点继续：先读取 application_progress.json、task_state.json 和 todowrite，再执行未完成的下一步；不要重做已完成步骤。"
+
 function normalizeTaskComparable(value?: string) {
   return String(value || "")
     .normalize("NFKC")

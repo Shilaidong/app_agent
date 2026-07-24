@@ -34,17 +34,27 @@ import {
   activeApplicationSessionKey,
   applicationTypes,
   base64Encode,
+  createContinueProgressNotice,
   defaultTaskInput,
   deriveComposerRuntimeState,
+  groupAgentMessages,
   groupedTasks,
+  isReasoningAgentMessage,
+  isRecoverableModelStreamError,
   isSameApplicationTaskInput,
+  isTechnicalAgentMessage,
   mergeAgentMessages,
+  MODEL_STREAM_RECOVER_PROMPT,
+  pruneLocalAgentNotices,
   quickCommands,
+  taskCounts,
   taskGeneratedFiles,
   taskGoals,
   taskGroupKey,
-  taskCounts,
   taskProgress,
+  technicalGroupIsRunning,
+  technicalGroupStatus,
+  type AgentDisplayItem,
 } from "./application-agent-view-model"
 import { initI18n, t } from "./i18n"
 import { webviewZoom } from "./webview-zoom"
@@ -326,16 +336,6 @@ function messageTime(time?: number) {
   return new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
-function isTechnicalAgentMessage(message: ApplicationAgentChatItem) {
-  if (message.question) return false
-  if (message.title.includes("需要顾问确认") || message.title.includes("顾问确认问题")) return false
-  if (message.role === "tool") return true
-  const title = message.title.trim()
-  if (/^(已完成|正在执行|执行中|失败|错误|Completed|Running|Failed|Error)\s*[:：]/i.test(title)) return true
-  if (/^(bash|edit|read|write|glob|grep|ls|cat|node|python|application-agent_|cua)/i.test(title)) return true
-  return false
-}
-
 function technicalAgentCommand(message: ApplicationAgentChatItem) {
   return message.title
     .replace(/^(已完成|正在执行|执行中|失败|错误|Completed|Running|Failed|Error)\s*[:：]\s*/i, "")
@@ -343,6 +343,7 @@ function technicalAgentCommand(message: ApplicationAgentChatItem) {
 }
 
 function agentMessageTitle(message: ApplicationAgentChatItem) {
+  if (isReasoningAgentMessage(message)) return message.title
   if (!isTechnicalAgentMessage(message)) return message.title
   if (message.status === "running" || message.status === "pending") return "工具正在执行"
   if (message.status === "error") return "工具执行遇到问题"
@@ -467,16 +468,30 @@ function AgentQuestionCard(props: { message: ApplicationAgentChatItem; onReply: 
 function AgentMessageCard(props: { message: ApplicationAgentChatItem; onReply: (text: string) => void }) {
   if (props.message.question) return <AgentQuestionCard message={props.message} onReply={props.onReply} />
   const technical = () => isTechnicalAgentMessage(props.message)
+  const reasoning = () => isReasoningAgentMessage(props.message)
   const command = () => technicalAgentCommand(props.message)
   return (
-    <article class={`agent-message ${props.message.role} ${props.message.status ?? ""} ${technical() ? "technical" : ""}`}>
+    <article class={`agent-message ${props.message.role} ${props.message.status ?? ""} ${technical() ? "technical" : ""} ${reasoning() ? "reasoning" : ""}`}>
       <div class="agent-message-header">
         <strong>{agentMessageTitle(props.message)}</strong>
         <time>{agentMessageTime(props.message)}</time>
       </div>
       <Show
         when={technical()}
-        fallback={<MarkdownBody markdown={props.message.body || "正在更新..."} />}
+        fallback={
+          <Show
+            when={reasoning()}
+            fallback={<MarkdownBody markdown={props.message.body || "正在更新..."} />}
+          >
+            <details class="agent-reasoning-details">
+              <summary>
+                <span>查看思考过程</span>
+                <small>不影响主叙述，默认折叠</small>
+              </summary>
+              <MarkdownBody markdown={props.message.body || "正在更新..."} />
+            </details>
+          </Show>
+        }
       >
         <details class="agent-technical-details">
           <summary>
@@ -490,75 +505,82 @@ function AgentMessageCard(props: { message: ApplicationAgentChatItem; onReply: (
   )
 }
 
-type AgentDisplayItem =
-  | { kind: "message"; id: string; message: ApplicationAgentChatItem }
-  | { kind: "technical-group"; id: string; messages: ApplicationAgentChatItem[] }
-
-function groupAgentMessages(messages: ApplicationAgentChatItem[]): AgentDisplayItem[] {
-  const items: AgentDisplayItem[] = []
-  let technical: ApplicationAgentChatItem[] = []
-
-  const flushTechnical = () => {
-    if (technical.length === 0) return
-    const first = technical[0]
-    const last = technical[technical.length - 1]
-    items.push({
-      kind: "technical-group",
-      id: `technical:${first.id}:${last.id}:${technical.length}`,
-      messages: technical,
-    })
-    technical = []
-  }
-
-  for (const message of messages) {
-    if (isTechnicalAgentMessage(message)) {
-      technical.push(message)
-      continue
-    }
-    flushTechnical()
-    items.push({ kind: "message", id: message.id, message })
-  }
-
-  flushTechnical()
-  return items
-}
-
-function technicalGroupStatus(messages: ApplicationAgentChatItem[]) {
-  if (messages.some((message) => message.status === "error")) return "需查看"
-  if (messages.some((message) => message.status === "running" || message.status === "pending")) return "执行中"
-  return "已折叠"
-}
-
 function technicalGroupSummary(messages: ApplicationAgentChatItem[]) {
   const commands = Array.from(new Set(messages.map(technicalAgentCommand).filter(Boolean)))
   if (commands.length === 0) return "工具输出"
   return commands.slice(0, 4).join(" / ") + (commands.length > 4 ? ` 等 ${commands.length} 类` : "")
 }
 
-function AgentTechnicalGroup(props: { messages: ApplicationAgentChatItem[] }) {
+function AgentDisplayRow(props: { item: () => AgentDisplayItem; onReply: (text: string) => void }) {
+  const technicalMessages = createMemo(() => {
+    const value = props.item()
+    return value.kind === "technical-group" ? value.messages : undefined
+  })
+  const chatMessage = createMemo(() => {
+    const value = props.item()
+    return value.kind === "message" ? value.message : undefined
+  })
   return (
-    <article class="agent-message technical technical-group">
+    <>
+      <Show when={technicalMessages()}>{(messages) => <AgentTechnicalGroup messages={messages()} />}</Show>
+      <Show when={chatMessage()}>{(message) => <AgentMessageCard message={message()} onReply={props.onReply} />}</Show>
+    </>
+  )
+}
+
+function AgentTechnicalItem(props: { messageId: string; messages: ApplicationAgentChatItem[] }) {
+  const message = () => props.messages.find((item) => item.id === props.messageId) || props.messages[0]!
+  const running = () => message().status === "running" || message().status === "pending"
+  // Open while running, but do not auto-collapse on complete (avoids height jitter after freeze fix).
+  const [expanded, setExpanded] = createSignal(false)
+  createEffect(() => {
+    if (running()) setExpanded(true)
+  })
+  return (
+    <details
+      class="agent-technical-item"
+      open={expanded()}
+      onToggle={(event) => {
+        setExpanded(event.currentTarget.open)
+      }}
+    >
+      <summary>
+        <strong>{technicalAgentCommand(message()) || message().title}</strong>
+        <time>{agentMessageTime(message())}</time>
+      </summary>
+      <MarkdownBody markdown={message().body || "正在更新..."} />
+    </details>
+  )
+}
+
+function AgentTechnicalGroup(props: { messages: ApplicationAgentChatItem[] }) {
+  const running = () => technicalGroupIsRunning(props.messages)
+  // Auto-open while tools run, but do not auto-collapse when they finish (that height
+  // swing was a major source of chat jump/flash). User can still toggle manually.
+  const [expanded, setExpanded] = createSignal(false)
+  createEffect(() => {
+    if (running()) setExpanded(true)
+  })
+  const messageIds = () => props.messages.map((message) => message.id)
+  return (
+    <article class={`agent-message technical technical-group ${running() ? "running" : ""}`}>
       <div class="agent-message-header">
-        <strong>技术执行记录</strong>
+        <strong>{running() ? "Agent 正在执行工具" : "技术执行记录"}</strong>
         <time>{technicalGroupStatus(props.messages)}</time>
       </div>
-      <details class="agent-technical-details">
+      <details
+        class="agent-technical-details"
+        open={expanded()}
+        onToggle={(event) => {
+          setExpanded(event.currentTarget.open)
+        }}
+      >
         <summary>
-          <span>查看 {props.messages.length} 条技术细节</span>
+          <span>{running() ? `执行中 · ${props.messages.length} 条工具` : `查看 ${props.messages.length} 条技术细节`}</span>
           <small>{technicalGroupSummary(props.messages)}</small>
         </summary>
         <div class="agent-technical-list">
-          <For each={props.messages}>
-            {(message) => (
-              <details class="agent-technical-item">
-                <summary>
-                  <strong>{technicalAgentCommand(message) || message.title}</strong>
-                  <time>{agentMessageTime(message)}</time>
-                </summary>
-                <MarkdownBody markdown={message.body || "正在更新..."} />
-              </details>
-            )}
-          </For>
+          <For each={messageIds()}>{(id) => <AgentTechnicalItem messageId={id} messages={props.messages} />}</For>
         </div>
       </details>
     </article>
@@ -577,6 +599,16 @@ function ApplicationAgentShell(props: {
   const [showOpenCode, setShowOpenCode] = createSignal(false)
   const [goConfigured, setGoConfigured] = createSignal(false)
   const [agentMessages, setAgentMessages] = createSignal<ApplicationAgentChatItem[]>([])
+  const [localAgentNotices, setLocalAgentNotices] = createSignal<ApplicationAgentChatItem[]>([])
+  const displayAgentMessages = createMemo(() => [...agentMessages(), ...localAgentNotices()])
+  const agentDisplayGroups = createMemo(() => groupAgentMessages(displayAgentMessages()))
+  // For over string ids keeps row components mounted across polls; object-keyed For remounted every refresh.
+  const agentDisplayGroupIds = createMemo(() => agentDisplayGroups().map((item) => item.id))
+  const agentDisplayGroupById = createMemo(() => {
+    const map = new Map<string, AgentDisplayItem>()
+    for (const item of agentDisplayGroups()) map.set(item.id, item)
+    return map
+  })
   const [agentModels, setAgentModels] = createSignal<
     readonly { id: string; modelID?: string; providerID?: string; subscription?: string; label: string; description: string }[]
   >([])
@@ -627,6 +659,8 @@ function ApplicationAgentShell(props: {
   let lastProgressNotificationKey = ""
   let lastQuestionNotificationKey = ""
   let lastSelectedActiveWorkspacePath = ""
+  const recoveredModelStreamErrorIds = new Set<string>()
+  let modelStreamRecoverInFlight = false
   const taskGroups = createMemo(() => groupedTasks(applicationTasks()))
   const selectedTaskGroup = createMemo(() => {
     const groups = taskGroups()
@@ -659,20 +693,26 @@ function ApplicationAgentShell(props: {
     setInput((current) => ({ ...current, [key]: value }))
   }
 
-  const scrollAgentToLatest = () => {
+  const scrollAgentToLatest = (force = false) => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         const list = agentChatListRef
         if (!list) return
+        const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight
+        if (!force && distanceFromBottom > 96) return
         list.scrollTop = list.scrollHeight
       })
     })
   }
 
-  const agentMessageSignature = (messages: ApplicationAgentChatItem[]) => {
-    const last = messages.at(-1)
-    return `${messages.length}:${last?.id ?? ""}:${last?.status ?? ""}:${last?.body?.length ?? 0}`
+  const pushContinueNotice = (reason: "continue-task" | "question-reply" | "prompt") => {
+    setLocalAgentNotices((current) => [...pruneLocalAgentNotices(current, agentMessages()), createContinueProgressNotice(reason)])
+    scrollAgentToLatest(true)
   }
+
+  // Identity of the transcript row list — not streaming body length (that caused jump on every token/poll).
+  const agentMessageSignature = (messages: ApplicationAgentChatItem[]) =>
+    messages.map((item) => `${item.id}:${item.status ?? ""}`).join("|")
 
   const isRecentNotification = (value?: number | string) => {
     const time = typeof value === "number" ? value : Date.parse(String(value || ""))
@@ -1095,6 +1135,7 @@ function ApplicationAgentShell(props: {
       })
       adoptOpenCodeSession(result.session)
       setAgentMessages([])
+      setLocalAgentNotices([])
       persistActiveSession(result.session)
       setShowOpenCode(false)
       setShowRefillConfirmation(false)
@@ -1150,6 +1191,7 @@ function ApplicationAgentShell(props: {
         const resumed = await window.api.resumeApplicationTask(current.workspacePath)
         setTask(resumed)
         setRestoreNotice("顾问已明确继续任务。Agent 会先读取已保存的浏览器审计状态；只有此前明确交接的空间才会恢复，绝不会抢占顾问自行控制或 inactive 的浏览器。")
+        pushContinueNotice("continue-task")
         if (opencodeSession()) {
           await window.api.sendApplicationAgentPrompt(
             opencodeSession()!,
@@ -1186,6 +1228,7 @@ function ApplicationAgentShell(props: {
     setError(null)
     try {
       setAgentInput("")
+      pushContinueNotice("prompt")
       await window.api.sendApplicationAgentPrompt(session, text)
       await refreshAgentMessages(session)
       await refreshAuthStatus()
@@ -1202,6 +1245,7 @@ function ApplicationAgentShell(props: {
     setBusy(true)
     setError(null)
     try {
+      pushContinueNotice("question-reply")
       await window.api.sendApplicationAgentPrompt(session, text.trim())
       await refreshAgentMessages(session)
       await refreshAuthStatus()
@@ -1248,6 +1292,7 @@ function ApplicationAgentShell(props: {
       adoptOpenCodeSession(session)
       setShowOpenCode(false)
       setAgentMessages([])
+      setLocalAgentNotices([])
       persistActiveSession(session)
       setRestoreNotice(notice || `已切换到：${latestTask.input.studentName || "未命名学生"} / ${latestTask.input.school || "未填写学校"}`)
       await refreshAgentMessages(session)
@@ -1333,6 +1378,7 @@ function ApplicationAgentShell(props: {
     const nextSignature = agentMessageSignature(messages)
     const changed = nextSignature !== lastAgentMessageSignature
     setAgentMessages((current) => mergeAgentMessages(current, messages))
+    setLocalAgentNotices((current) => pruneLocalAgentNotices(current, messages))
     if (changed) {
       lastAgentMessageSignature = nextSignature
       notifyPendingQuestion(messages)
@@ -1357,8 +1403,47 @@ function ApplicationAgentShell(props: {
       setTask(latestTask)
       setInput(latestTask.input)
     }
+    void maybeAutoRecoverModelStreamError(session, messages, latestTask)
     void refreshAuthStatus()
     persistActiveSession(session)
+  }
+
+  const maybeAutoRecoverModelStreamError = async (
+    session: ApplicationAgentSession,
+    messages: ApplicationAgentChatItem[],
+    latestTask: ApplicationTask | null,
+  ) => {
+    if (modelStreamRecoverInFlight || busy()) return
+    if (messages.some((item) => Boolean(item.question) && item.status !== "completed")) return
+    if (messages.some((item) => item.status === "running" && (item.role === "tool" || /正在运行|正在恢复/.test(item.title)))) return
+    if (
+      latestTask &&
+      (latestTask.status === "已暂停" ||
+        latestTask.status === "等待顾问登录" ||
+        latestTask.status === "等待顾问接管浏览器" ||
+        latestTask.browserHandoffPending ||
+        latestTask.browserSafetyStop?.active ||
+        latestTask.browserSafetyStop?.observationRequired ||
+        latestTask.materialReviewTampered)
+    ) {
+      return
+    }
+    const error = messages.findLast((item) => isRecoverableModelStreamError(item))
+    if (!error || recoveredModelStreamErrorIds.has(error.id)) return
+    // Only auto-recover when this error is still the newest transcript signal.
+    const errorIndex = messages.findIndex((item) => item.id === error.id)
+    if (errorIndex < 0 || errorIndex < messages.length - 2) return
+    recoveredModelStreamErrorIds.add(error.id)
+    modelStreamRecoverInFlight = true
+    try {
+      setRestoreNotice("检测到模型流中断，正在自动从断点继续…")
+      pushContinueNotice("prompt")
+      await window.api.sendApplicationAgentPrompt(session, MODEL_STREAM_RECOVER_PROMPT)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      modelStreamRecoverInFlight = false
+    }
   }
 
   onMount(() => {
@@ -2114,7 +2199,7 @@ function ApplicationAgentShell(props: {
                   <div class="agent-chat">
                     <div class="agent-chat-list" ref={agentChatListRef}>
                       <Show
-                        when={agentMessages().length > 0}
+                        when={displayAgentMessages().length > 0}
                         fallback={
                           <article class="agent-message system">
                             <div class="agent-message-header">
@@ -2125,14 +2210,17 @@ function ApplicationAgentShell(props: {
                           </article>
                         }
                       >
-                        <For each={groupAgentMessages(agentMessages())}>
-                          {(item) =>
-                            item.kind === "technical-group" ? (
-                              <AgentTechnicalGroup messages={item.messages} />
-                            ) : (
-                              <AgentMessageCard message={item.message} onReply={replyToAgentQuestion} />
+                        <For each={agentDisplayGroupIds()}>
+                          {(id) => {
+                            // Keep reads inside accessors/memos so Solid tracks across 2.5s polls
+                            // (const value = item() inside Show children runs in untrack and freezes rows).
+                            const entry = () => agentDisplayGroupById().get(id)!
+                            return (
+                              <Show when={entry()}>
+                                <AgentDisplayRow item={entry} onReply={replyToAgentQuestion} />
+                              </Show>
                             )
-                          }
+                          }}
                         </For>
                       </Show>
                     </div>

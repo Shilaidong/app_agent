@@ -293,6 +293,17 @@ const main = Effect.gen(function* () {
     return `${text.slice(0, max).trimEnd()}\n...`
   }
 
+  /** NamedError.Unknown stores text in data.message; surface that instead of the bare name "UnknownError". */
+  const formatOpenCodeSessionError = (error: { name?: string; message?: string; data?: { message?: string } }) => {
+    const raw = String(error.message || error.data?.message || "").trim()
+    if (/^terminated$/i.test(raw) || /ECONNRESET|socket hang up|UND_ERR_SOCKET|fetch failed|network|Model stream connection terminated/i.test(raw)) {
+      return "模型流式连接中断（terminated）。系统会自动重试；若仍失败，点「继续任务」或再发「继续进入 Address」。若反复出现，换网络或换模型后再试。"
+    }
+    if (raw) return raw
+    if (error.name && error.name !== "UnknownError") return error.name
+    return "OpenCode 本轮执行出现异常（未返回详情）。可点「继续任务」重试。"
+  }
+
   const applicationAgentLogHelp = (session: ApplicationAgentSession) =>
     [
       `OpenCode / 桌面日志：${logFilePath()}`,
@@ -400,7 +411,7 @@ const main = Effect.gen(function* () {
         id: string
         role: "user" | "assistant"
         time?: { created?: number; completed?: number }
-        error?: { name?: string; message?: string }
+        error?: { name?: string; message?: string; data?: { message?: string } }
       }
       parts: SidecarPart[]
     }
@@ -442,6 +453,10 @@ const main = Effect.gen(function* () {
         .filter((part) => part.type === "text" && part.text?.trim())
         .map((part) => part.text!.trim())
         .join("\n\n")
+      const reasoning = message.parts
+        .filter((part) => part.type === "reasoning" && part.text?.trim())
+        .map((part) => part.text!.trim())
+        .join("\n\n")
 
       if (message.info.role === "user") {
         if (text) {
@@ -456,12 +471,32 @@ const main = Effect.gen(function* () {
         continue
       }
 
+      // Prefer assistant text; if the model only wrote into reasoning (common with
+      // thinking providers), surface that as the visible OpenCode Agent narrative
+      // so the chat is not left with only collapsed tool groups.
       if (text) {
         items.push({
           id: `${message.info.id}:assistant`,
           role: "assistant",
           title: "OpenCode Agent",
           body: truncateChatBody(text, 20000),
+          time: message.info.time?.created,
+        })
+        if (reasoning) {
+          items.push({
+            id: `${message.info.id}:reasoning`,
+            role: "assistant",
+            title: "Agent 思考过程",
+            body: truncateChatBody(reasoning, 8000),
+            time: message.info.time?.created,
+          })
+        }
+      } else if (reasoning) {
+        items.push({
+          id: `${message.info.id}:assistant`,
+          role: "assistant",
+          title: "OpenCode Agent",
+          body: truncateChatBody(reasoning, 20000),
           time: message.info.time?.created,
         })
       }
@@ -503,7 +538,7 @@ const main = Effect.gen(function* () {
           id: `${message.info.id}:error`,
           role: "system",
           title: "OpenCode 异常",
-          body: message.info.error.message ?? message.info.error.name ?? "OpenCode 本轮执行出现异常。",
+          body: formatOpenCodeSessionError(message.info.error),
           status: "error",
           time: message.info.time?.completed ?? message.info.time?.created,
         })

@@ -35,6 +35,27 @@ interface FetchDecompressionError extends Error {
   path: string
 }
 
+/** Undici/Bun stream aborts often surface as TypeError: terminated with no errno code. */
+function isTransientNetworkStreamError(e: Error): boolean {
+  const code = String((e as SystemError & { code?: string }).code || "")
+  if (
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "EPIPE" ||
+    code === "UND_ERR_SOCKET" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_BODY_TIMEOUT"
+  ) {
+    return true
+  }
+  const msg = e.message.trim().toLowerCase()
+  if (msg === "terminated" || msg === "socket hang up" || msg.includes("other side closed")) return true
+  const cause = (e as Error & { cause?: unknown }).cause
+  if (cause instanceof Error && cause !== e) return isTransientNetworkStreamError(cause)
+  return false
+}
+
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
 
@@ -1123,6 +1144,18 @@ export function fromError(
             code: (e as SystemError).code ?? "",
             syscall: (e as SystemError).syscall ?? "",
             message: (e as SystemError).message ?? "",
+          },
+        },
+        { cause: e },
+      ).toObject()
+    case e instanceof Error && !ctx.aborted && isTransientNetworkStreamError(e):
+      return new APIError(
+        {
+          message: "Model stream connection terminated",
+          isRetryable: true,
+          metadata: {
+            code: String((e as SystemError & { code?: string }).code || "TERMINATED"),
+            message: e.message,
           },
         },
         { cause: e },

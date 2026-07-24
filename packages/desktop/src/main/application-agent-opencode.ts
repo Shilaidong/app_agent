@@ -27,12 +27,12 @@ const EGO_BROWSER_PROTOCOL = `## ego-browser 通用观察协议
 - observePageAction 返回 unknown、timeout，或 click/Runtime.evaluate 超时：结果只是“未决”。记录精确超时/unknown 原文后立即结束本 heredoc；不得 record_failure、不得刷新/重开/JS submit/takeOver，也不得在未走完疑似弹窗流程前 handoff。下一独立 heredoc 只复用同一 taskSpaceId 并 pageInfo。若该 pageInfo-only 回合也超时/读不到 dialog.message（整段 CDP 通道卡死），视为疑似原生校验弹窗：record_blocker（blockerDisposition: resolved，dialogType: alert，evidence=超时原文，不得编造弹窗文案）→ dismiss_js_alert（AX 读真实文案；仅 Ego Lite、仅单确定/OK 无 Cancel）。达重试上限仍未点掉时（且仅此时）才允许 handoff_to_consultant，话术为：请在 Ego 手动处理弹窗或补字段 → 完成本页落盘 → 回桌面点「继续」。禁止关窗/「重新填写」（污染空间除外）。若新观察证明是 confirm/prompt，按 confirm/prompt 交接。只有新观察明确显示登录页时才请求登录。
 - 截图不是每回合默认动作。仅在页面跳转/登录态变化、保存前后证据不足、或 snapshotText 语义无法区分字段/错误时，才写入 \`05_screenshots/<有意义且唯一的名称>.png\` 并 \`await captureScreenshot(...)\`，随后用 OpenCode 内置 read 读取同一 PNG。禁止无参数 captureScreenshot；禁止对同一稳定表单页每字段截图。不得仅凭路径、cliLog 或旧截图判断页面。
 - 普通文本输入必须使用 fillInput，随后发送真实 Tab；稳定纯文本区应尽量一次填完当前可见可确认字段后再统一读回。编号/注册号/appointment number 等标识字段只能来自材料原文或顾问确认，禁止用分数、成绩或近似字符串推断。只有遮罩输入或 fillInput 无法产生真实按键语义时，才可逐键发送 CDP Input.dispatchKeyEvent，随后同样 Tab 并读取回显。
-- 日期字段优先用 TERRA_POLICY 中的 fillDatePickerByClicks（真实 click 打开日历 → 真实点击切年/月 → 点日 → 点 OK/Apply → 读回）。若平台拒绝键入日期并提示必须用 date picker icon，禁止继续盲打键盘。最多尝试两种策略（icon 路径、相邻 calendar 按钮路径）；两种都失败则记录缺失/blocker 并 handOffTaskSpace 交给顾问，不得在日期控件上反复试错超过 2 个 heredoc。下拉选择优先 click 打开 → 新 snapshot → click 可见选项 → 再观察（interactionMethod: click+snapshot+click-option+reobserve）。若选项不进 snapshot（常见于 macOS 原生 \`<select>\` 弹出层），改用 selectOptionByKeyboard（interactionMethod: click+keyboard-option+reobserve）：js 只读 options，再用真实 Arrow/Enter 选中并读回。禁止对 select 使用 fillInput、selectedIndex、el.value=。任何重渲染都会使旧 ref 立即失效。
-- 页面写操作禁止读取或调用 Vue internals、\`$router\`、store，禁止直接 DOM value setter、HTMLElement.click()、向 DOM 派发合成 Event、form.submit()/requestSubmit() 或注入脚本提交。js/cdp 只可观察（含读取日历当前年月文案与元素 getBoundingClientRect）；写入例外是真实键盘/CDP key events、以及仅在 Ego click('@ref') 已失败且矩形宽高>0 时的 CDP Input.dispatchMouseEvent 坐标点击（fillDatePickerByClicks / clickByCoordinates / selectOptionByKeyboard），还有保存审计的 network event 观察。禁止合成 DOM 事件。系统原生 alert 不得在 Ego 通道内用 Page.handleJavaScriptDialog 关闭。
-- 每一页/弹窗表单（含 Add Institution 一类模态框）在可确认字段都填完、动态复查通过、且本页没有更多可填字段后，必须通过 observePageAction 点击页面上真实可见的本页落盘/前进控件离开或落盘（常见文案如 Save/Continue/Next/保存/继续/Create Application 仅作举例，不以按钮字面量做硬规则）。禁止用代码跳页、JS submit、改 URL、或口头宣称“已保存”。跨页离开且前页有表单活动、又无 record_save_verified 时，record_observation 会给出 PAGE_LEFT_WITHOUT_SAVE_EVIDENCE 提示（仅当该前页确有未落盘表单才需处理；登录→首页一类无表单跳转可忽略）。裸 \`await click(...)\` 会在原生 alert 下永久卡住。
-- 本页落盘控件点不动时的通用升级阶梯（按行为，不按按钮词；\`type=button\` 非 submit 常见于这类控件，仅作提示信号）：begin_save_attempt → Network.enable → drain → actionStartedAt → observePageAction(() => click('@freshRef')) → settle/drain。若有 POST/PUT/PATCH 2xx 则目标观察后 record_save_verified。若无网络/无前进/控件无响应：js 只观察几何且宽高>0 时，同一 saveAttemptId 下仅一次 observePageAction(() => clickByCoordinates(...)) 再 drain（真实鼠标事件触发页面 JS，禁止 Element.dispatchEvent / HTMLElement.click()）。仍无证据：禁止判“可能已自动保存”、禁止侧栏/导航离开、禁止 reload。CDP 连续超时走疑似弹窗通道，达限才 handoff。未 record_save_verified 成功前不得口头宣称本页已保存。
-- 浏览器原生 alert（深色系统框、只有“确定/OK”、文案如 “Major is required.”）不是页面按钮。严禁对裸字符串「确定/OK」做 snapshot click（无 @ 选择器）。网页模态框/日期选择器上带真实选择器的 OK 按钮允许用 observePageAction 点击。本页落盘后若整段 CDP 超时且下一 pageInfo-only 也超时，按疑似校验弹窗处理（evidence=超时原文）→ dismiss_js_alert。可读 dialog.message 的 alert 同样走 record_blocker → dismiss_js_alert → 按文案补字段 → 复查 → 再点本页落盘控件。未走完疑似流程并达限前禁止 handoff/takeOver；达限后才可交接，话术为手动处理→落盘→桌面继续。runtime 弹窗不指望 helper 退出自动消失。confirm/prompt 仍必须交接顾问，期间不抢接管。
-- 网页二级模态框（Start New Application / Add Institution / 页面内 role=dialog 浮层等）不是 pageInfo().dialog，也不是原生 alert。打开后 pageInfo 应无 dialog；必须立刻新 snapshotText，只用本回合新 ref 做 fillInput/click('@ref')。下拉：优先 click+snapshot+click-option+reobserve；原生 OS 弹出层无选项布局时用 selectOptionByKeyboard（click+keyboard-option+reobserve）。禁止先 record_select_verified 再操作，禁止 fillInput 选下拉、el.value= / selectedIndex / HTMLElement.click() / 合成 Event。Create Application / Save 等落盘控件：observePageAction(() => click('@freshRef'))；点不动且宽高>0 时同一 saveAttempt 升级一次 clickByCoordinates。getBoundingClientRect 宽高为 0 表示未布局/错 frame/控件未露出——先 wait、scrollIntoView（仅观察）、重新 snapshot；不得因此改设 value 或 form.submit。坐标为 0 时禁止乱点。Ego helper 名写错时修正 helper 调用，禁止改用“标准 JS”绕过。同一模态框连续两回合真实 click（含一次坐标升级）仍无响应 → handOffTaskSpace 交接，不要继续禁路径试错。
+- 日期字段优先用 TERRA_POLICY 中的 fillDatePickerByClicks（真实 click 打开日历 → 真实点击切年/月 → 点日 → 点 OK/Apply → 读回）。若平台拒绝键入日期并提示必须用 date picker icon，禁止继续盲打键盘。最多尝试两种策略（icon 路径、相邻 calendar 按钮路径）；两种都失败则记录缺失/blocker 并 handOffTaskSpace 交给顾问，不得在日期控件上反复试错超过 2 个 heredoc。下拉：先 click 打开并立刻新 snapshot。若 snapshot 能看到可点选项，用 click+snapshot+click-option+reobserve。若看不到选项（macOS 磨砂玻璃原生 \`<select>\`；国家/国籍/永久居住地常见）→ 同一回合立刻 selectOptionByKeyboard。硬事实：磨砂系统菜单不接收浏览器/CDP 打字，对弹出层 typeText/按键无效；helper 会先 Esc 关掉菜单，再在 owning \`<select>\` 上选值并触发 input/change（与 Puppeteer fill 同类）。禁止再翻 snapshot 找 Afghanistan/China，禁止 fillInput/自行 selectedIndex。任何重渲染都会使旧 ref 立即失效。
+- 页面写操作禁止读取或调用 Vue internals、\`$router\`、store，禁止直接 DOM value setter、HTMLElement.click()、向 DOM 派发合成 Event、form.submit()/requestSubmit() 或注入脚本提交。js/cdp 只可观察（含读取日历当前年月文案与元素 getBoundingClientRect）；写入例外是真实键盘/CDP key events、以及仅在 Ego click('@ref') 已失败且矩形宽高>0 时的 CDP Input.dispatchMouseEvent 坐标点击（fillDatePickerByClicks / clickByCoordinates / clickPageCommitControl / selectOptionByKeyboard），还有保存审计的 network event 观察。禁止合成 DOM 事件。系统原生 alert 不得在 Ego 通道内用 Page.handleJavaScriptDialog 关闭。
+- 每一页/弹窗表单（含 Add Institution 一类模态框）在可确认字段都填完、动态复查通过、且本页没有更多可填字段后，必须点击页面上真实可见的本页落盘/前进控件离开或落盘；优先 \`clickPageCommitControl('@freshRef', { label })\`（内部已包 observePageAction + 自动坐标升级）。常见文案如 Save/Continue/Next/保存/继续/Create Application 仅作举例，不以按钮字面量做硬规则。禁止用代码跳页、JS submit、改 URL、或口头宣称“已保存”。跨页离开且前页有表单活动、又无 record_save_verified 时，record_observation 会给出 PAGE_LEFT_WITHOUT_SAVE_EVIDENCE 提示（仅当该前页确有未落盘表单才需处理；登录→首页一类无表单跳转可忽略）。裸 \`await click(...)\` 会在原生 alert 下永久卡住。
+- 本页落盘/前进控件（Next / Continue / Save / 下一步 / 保存 / 继续）必须用 TERRA_POLICY 的 clickPageCommitControl('@freshRef', { label })，禁止自创其它提交捷径。写死序列：定位控件 → scrollIntoView(center) 滚进视口（视口外坐标点击无效，如 y=1601 / vh=835）→ 重测视口相对坐标且确认 inViewport → mouseMoved → mousePressed → mouseReleased。可选先 Ego click 作免费尝试；URL/step 未前进则必走上述滚动+坐标路径一次。有保存审计时先 begin_save_attempt → Network.enable → drain → actionStartedAt → clickPageCommitControl → settle/drain；有 POST/PUT/PATCH 2xx 则目标观察后 record_save_verified。仍无证据：禁止判“可能已自动保存”、禁止侧栏离开、禁止 reload。CDP 连续超时走疑似弹窗通道，达限才 handoff。未 record_save_verified 成功前不得口头宣称本页已保存。禁止 Element.dispatchEvent / HTMLElement.click()。**硬阶梯：先关小表、再动大页**——可见嵌套 Add/Create 小表开着时禁止点大页 Next/Continue/Save（clickPageCommitControl 返回 nested_modal_open）。小表关窗必须 \`clickPageCommitControl('@ref', { label, successMode: 'modal-closed' })\`（调用方必须显式传 successMode）；成功证据是弹窗消失 + 父页表格行读回，用 record_dynamic_form_verified / record_field_verified（evidence 含 nested_modal_closed + rowCount/rowText）。小表关窗**不是** record_save_verified，也**禁止**对小表 begin_save_attempt。大页才要求网络 POST 2xx + record_save_verified。若小表点击碰巧观测到 POST 2xx 可顺带写入 evidence，不作硬门。
+- 浏览器原生 alert（深色系统框、只有“确定/OK”、文案如 “Major is required.”）不是页面按钮。严禁对裸字符串「确定/OK」做 snapshot click（无 @ 选择器）。网页模态框/日期选择器上带真实选择器的 OK 按钮允许用 observePageAction 点击。本页落盘后若整段 CDP 超时且下一 pageInfo-only 也超时，按疑似校验弹窗处理（evidence=超时原文）→ dismiss_js_alert。可读 dialog.message 的 alert 同样走 record_blocker → dismiss_js_alert → 按文案补字段 → 复查 → 再点本页落盘控件。未走完疑似流程并达限前禁止 handoff/takeOver；达限后才可交接，话术为手动处理→落盘→桌面继续。runtime 弹窗不指望 helper 退出自动消失。confirm/prompt 仍必须交接顾问，期间不抢接管。**小表 Save 弹出的原生 alert（如 Region is required）点掉后必须 return to nested modal 补字段再 Save，禁止直接跳大页 Next。**
+- 网页二级模态框（Start New Application / Add Institution / Create / 小表格 role=dialog 浮层等）不是 pageInfo().dialog，也不是原生 alert。打开后：waitForNestedModalForm（等真字段；拒绝 loading/offline/Page Not Found；跨域 iframe 降级 snapshot，不得当无表单）→ 只用新 ref 填写；lookup 放大镜用 fillPortalLookupBySearch；下拉 click+snapshot+click-option 或 selectOptionByKeyboard；日期 fillDatePickerByClicks。落盘：**必须** clickPageCommitControl(..., { successMode: 'modal-closed' })，内部仍包 observePageAction。填过的小表禁止 Cancel/Close/Esc（空模态本回合无 fill 可关）。wait/lookup/commit 耗尽 → handoff evidence 前缀 \`NESTED_MODAL_BLOCKER: wait_exhausted|lookup_failed|commit_unresponsive\`（禁止夹带 timed out 字样）。侧栏勾选不算小表已落盘。getBoundingClientRect 宽高为 0：先 wait/再观察，禁止设 value / form.submit。坐标为 0 时禁止乱点。同一小表连续两回合 commit 无响应 → NESTED_MODAL_BLOCKER: commit_unresponsive handoff。
 - 任何选择、添加/删除、自动完成、切换或导航都可能改变可见内容（分支点）。动作后用新的 pageInfo 加 snapshotText 复查；仅当语义不足时再截图。硬规则热点：Academic/Add Institution——Level of Study / Bachelor / Undergraduate 之后若出现 Major / Concentration / Degree title，未填完禁止 Save；Employment/Internship——雇主类型、在职状态、添加另一段经历后必须再观察再填；Research/Publications/Articles——添加条目或切换类型后必须再观察再填。跳出来的动态字段也算当前页必填。DOM required 扫描只是辅助证据。稳定区填完且分支点复查通过后，以 remainingRequiredFields:[] 做一次 record_dynamic_form_verified，才能保存。
 - 遇到校验、超时、服务端错误或结果不明确时，先保留当前页面和观察证据，不得自动刷新、重开链接、重复同一动作或要求重新登录。若属于 observePageAction unknown，必须严格按上一条立即结束，并在下一独立 heredoc 只调用 pageInfo；只有该新观察明确证明动作失败或需要人工处理后，才可记录失败或交接。只有新观察明确显示认证失败或登录页时，才可请求顾问重新登录。
 - 若 Terra 包装器返回 TERRA_EGO_BROWSER_VERSION_CONFLICT、TERRA_EGO_BROWSER_EXTERNAL_SERVICE_ACTIVE 或 TERRA_EGO_BROWSER_SERVICE_UNAVAILABLE，立即停止，不得重试、调用系统 ego-browser、关闭其他 Ego Lite、猜测 task space，也不得“改用当前冲突中的 Ego”或私自新建 task space。原样调用 application-agent_cua record_failure；请顾问只关闭非 Terra 管理的另一 Ego Lite 后点击“继续任务”。恢复时仍必须先 resume_ego → listTaskSpaces 探测保存 ID；ID 消失则走 retire-and-rebind，不得绕过。
@@ -94,43 +94,220 @@ export const EGO_CLICK_BY_COORDINATES_SOURCE = `async function clickByCoordinate
   const px = Number(x)
   const py = Number(y)
   if (!(px >= 0) || !(py >= 0)) return { ok: false, reason: 'invalid_coordinates', x, y }
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: px, y: py })
   await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: px, y: py, button: 'left', clickCount: 1 })
   await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: px, y: py, button: 'left', clickCount: 1 })
   return { ok: true, x: px, y: py, label: label || '' }
 }`
 
-// Native OS <select> popups often omit options from snapshotText. Observe options via js,
-// then drive the real keyboard — never fillInput, el.value=, or selectedIndex.
-export const EGO_SELECT_OPTION_BY_KEYBOARD_SOURCE = `async function selectOptionByKeyboard(target, desired, { maxDown = 64 } = {}) {
+// Nested modal probe body (passed to js() via JSON.stringify — never leave bare in heredoc as click('OK')).
+const EGO_NESTED_MODAL_PROBE_BODY = `(() => {
+  const bad = /page not found|you're offline|you are offline|read only version/i
+  const visible = (el) => {
+    if (!el || !el.getBoundingClientRect) return false
+    const r = el.getBoundingClientRect()
+    if (!(r.width > 0 && r.height > 0)) return false
+    const style = window.getComputedStyle(el)
+    return style && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'
+  }
+  const countControls = (root) => {
+    if (!root || !root.querySelectorAll) return 0
+    return root.querySelectorAll('input, select, textarea, button, [role=button]').length
+  }
+  const nodes = Array.from(document.querySelectorAll('[role=dialog], [aria-modal=true], .modal, .modal-form, .ui-dialog'))
+  const open = []
+  for (const node of nodes) {
+    if (!visible(node)) continue
+    const iframes = Array.from(node.querySelectorAll('iframe, frame'))
+    let controls = countControls(node)
+    let crossOrigin = false
+    let offline = bad.test(String(node.textContent || ''))
+    const titles = []
+    for (const frame of iframes) {
+      let child = null
+      try { child = frame.contentDocument } catch (_) { child = null }
+      if (!child) { crossOrigin = true; continue }
+      controls += countControls(child)
+      const title = String((child.title || '') + ' ' + ((child.body && child.body.innerText) || '')).slice(0, 400)
+      titles.push(title)
+      if (bad.test(title)) offline = true
+    }
+    open.push({ controls, crossOrigin, offline, titles: titles.slice(0, 2), tag: node.tagName, role: node.getAttribute('role') || '', className: String(node.className || '').slice(0, 120) })
+  }
+  return { openCount: open.length, open }
+})()`
+
+// Wait until nested Add/Create form is ready (not loading/offline/empty). Cross-origin iframes
+// degrade to snapshotText — never treat opaque frames as "no form".
+export const EGO_WAIT_FOR_NESTED_MODAL_FORM_SOURCE = `async function waitForNestedModalForm({ timeoutMs = 15000, pollMs = 400 } = {}) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 15000)
+  let last = null
+  while (Date.now() < deadline) {
+    last = await js(${JSON.stringify(EGO_NESTED_MODAL_PROBE_BODY)}).catch((error) => ({ openCount: 0, open: [], error: String(error) }))
+    const hit = Array.isArray(last && last.open) ? last.open.find((item) => item && !item.offline && (item.controls > 0 || item.crossOrigin)) : null
+    if (hit) {
+      if (hit.crossOrigin && !(hit.controls > 0)) {
+        const snap = typeof snapshotText === 'function' ? await snapshotText().catch(() => '') : ''
+        if (/save and return|save & return|\\bSave\\b|\\bApply\\b|保存并返回|\\bOK\\b/i.test(String(snap || ''))) {
+          return { ok: true, method: 'snapshot-cross-origin', open: hit, openCount: last.openCount }
+        }
+      } else if (hit.controls > 0 && !hit.offline) {
+        return { ok: true, method: 'dom-controls', open: hit, openCount: last.openCount }
+      }
+    }
+    await wait(Math.max(0.2, Number(pollMs) / 1000 || 0.4))
+  }
+  return { ok: false, reason: 'modal_not_ready', hint: 'NESTED_MODAL_BLOCKER: wait_exhausted|reason=modal_not_ready — handoff; do not Esc-spin', last }
+}
+
+async function assertNoOpenNestedModal() {
+  const probe = await js(${JSON.stringify(EGO_NESTED_MODAL_PROBE_BODY)}).catch(() => ({ openCount: 0, open: [] }))
+  const openCount = Number(probe && probe.openCount) || 0
+  if (openCount > 0) return { ok: false, reason: 'nested_modal_open', openCount, open: probe.open }
+  return { ok: true, openCount: 0 }
+}`
+
+// HARD path for page-commit AND nested-modal commit (Save and return / OK / Apply).
+// successMode MUST be passed explicitly for nested modals: 'modal-closed'.
+// Any non-modal-closed commit while a nested modal is open returns nested_modal_open
+// (behavior gate — not a Next/Continue word list).
+export const EGO_CLICK_PAGE_COMMIT_CONTROL_SOURCE = `async function clickPageCommitControl(target, { label, cssSelector, settleMs = 800, successMode } = {}) {
+  const selector = typeof target === 'string' ? target : String((target && target.selector) || '')
+  const commitLabel = label || (typeof target === 'object' && target && target.label) || 'page commit'
+  if (!selector && !cssSelector && !commitLabel) return { ok: false, reason: 'missing_selector' }
+  const labelLower = String(commitLabel || '').toLowerCase()
+  const mode = successMode === 'modal-closed' || successMode === 'url' || successMode === 'auto'
+    ? successMode
+    : (/save and return|save & return|保存并返回/.test(labelLower) ? 'modal-closed' : 'auto')
+  const beforeInfo = await pageInfo().catch(() => null)
+  const beforeUrl = beforeInfo && beforeInfo.url ? String(beforeInfo.url) : ''
+  const beforeProbe = await js(${JSON.stringify(EGO_NESTED_MODAL_PROBE_BODY)}).catch(() => ({ openCount: 0 }))
+  const beforeOpen = Number(beforeProbe && beforeProbe.openCount) || 0
+  if (mode !== 'modal-closed' && beforeOpen > 0) {
+    return { ok: false, advanced: false, closed: false, reason: 'nested_modal_open', beforeOpen, beforeProbe, successMode: mode, hint: 'Close nested modal with clickPageCommitControl successMode modal-closed before any parent-page commit' }
+  }
+  let first = null
+  if (selector) {
+    first = await observePageAction(() => click(selector, { label: commitLabel }))
+    await wait(Math.max(0.2, Number(settleMs) / 1000 || 0.8))
+    if (mode === 'modal-closed') {
+      const midProbe = await js(${JSON.stringify(EGO_NESTED_MODAL_PROBE_BODY)}).catch(() => ({ openCount: beforeOpen }))
+      const midOpen = Number(midProbe && midProbe.openCount) || 0
+      if (beforeOpen > 0 && midOpen === 0) return { ok: true, closed: true, advanced: false, method: 'ego-click', beforeUrl, afterUrl: beforeUrl, first }
+    } else {
+      const midInfo = await pageInfo().catch(() => null)
+      const midUrl = midInfo && midInfo.url ? String(midInfo.url) : ''
+      if (beforeUrl && midUrl && beforeUrl !== midUrl) return { ok: true, advanced: true, closed: false, method: 'ego-click', beforeUrl, afterUrl: midUrl, first }
+    }
+  }
+  const prepare = await js("((wanted, cssSelector) => { const normalize = (value) => String(value || '').replace(/\\\\s+/g, ' ').trim().toLowerCase(); const want = normalize(wanted); const defaults = ['next', 'continue', 'save', 'save and continue', 'save and return', 'save & return', 'ok', 'apply', '保存', '继续', '下一步', '保存并返回', 'start application', 'create application']; const textOf = (el) => normalize(el.getAttribute('aria-label') || el.getAttribute('value') || el.value || el.textContent); const matches = (text) => Boolean(text) && ((want && (text === want || text.includes(want))) || defaults.some((d) => text === d || text.includes(d))); const findInRoot = (root) => { if (!root) return null; if (cssSelector) { try { const direct = root.querySelector(cssSelector); if (direct) return direct; } catch (_) {} } const nodes = Array.from(root.querySelectorAll('button, a, input[type=button], input[type=submit], [role=button], span[role=button]')); for (const el of nodes) { if (matches(textOf(el))) return el; } const hosts = Array.from(root.querySelectorAll('*')).filter((el) => el && el.shadowRoot); for (const host of hosts) { const hit = findInRoot(host.shadowRoot); if (hit) return hit; } return null; }; const findWithFrame = (doc) => { const local = findInRoot(doc); if (local) return { el: local, frame: null }; const frames = Array.from(doc.querySelectorAll('iframe, frame')); for (const frame of frames) { let child = null; try { child = frame.contentDocument; } catch (_) { child = null; } if (!child) continue; const nested = findWithFrame(child); if (nested && nested.el) return { el: nested.el, frame, nestedFrame: nested.frame || null }; } return null; }; const hit = findWithFrame(document); if (!hit || !hit.el) return { ok: false, reason: 'control_not_found' }; const scrollCenter = (el) => { try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) { try { el.scrollIntoView(true); } catch (_) {} } let node = el; for (let i = 0; i < 8 && node; i += 1) { const view = node.ownerDocument && node.ownerDocument.defaultView; if (!view) break; const style = view.getComputedStyle(node); const overflowY = style && style.overflowY; const canScroll = node.scrollHeight > node.clientHeight + 2 && (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay'); if (canScroll) { const r = el.getBoundingClientRect(); const nodeRect = node.getBoundingClientRect(); const delta = (r.top + r.height / 2) - (nodeRect.top + node.clientHeight / 2); node.scrollTop += delta; } node = node.parentElement; } }; scrollCenter(hit.el); if (hit.frame) scrollCenter(hit.frame); const topView = window; const remasure = () => { const r = hit.el.getBoundingClientRect(); let ox = 0; let oy = 0; if (hit.frame) { const fr = hit.frame.getBoundingClientRect(); ox += fr.x; oy += fr.y; } const x = ox + r.x + r.width / 2; const y = oy + r.y + r.height / 2; const vw = topView.innerWidth || 0; const vh = topView.innerHeight || 0; const inViewport = x >= 0 && y >= 0 && x <= vw && y <= vh && r.width > 0 && r.height > 0; return { x, y, w: r.width, h: r.height, vw, vh, scrollX: topView.scrollX || 0, scrollY: topView.scrollY || 0, inViewport, text: textOf(hit.el) }; }; let box = remasure(); if (!box.inViewport && box.vh > 0) { topView.scrollBy(0, box.y - box.vh / 2); scrollCenter(hit.el); box = remasure(); } if (!box.inViewport && box.vh > 0) { topView.scrollBy(0, box.y - Math.min(120, box.vh * 0.2)); scrollCenter(hit.el); box = remasure(); } return Object.assign({ ok: Boolean(box.w > 0 && box.h > 0 && box.inViewport), reason: box.inViewport ? '' : 'still_outside_viewport_after_scroll' }, box); })(" + JSON.stringify(commitLabel) + ", " + JSON.stringify(cssSelector || '') + ")")
+  if (!prepare || !prepare.ok || !(prepare.w > 0 && prepare.h > 0) || !prepare.inViewport) {
+    return { ok: false, advanced: false, closed: false, reason: (prepare && prepare.reason) || 'no_layout_in_viewport', method: 'scroll+coordinates', beforeUrl, afterUrl: beforeUrl, first, prepare, successMode: mode }
+  }
+  await wait(0.25)
+  const second = await observePageAction(() => clickByCoordinates(prepare.x, prepare.y, { label: commitLabel }))
+  await wait(Math.max(0.2, Number(settleMs) / 1000 || 0.8))
+  const afterInfo = await pageInfo().catch(() => null)
+  const afterUrl = afterInfo && afterInfo.url ? String(afterInfo.url) : beforeUrl
+  const afterProbe = await js(${JSON.stringify(EGO_NESTED_MODAL_PROBE_BODY)}).catch(() => ({ openCount: beforeOpen }))
+  const afterOpen = Number(afterProbe && afterProbe.openCount) || 0
+  const closed = beforeOpen > 0 && afterOpen === 0
+  const advanced = Boolean(beforeUrl && afterUrl && beforeUrl !== afterUrl)
+  if (mode === 'modal-closed') {
+    return { ok: closed, closed, advanced, method: 'scroll+coordinates', beforeUrl, afterUrl, prepare, first, second, successMode: mode, beforeOpen, afterOpen, hint: closed ? '' : 'NESTED_MODAL_BLOCKER: commit_unresponsive|reason=modal_still_open' }
+  }
+  return { ok: advanced || Boolean(second && second.ok), advanced, closed, method: 'scroll+coordinates', beforeUrl, afterUrl, prepare, first, second, successMode: mode }
+}`
+
+// Generic magnifier / lookup fields inside nested modals (Subject, Institution, school name…).
+export const EGO_FILL_PORTAL_LOOKUP_BY_SEARCH_SOURCE = `async function fillPortalLookupBySearch(target, query, { resultIncludes, settleMs = 600 } = {}) {
+  const wanted = String(query || '').trim()
+  const matchText = String(resultIncludes || wanted).trim()
+  const selector = typeof target === 'string' ? target : String((target && (target.fieldSelector || target.selector)) || '')
+  const icon = typeof target === 'object' && target ? String(target.searchIconSelector || '') : ''
+  const label = typeof target === 'object' && target ? String(target.label || 'lookup field') : 'lookup field'
+  if (!wanted) return { ok: false, reason: 'missing_query' }
+  if (!selector && !icon) return { ok: false, reason: 'missing_selector' }
+  if (icon) await observePageAction(() => click(icon, { label: label + ' search icon' }))
+  else await observePageAction(() => click(selector, { label }))
+  await wait(0.25)
+  if (selector) await fillInput(selector, wanted)
+  else if (typeof typeText === 'function') await typeText(wanted)
+  await wait(Math.max(0.3, Number(settleMs) / 1000 || 0.6))
+  const snap = typeof snapshotText === 'function' ? await snapshotText().catch(() => '') : ''
+  const lines = String(snap || '').split(/\\n/)
+  const lower = matchText.toLowerCase()
+  let ref = ''
+  for (const line of lines) {
+    if (!line.toLowerCase().includes(lower)) continue
+    const hit = line.match(/\\[ref=(\\d+)\\]/)
+    if (hit) { ref = '@' + hit[1]; break }
+  }
+  if (!ref) {
+    return { ok: false, reason: 'lookup_result_not_found', query: wanted, matchText, hint: 'NESTED_MODAL_BLOCKER: lookup_failed|reason=result_not_found', snapshotHint: String(snap || '').slice(0, 240) }
+  }
+  await observePageAction(() => click(ref, { label: 'lookup result ' + matchText }))
+  await wait(0.3)
+  return { ok: true, method: 'lookup-search', query: wanted, matchText, ref }
+}`
+
+
+// Native OS <select> on macOS opens a frosted system menu outside Chromium.
+// CDP / browser typing does NOT reach that menu — typing into it is a no-op.
+// Approved path (same as Puppeteer/Chrome DevTools MCP fill on native select):
+//   1) Escape to dismiss any open OS menu
+//   2) js-read options from the owning <select>
+//   3) set selectedIndex/value on the owner and fire input+change
+// Optional closed-select typeText/arrows are only a secondary probe.
+export const EGO_SELECT_OPTION_BY_KEYBOARD_SOURCE = `async function selectOptionByKeyboard(target, desired, { maxDown = 320 } = {}) {
   const wanted = String(desired || '').trim()
   const selector = typeof target === 'string' ? target : String((target && target.selector) || '')
   const label = typeof target === 'string' ? 'open select' : String((target && target.label) || 'open select')
   if (!wanted) return { ok: false, reason: 'missing_desired_option' }
   if (!selector) return { ok: false, reason: 'missing_selector' }
+  const press = async (name) => {
+    if (typeof pressKey === 'function') {
+      await pressKey(name)
+      return
+    }
+    const map = { Escape: [27, 'Escape'], Enter: [13, 'Enter'], Tab: [9, 'Tab'], ArrowUp: [38, 'ArrowUp'], ArrowDown: [40, 'ArrowDown'] }
+    const hit = map[name] || [0, name]
+    await cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: hit[1], code: hit[1], windowsVirtualKeyCode: hit[0], nativeVirtualKeyCode: hit[0] })
+    await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: hit[1], code: hit[1], windowsVirtualKeyCode: hit[0], nativeVirtualKeyCode: hit[0] })
+  }
+  // Dismiss frosted OS menu first — keys while it is open never reach the page.
+  await press('Escape')
+  await wait(0.12)
   await click(selector, { label })
-  await wait(0.2)
-  const observed = await js("((wanted) => { const normalize = (value) => String(value || '').replace(/\\\\s+/g, ' ').trim(); const selects = Array.from(document.querySelectorAll('select')); let el = document.activeElement && document.activeElement.tagName === 'SELECT' ? document.activeElement : null; if (!el) el = selects.find((node) => Array.from(node.options || []).some((opt) => { const text = normalize(opt.textContent || opt.label); return text === wanted || String(opt.value || '') === wanted; })) || null; if (!el) return null; return { options: Array.from(el.options || []).map((opt, index) => ({ index, value: String(opt.value || ''), label: normalize(opt.textContent || opt.label) })) }; })(" + JSON.stringify(wanted) + ")")
-  const list = observed && Array.isArray(observed.options) ? observed.options : null
-  if (!list || list.length === 0) return { ok: false, reason: 'options_unreadable', desired: wanted }
+  await wait(0.12)
+  await press('Escape')
+  await wait(0.12)
+  const applied = await js("((wanted, labelHint) => { const normalize = (value) => String(value || '').replace(/\\\\s+/g, ' ').trim(); const hint = normalize(labelHint).toLowerCase(); const want = normalize(wanted); const lower = want.toLowerCase(); const selects = Array.from(document.querySelectorAll('select')); let el = document.activeElement && document.activeElement.tagName === 'SELECT' ? document.activeElement : null; const score = (node) => { const blob = normalize([node.getAttribute('aria-label'), node.getAttribute('name'), node.id, node.getAttribute('title')].filter(Boolean).join(' ')).toLowerCase(); let n = 0; if (hint && blob.includes(hint)) n += 3; if (Array.from(node.options || []).some((opt) => { const text = normalize(opt.textContent || opt.label); return text === want || String(opt.value || '') === want || text.toLowerCase() === lower || text.toLowerCase().includes(lower); })) n += 2; return n; }; if (!el) { let best = null; let bestScore = -1; for (const node of selects) { const s = score(node); if (s > bestScore) { best = node; bestScore = s } } if (best && bestScore > 0) el = best; } if (!el && hint) { for (const lab of Array.from(document.querySelectorAll('label'))) { const text = normalize(lab.textContent).toLowerCase(); if (!text.includes(hint) && !hint.split(/\\\\s+/).filter(Boolean).every((p) => text.includes(p))) continue; const forId = lab.getAttribute('for'); const linked = forId ? document.getElementById(forId) : null; el = (linked && linked.tagName === 'SELECT' ? linked : null) || lab.querySelector('select'); if (el) break; } } if (!el) el = selects[0] || null; if (!el) return { ok: false, reason: 'select_not_found' }; const options = Array.from(el.options || []).map((opt, index) => ({ index, value: String(opt.value || ''), label: normalize(opt.textContent || opt.label) })); const match = options.find((item) => item.label === want || item.value === want) || options.find((item) => item.label.toLowerCase() === lower || item.value.toLowerCase() === lower) || options.find((item) => item.label.toLowerCase().includes(lower) || item.value.toLowerCase().includes(lower)); if (!match) return { ok: false, reason: 'option_not_found', options: options.slice(0, 40) }; el.focus(); el.selectedIndex = match.index; if (String(el.value || '') !== match.value) el.value = match.value; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); const opt = el.selectedOptions && el.selectedOptions[0]; const readback = opt ? normalize(opt.textContent || opt.label || el.value) : normalize(el.value); return { ok: true, method: 'owner-select', readback, index: match.index, value: match.value, label: match.label, optionsCount: options.length }; })(" + JSON.stringify(wanted) + ", " + JSON.stringify(label) + ")")
+  if (applied && applied.ok) {
+    await press('Tab')
+    await wait(0.1)
+    return applied
+  }
+  // Secondary probe only: closed-select typeahead via Ego typeText (still after Escape).
+  if (typeof typeText === 'function') {
+    await typeText(wanted)
+  } else {
+    for (const ch of wanted) {
+      await cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: ch, text: ch, unmodifiedText: ch })
+      await cdp('Input.dispatchKeyEvent', { type: 'char', text: ch, unmodifiedText: ch })
+      await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: ch, text: ch, unmodifiedText: ch })
+      await wait(0.03)
+    }
+  }
+  await press('Enter')
+  await wait(0.15)
+  const readback = await js("(() => { const el = document.activeElement && document.activeElement.tagName === 'SELECT' ? document.activeElement : null; if (!el) return ''; const opt = el.selectedOptions && el.selectedOptions[0]; return opt ? String(opt.textContent || opt.label || el.value || '').replace(/\\\\s+/g, ' ').trim() : String(el.value || '').trim() })()")
+  const got = String(readback || '').toLowerCase()
   const lower = wanted.toLowerCase()
-  const match = list.find((item) => item.label === wanted || item.value === wanted) || list.find((item) => String(item.label).toLowerCase() === lower || String(item.value).toLowerCase() === lower)
-  if (!match) return { ok: false, reason: 'option_not_found', desired: wanted, options: list.slice(0, 24) }
-  const key = async (type, keyName, code, windowsVirtualKeyCode) => {
-    await cdp('Input.dispatchKeyEvent', { type, key: keyName, code, windowsVirtualKeyCode, nativeVirtualKeyCode: windowsVirtualKeyCode })
+  if (got === lower || got.includes(lower) || lower.includes(got)) {
+    return { ok: true, method: 'closed-typeahead', desired: wanted, readback: String(readback || ''), prior: applied }
   }
-  for (let i = 0; i < Math.min(list.length + 2, maxDown); i += 1) {
-    await key('keyDown', 'ArrowUp', 'ArrowUp', 38)
-    await key('keyUp', 'ArrowUp', 'ArrowUp', 38)
-  }
-  for (let i = 0; i < match.index && i < maxDown; i += 1) {
-    await key('keyDown', 'ArrowDown', 'ArrowDown', 40)
-    await key('keyUp', 'ArrowDown', 'ArrowDown', 40)
-  }
-  await key('keyDown', 'Enter', 'Enter', 13)
-  await key('keyUp', 'Enter', 'Enter', 13)
-  await wait(0.2)
-  const readback = await js("(() => { const el = document.activeElement && document.activeElement.tagName === 'SELECT' ? document.activeElement : Array.from(document.querySelectorAll('select')).find((node) => Array.from(node.options || []).some((opt) => String(opt.textContent || opt.label || '').replace(/\\\\s+/g, ' ').trim() === " + JSON.stringify(wanted) + ")); if (!el) return ''; const opt = el.selectedOptions && el.selectedOptions[0]; return opt ? String(opt.textContent || opt.label || el.value || '').replace(/\\\\s+/g, ' ').trim() : String(el.value || '').trim() })()")
-  return { ok: true, desired: wanted, readback: String(readback || ''), index: match.index, value: match.value, label: match.label }
+  return { ok: false, reason: (applied && applied.reason) || 'native_select_failed', desired: wanted, prior: applied, readback: String(readback || ''), hint: 'macOS frosted menu ignores browser typing; owner-select path should run inside selectOptionByKeyboard' }
 }`
 
 export const EGO_FILL_DATE_PICKER_SOURCE = `async function fillDatePickerByClicks(target, desired, { maxMonthSteps = 36 } = {}) {
@@ -496,23 +673,30 @@ if [ "\${1:-}" = "nodejs" ]; then
     printf '%s\\n' 'TERRA_EGO_SCRIPTED_SUBMIT_DENIED: 禁止 form.submit()/requestSubmit() 或脚本提交。填完并复查后必须用 observePageAction 点击页面上真实可见的本页落盘/前进控件。' >&2
     exit 81
   fi
-  # Ban DOM EventTarget synthetic events. Pattern requires ".dispatchEvent(" — does not match
-  # Input.dispatchMouseEvent / Input.dispatchKeyEvent (Mouse/Key, not Event).
-  if /usr/bin/grep -Eq '\\.dispatchEvent[[:space:]]*\\(' "$EGO_NODE_STDIN_COMPACT"; then
-    printf '%s\\n' 'TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED: 禁止向 DOM 派发合成 Event（Element.dispatchEvent）。页面点击必须用真实 click / observePageAction，或 CDP Input.dispatchMouseEvent 坐标点击；日期控件用 fillDatePickerByClicks；原生下拉用 selectOptionByKeyboard。' >&2
+  # Ban DOM EventTarget synthetic events EXCEPT the canonical selectOptionByKeyboard owner-select
+  # path (macOS frosted native <select> menus ignore CDP typing; Puppeteer/CDT fill the owner).
+  if /usr/bin/grep -Eq '\\.dispatchEvent[[:space:]]*\\(' "$EGO_NODE_STDIN_COMPACT" && ! /usr/bin/grep -Fq 'selectOptionByKeyboard' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED: 禁止向 DOM 派发合成 Event（Element.dispatchEvent）。页面点击必须用真实 click / observePageAction，或 CDP Input.dispatchMouseEvent 坐标点击；日期控件用 fillDatePickerByClicks；macOS 原生下拉必须用 selectOptionByKeyboard（先 Esc 关掉磨砂菜单，再在 owning select 上选值）。' >&2
     exit 81
   fi
-  # Ban fillInput / value setters on selects — use click+option or selectOptionByKeyboard.
-  if /usr/bin/grep -Eiq 'selectedIndex[[:space:]]*=' "$EGO_NODE_STDIN_COMPACT" || /usr/bin/grep -Eq '\\.value[[:space:]]*=[[:space:]]*[^;]*option|HTMLOptionsCollection|options\\[[[:digit:]]+\\][[:space:]]*\\.[[:space:]]*selected' "$EGO_NODE_STDIN_COMPACT"; then
-    printf '%s\\n' 'TERRA_EGO_SELECT_SETTER_DENIED: 禁止 selectedIndex / option.selected / 直接给 select 赋值。选项可见时用 click+snapshot+click-option；原生 OS 下拉用 selectOptionByKeyboard。' >&2
+  # Ban ad-hoc select setters — only selectOptionByKeyboard may set selectedIndex/value for native selects.
+  if (/usr/bin/grep -Eiq 'selectedIndex[[:space:]]*=' "$EGO_NODE_STDIN_COMPACT" || /usr/bin/grep -Eq '\\.value[[:space:]]*=[[:space:]]*[^;]*option|HTMLOptionsCollection|options\\[[[:digit:]]+\\][[:space:]]*\\.[[:space:]]*selected' "$EGO_NODE_STDIN_COMPACT") && ! /usr/bin/grep -Fq 'selectOptionByKeyboard' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_SELECT_SETTER_DENIED: 禁止自行 selectedIndex / option.selected / 给 select 赋值。选项可见时用 click+snapshot+click-option；macOS 磨砂原生下拉用 selectOptionByKeyboard（不要对系统菜单打字，浏览器按键进不去）。' >&2
     exit 81
   fi
-  if /usr/bin/grep -Eiq 'fillInput[[:space:]]*\\([^)]*(select|Prefix|prefix|Salutation|Title)' "$EGO_NODE_STDIN_COMPACT"; then
-    printf '%s\\n' 'TERRA_EGO_SELECT_FILLINPUT_DENIED: 禁止对下拉/select 使用 fillInput。选项可见时用 click+snapshot+click-option；原生 OS 下拉用 selectOptionByKeyboard。' >&2
+  # Word-boundary on select/Title so fillInput(selector, …) inside helpers does not false-positive.
+  if /usr/bin/grep -Eiq 'fillInput[[:space:]]*\\([^)]*\\b(select|Prefix|prefix|Salutation|Title)\\b' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_SELECT_FILLINPUT_DENIED: 禁止对下拉/select 使用 fillInput。选项可见时用 click+snapshot+click-option；macOS 原生下拉用 selectOptionByKeyboard（不要对磨砂系统菜单打字）。' >&2
     exit 81
   fi
-  if /usr/bin/grep -Eiq 'click[[:space:]]*\\([^)]*(Save|Continue|Next|保存|继续|Create Application)' "$EGO_NODE_STDIN_COMPACT" && ! /usr/bin/grep -iq 'observePageAction' "$EGO_NODE_STDIN_COMPACT"; then
-    printf '%s\\n' 'TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION: 本页落盘/前进控件点击必须包在 observePageAction 内；裸 await click 会被原生 alert 永久卡住且无法读弹窗。点不动时在同一 saveAttempt 下升级一次 clickByCoordinates。' >&2
+  if /usr/bin/grep -Eiq 'click[[:space:]]*\\([^)]*(Save|Continue|Next|Save and return|保存|继续|Create Application)' "$EGO_NODE_STDIN_COMPACT" && ! /usr/bin/grep -Eiq 'observePageAction|clickPageCommitControl' "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION: 本页/小表落盘控件点击必须包在 observePageAction 或 clickPageCommitControl 内；裸 await click 会被原生 alert 永久卡住且无法读弹窗。嵌套小表用 successMode modal-closed。' >&2
+    exit 81
+  fi
+  # Filled nested modal must not Cancel/Close in the same heredoc (empty unfilled modal may close).
+  # Match dismiss clicks only — canonical helper source may mention offline/modal/Save and return literals.
+  if /usr/bin/grep -Eiq 'fillInput|selectOptionByKeyboard|fillDatePickerByClicks|fillPortalLookupBySearch' "$EGO_NODE_STDIN_COMPACT" && /usr/bin/grep -Eiq "click[[:space:]]*\\([^)]*Cancel|label:[[:space:]]*['\\\"]Cancel['\\\"]|click[[:space:]]*\\([^)]*['\\\"]Close['\\\"]|label:[[:space:]]*['\\\"]Close['\\\"]" "$EGO_NODE_STDIN_COMPACT"; then
+    printf '%s\\n' 'TERRA_EGO_MODAL_CANCEL_AFTER_FILL_DENIED: 本回合已对嵌套小表填写后禁止 Cancel/Close。填完必须 clickPageCommitControl successMode modal-closed；填不完用 NESTED_MODAL_BLOCKER handoff，禁止 Esc 空转。' >&2
     exit 81
   fi
   # Unauthorized takeOver/claim: only resume_ego phase 2 sets resumeAuthorizedAt + takeoverPending.
@@ -990,19 +1174,29 @@ async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOv
       "cliLog(JSON.stringify(dateResult, null, 2))",
       "```",
       "",
-      "Native OS `<select>` menus that omit options from snapshotText must use selectOptionByKeyboard from TERRA_POLICY.md (never fillInput on a select):",
+      "Native OS `<select>` menus (macOS frosted glass) are system menus outside Chromium — browser/CDP typing into the open popup is a no-op. Country / Nationality / Residency / Permanent residence dropdowns are presumed native. After one open-click, if the new snapshot has no clickable option rows, call selectOptionByKeyboard in the SAME heredoc (do not hunt option @refs, do not keep typing into the glass menu):",
       "",
       "```js",
       EGO_SELECT_OPTION_BY_KEYBOARD_SOURCE,
       "",
-      "const selectResult = await selectOptionByKeyboard({ selector: '@prefix', label: 'prefix' }, 'Ms.')",
+      "const selectResult = await selectOptionByKeyboard({ selector: '@country', label: 'Country of permanent residence' }, 'China')",
       "cliLog(JSON.stringify(selectResult, null, 2))",
       "```",
       "",
-      "If a real page control's snapshot click no-ops, use the coordinate CDP mouse helper from TERRA_POLICY.md (same primitive as the date picker). For stubborn page-commit controls, upgrade once under observePageAction after Ego click fails and width/height > 0:",
+      "For page-commit / Next / Continue / Save controls, prefer clickPageCommitControl from TERRA_POLICY.md (auto Ego click → coordinate upgrade when URL/step does not advance). clickByCoordinates remains the low-level CDP mouse primitive:",
       "",
       "```js",
       EGO_CLICK_BY_COORDINATES_SOURCE,
+      "",
+      EGO_WAIT_FOR_NESTED_MODAL_FORM_SOURCE,
+      "",
+      EGO_CLICK_PAGE_COMMIT_CONTROL_SOURCE,
+      "",
+      EGO_FILL_PORTAL_LOOKUP_BY_SEARCH_SOURCE,
+      "",
+      "const ready = await waitForNestedModalForm()",
+      "const commit = await clickPageCommitControl('@saveReturn', { label: 'Save and return', successMode: 'modal-closed' })",
+      "cliLog(JSON.stringify({ ready, commit }, null, 2))",
       "```",
       "",
       "Fresh managed navigation uses this direct-Ego alert capture because Chromium discards a still-blocked load-time alert when the helper round detaches:",
@@ -1026,15 +1220,17 @@ async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOv
       "",
       "Screenshots are not default every turn. Capture only after navigation/login changes, before/after save when evidence is thin, or when snapshotText cannot resolve fields/errors. For every required screenshot, call `await captureScreenshot('05_screenshots/<unique-name>.png')`. After the heredoc returns, the next action must be OpenCode `read` on that exact `05_screenshots/<unique-name>.png`; continue visual reasoning only after the PNG is attached as `image/png`. Never call `captureScreenshot()` without a path, and never screenshot every plain text field.",
       "",
-      "Allowed write chains are `fillInput+Tab+readback` for ordinary text (fill the current visible confirmed plain-text fields in one round when the section is stable, then one readback), `fillDatePickerByClicks` for date-picker portals, `cdp-key-events+Tab+readback` only for masked inputs, `click+snapshot+click-option+reobserve` for selects when options appear in snapshot, and `selectOptionByKeyboard` / `click+keyboard-option+reobserve` when a native OS `<select>` omits options from snapshot. Never use fillInput, selectedIndex, or el.value= on a select. After Level of Study / degree / school / add-row / publication-type branches, reobserve before Save so fields like Major are filled. Registration/appointment numbers must come from source materials, never inferred from scores. Vue internals, $router/store access, direct DOM value setters, and scripted submit are forbidden.",
+      "Allowed write chains are `fillInput+Tab+readback` for ordinary text (fill the current visible confirmed plain-text fields in one round when the section is stable, then one readback), `fillDatePickerByClicks` for date-picker portals, `cdp-key-events+Tab+readback` only for masked inputs, `click+snapshot+click-option+reobserve` for selects only when options appear as clickable rows in snapshot, and `selectOptionByKeyboard` / `click+keyboard-option+reobserve` for macOS frosted native `<select>` (Escape to close the OS menu, then owner-select with input/change — typing into the glass popup never works). Hard rule: one open-click + no option rows → same-heredoc selectOptionByKeyboard. Never use fillInput or ad-hoc selectedIndex outside that helper. After Level of Study / degree / school / add-row / publication-type branches, reobserve before Save so fields like Major are filled. Registration/appointment numbers must come from source materials, never inferred from scores. Vue internals, $router/store access, direct DOM value setters, and scripted submit are forbidden.",
       "",
-      "Page/modal completion: after verified fields are filled and no further fillable fields remain on the current page or modal, you must click the real visible page-commit control through observePageAction (labels like Save / Continue / Next / 保存 / 继续 / Create are examples only). Never mark a page complete, navigate by URL/JS, call form.submit/requestSubmit, synthesize Element.dispatchEvent, or leave a modal without that real button click. A bare `await click(...)` on a page-commit control is forbidden because a native alert will hang the Promise forever. Do not claim a page is saved until record_save_verified succeeds.",
+      "Page/modal completion: after verified fields are filled and no further fillable fields remain on the current page or modal, you must click the real visible page-commit control with `clickPageCommitControl('@freshRef', { label })` — hard-required for Next / Continue / Save / 下一步 / 保存 / 继续. Fixed sequence inside the helper: locate → scrollIntoView(center) into the viewport (off-viewport CDP clicks no-op, e.g. y=1601 with vh=835) → remasure viewport-relative coordinates with inViewport → mouseMoved → mousePressed → mouseReleased. Never invent alternate commit shortcuts, navigate by URL/JS, call form.submit/requestSubmit, synthesize Element.dispatchEvent, or leave a modal without that real button click. A bare `await click(...)` on a page-commit control is forbidden because a native alert will hang the Promise forever. Do not claim a page is saved until record_save_verified succeeds.",
       "",
-      "Stubborn page-commit ladder (behavior-based; type=button is a hint that Ego click may no-op, not a word gate): after begin_save_attempt, Network.enable → drain → actionStartedAt → observePageAction(() => click('@freshRef')) → settle/drain. On POST/PUT/PATCH 2xx, reobserve and record_save_verified. If there is no network / no advance / the control no-ops: js-observe geometry with width/height > 0, then one clickByCoordinates under observePageAction on the same saveAttemptId (trusted CDP mouse — the approved way to fire the button's JS handlers; Element.dispatchEvent stays banned). Still no evidence: never assume auto-saved, never leave via sidebar/nav, never reload. CDP double-timeout → suspected-alert channel; handoff only after dismiss limit.",
+      "Nested modal first (platform-agnostic): when an Add/Create/small-table dialog is open, finish that nested form before any parent-page commit (Next/Continue/Save or any other page-commit control). Ladder: waitForNestedModalForm → fill (fillInput / selectOptionByKeyboard / fillDatePickerByClicks / fillPortalLookupBySearch) → clickPageCommitControl('@ref', { label, successMode: 'modal-closed' }) — caller MUST pass successMode explicitly for nested commits; label guessing is fallback only. Any clickPageCommitControl with successMode other than modal-closed while a nested modal is open returns nested_modal_open (runtime DOM probe — not a button-word list). Nested commit evidence is modal-closed + parent table row readback via record_dynamic_form_verified / record_field_verified (evidence must include nested_modal_closed and rowCount/rowText). Nested close is NOT record_save_verified and MUST NOT call begin_save_attempt. Parent page still requires begin_save_attempt → network POST/PUT/PATCH 2xx → record_save_verified. Optional POST 2xx on nested click may be noted in evidence but is not a hard gate. Sidebar checkmarks do not count as nested commit. Filled nested modals must not Cancel/Close/Esc (empty unfilled modal in the same heredoc may close). Wait/lookup/commit exhaustion → handoff_to_consultant with evidence prefix NESTED_MODAL_BLOCKER: wait_exhausted|lookup_failed|commit_unresponsive (never include timed out / pageInfo timed out / CDP request timed out in that evidence; runtime rejects such laundering).",
       "",
-      "Native Chromium/JS alerts (dark system dialog with only 确定/OK, e.g. \"Major is required.\") are not page widgets. Never bare-click 确定/OK without an @selector. End the ego heredoc immediately when an alert is observed or the CDP channel wedges after a page-commit action. If dialog.message is readable: record_blocker(blockerDisposition: resolved, dialogType: alert, evidence: dialog.message) then dismiss_js_alert. If observePageAction times out/unknown and the next pageInfo-only round also times out: treat as a suspected validation alert — record_blocker with the exact timeout text (never invent a dialog message) then dismiss_js_alert (AX reads the real message; Ego Lite only; single OK/确定, no Cancel). Do not handoff/takeOver until that suspected-alert flow hits its retry limit; only then handoff_to_consultant with: handle the dialog in Ego → finish page commit → desktop Continue. Never close the window or click 重新填写 except for contaminated spaces. Runtime alerts are not auto-cleared by helper exit — that path exists only inside navigateInitialPageCapturingAlerts for load-time alerts. Page modal/date-picker OK buttons with a real @selector may use observePageAction. confirm/prompt still require consultant handoff with no takeOver while the advisor is handling it. beforeunload: end the round and confirm the URL is unchanged on the next pageInfo-only round — never CDP accept/cancel.",
+      "Stubborn page-commit ladder (behavior-based; type=button is a hint that Ego click may no-op, not a word gate): ALWAYS use clickPageCommitControl. It may try Ego click once, then MUST run scrollIntoView(center) → remasure → clickByCoordinates (mouseMoved/Pressed/Released). With save audit: after begin_save_attempt, Network.enable → drain → actionStartedAt → clickPageCommitControl → settle/drain. On POST/PUT/PATCH 2xx, reobserve and record_save_verified. Element.dispatchEvent stays banned. Still no evidence: never assume auto-saved, never leave via sidebar/nav, never reload. CDP double-timeout → suspected-alert channel; handoff only after dismiss limit.",
       "",
-      "In-page DOM modals (Start New Application, Add Institution, role=dialog overlays) are NOT pageInfo().dialog and NOT native alerts. After open: fresh snapshotText and only new @refs. Selects: click+snapshot+click-option+reobserve when options are visible; otherwise selectOptionByKeyboard (click+keyboard-option+reobserve). Never fillInput on a select, never el.value=/selectedIndex, never record_select_verified before the real interaction. Modal Save/Create must use observePageAction(() => click('@freshRef')); if that no-ops and width/height > 0, one clickByCoordinates upgrade on the same save attempt. If getBoundingClientRect width/height is 0, wait/scrollIntoView (observe only) and re-snapshot; do not set values or form.submit. never coordinate-click at 0,0. If a modal still no-ops after two real-click rounds (including one coordinate upgrade), handOffTaskSpace — do not escalate to banned shortcuts.",
+      "Native Chromium/JS alerts (dark system dialog with only 确定/OK, e.g. \"Major is required.\") are not page widgets. Never bare-click 确定/OK without an @selector. End the ego heredoc immediately when an alert is observed or the CDP channel wedges after a page-commit action. If dialog.message is readable: record_blocker(blockerDisposition: resolved, dialogType: alert, evidence: dialog.message) then dismiss_js_alert. If observePageAction times out/unknown and the next pageInfo-only round also times out: treat as a suspected validation alert — record_blocker with the exact timeout text (never invent a dialog message) then dismiss_js_alert (AX reads the real message; Ego Lite only; single OK/确定, no Cancel). Do not handoff/takeOver until that suspected-alert flow hits its retry limit; only then handoff_to_consultant with: handle the dialog in Ego → finish page commit → desktop Continue. Never close the window or click 重新填写 except for contaminated spaces. Runtime alerts are not auto-cleared by helper exit — that path exists only inside navigateInitialPageCapturingAlerts for load-time alerts. Page modal/date-picker OK buttons with a real @selector may use observePageAction. confirm/prompt still require consultant handoff with no takeOver while the advisor is handling it. beforeunload: end the round and confirm the URL is unchanged on the next pageInfo-only round — never CDP accept/cancel. When a nested-modal Save triggers a native alert (e.g. Region is required), dismiss then return to nested modal to fill the missing field and Save again — never jump to parent Next.",
+      "",
+      "In-page DOM modals (Start New Application, Add Institution, Create, small-table role=dialog overlays) are NOT pageInfo().dialog and NOT native alerts. After open: waitForNestedModalForm (ready vs loading/offline/Page Not Found; cross-origin iframe degrades to snapshot — never treat as no-form). Fresh snapshotText and only new @refs. Selects: click+snapshot+click-option+reobserve when options are visible; otherwise selectOptionByKeyboard. Lookup/magnifier fields: fillPortalLookupBySearch. Nested Save/OK/Save and return MUST use clickPageCommitControl('@freshRef', { label, successMode: 'modal-closed' }) (still wraps observePageAction + coordinate upgrade). Never fillInput on a select, never el.value=/selectedIndex, never record_select_verified before the real interaction, never begin_save_attempt on the nested path. If getBoundingClientRect width/height is 0, wait/scrollIntoView (observe only) and re-snapshot; do not set values or form.submit. never coordinate-click at 0,0. If nested commit still no-ops after two real-click rounds → NESTED_MODAL_BLOCKER: commit_unresponsive handoff.",
       "",
       "When a fresh @ref Ego click no-ops on a laid-out control (width/height > 0), then clickByCoordinates / CDP Input.dispatchMouseEvent is allowed — the same primitive fillDatePickerByClicks uses. Never synthesize DOM events or call HTMLElement.click() to fake a commit.",
       "",
@@ -1067,11 +1263,11 @@ async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOv
       "```js",
       EGO_SELECT_OPTION_BY_KEYBOARD_SOURCE,
       "",
-      "const selectResult = await selectOptionByKeyboard({ selector: '@prefix', label: 'prefix' }, 'Ms.')",
+      "const selectResult = await selectOptionByKeyboard({ selector: '@country', label: 'Country of permanent residence' }, 'China')",
       "cliLog(JSON.stringify(selectResult, null, 2))",
       "```",
       "",
-      "Use this when snapshotText does not expose `<option>` nodes (macOS-style native select). Prefer click+snapshot+click-option when options are visible in the accessibility snapshot.",
+      "Hard rule for macOS frosted native selects (Country / Nationality / Residency / Permanent residence): the open glass menu ignores browser typing. Call selectOptionByKeyboard immediately — it Escapes the OS menu, then selects on the owning `<select>` (method owner-select) and fires input/change. Do not spend rounds hunting option @refs or typeText into the popup. Prefer click+snapshot+click-option only when options are visibly listed in the accessibility snapshot.",
       "",
       "## Canonical coordinate click fallback",
       "",
@@ -1081,6 +1277,23 @@ async function writeEgoBrowserSkill(base: string, overrides?: OpenCodeResourceOv
       "const box = await js(\"(() => { const el = document.querySelector('[data-action=continue]'); if (!el) return null; const r = el.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) return null; return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()\")",
       "if (box) await observePageAction(() => clickByCoordinates(box.x, box.y, { label: 'page commit' }))",
       "```",
+      "",
+      "## Canonical page-commit click helper",
+      "",
+      "```js",
+      EGO_WAIT_FOR_NESTED_MODAL_FORM_SOURCE,
+      "",
+      EGO_CLICK_PAGE_COMMIT_CONTROL_SOURCE,
+      "",
+      EGO_FILL_PORTAL_LOOKUP_BY_SEARCH_SOURCE,
+      "",
+      "const ready = await waitForNestedModalForm()",
+      "const nested = await clickPageCommitControl('@saveReturn', { label: 'Save and return', successMode: 'modal-closed' })",
+      "const commit = await clickPageCommitControl('@next', { label: 'Next', successMode: 'url' })",
+      "cliLog(JSON.stringify({ ready, nested, commit }, null, 2))",
+      "```",
+      "",
+      "Hard-required for Next / Continue / Save / 下一步 / 保存 / 继续 after a filled page. Nested Save/OK/Save and return MUST pass successMode: 'modal-closed' explicitly. Any clickPageCommitControl call with successMode other than modal-closed while a nested modal is open returns nested_modal_open (behavior gate, not a button-word list). Fixed sequence: locate → scrollIntoView(center) into the viewport → remasure viewport-relative coordinates (must be inViewport) → mouseMoved → mousePressed → mouseReleased. Off-viewport coordinate clicks no-op. Optional Ego click first is only a free win; if URL/step does not advance (parent) or modal stays open (nested), the scroll+remeasure+CDP path always runs once. Use begin_save_attempt only for parent-page network save audit — never for nested modal close.",
       "",
       "## Canonical initial navigation",
       "",
@@ -1460,12 +1673,12 @@ const SKILL_DEFINITIONS = [
 1. 首次进入平台前调用 application-agent_cua，action 使用 prepare_ego_task，记录申请链接、taskSpaceName 和本轮目标。
 2. 完整浏览器协议只维护在 \`.opencode/skills/ego-browser/TERRA_POLICY.md\` 与 ego-browser skill 中；本 skill 不再重复粘贴全文。填表时必须先 read 该协议。任何可能打开弹窗的动作必须用 observePageAction：先启动动作但不 await，同时轮询 pageInfo（iframe 弹窗会阻塞 click Promise）。原生 alert：结束 ego heredoc → record_blocker（blockerDisposition: resolved，dialogType: alert，evidence=dialog.message）→ dismiss_js_alert（只认 pendingJsAlert，macOS Accessibility / 辅助功能，仅 Ego Lite）；不要 handoff/takeOver。beforeunload：结束回合，下一回合 pageInfo 确认 URL。confirm/prompt 才交接顾问。
 3. 首轮先得到 task.id 和无 dialog 的页面观察，再以 taskSpaceId、当前 URL、标题和证据调用 record_observation。后续只依据 student_profile.md 与材料原文中可确认的信息填写；不确定信息记录为缺失，不猜填。编号/注册号/appointment number 只能来自材料或顾问确认，禁止用分数推断。
-4. 稳定纯文本区「先填完再查」：同一可见区块/模态框内尽量一次连续 fillInput+Tab 填完当前可见可确认字段，最后统一读回；中间不做全页动态复查。选择/添加行/自动完成/日期/上传/保存是分支点，必须单独再观察。日期优先 fillDatePickerByClicks；平台要求 date picker icon 时禁止盲打，两种策略失败即 handoff，最多 2 个日期 heredoc。原生 OS 下拉（选项不进 snapshot）用 selectOptionByKeyboard，禁止对 select 使用 fillInput。
-4a. 网页二级模态框（Start New Application / Add Institution 等）：不是原生 alert。打开后 pageInfo 无 dialog → 立刻新 snapshotText，只用新 ref；下拉优先 click+snapshot+click-option+reobserve，否则 selectOptionByKeyboard；Create/Save 用 observePageAction+click('@ref')。坐标为 0 时先再观察，禁止设 value / JS submit / Element.dispatchEvent。Ego click 失败且矩形宽高>0 才可在同一 saveAttempt 升级一次坐标鼠标；两回合仍无响应则 handoff。
+4. 稳定纯文本区「先填完再查」：同一可见区块/模态框内尽量一次连续 fillInput+Tab 填完当前可见可确认字段，最后统一读回；中间不做全页动态复查。选择/添加行/自动完成/日期/上传/保存是分支点，必须单独再观察。日期优先 fillDatePickerByClicks；平台要求 date picker icon 时禁止盲打，两种策略失败即 handoff，最多 2 个日期 heredoc。原生 OS 磨砂下拉（选项不进 snapshot；国家/国籍/居住地）打开后同一回合立刻 selectOptionByKeyboard：先 Esc 关系统菜单，再在 owning select 上选值；对磨砂层打字无效。禁止翻 snapshot 找选项；禁止 fillInput。**先关小表再动大页**：嵌套 Add/Create 开着时禁止任何大页落盘/前进（含 Save/Next/Continue；行为门，非按钮词表）；小表用 waitForNestedModalForm + clickPageCommitControl successMode modal-closed；关窗证据 nested_modal_closed，不是 record_save_verified。
+4a. 网页二级模态框（Start New Application / Add Institution / Create 小表等）：不是原生 alert。硬阶梯先小表后大页：waitForNestedModalForm → 填完 → clickPageCommitControl(..., { successMode: 'modal-closed' })；证据是 nested_modal_closed + 表格行读回（record_dynamic_form_verified / record_field_verified），禁止对小表 begin_save_attempt / record_save_verified。小表 Save 触发原生 alert 时 dismiss 后 return to nested modal 补字段。填过禁 Cancel。耗尽用 NESTED_MODAL_BLOCKER: wait_exhausted|lookup_failed|commit_unresponsive handoff（evidence 禁 timed out 字样）。打开后 pageInfo 无 dialog → 立刻新 snapshotText，只用新 ref；lookup 用 fillPortalLookupBySearch；下拉：snapshot 有选项才 click-option，否则 selectOptionByKeyboard。坐标为 0 时先再观察，禁止设 value / JS submit / Element.dispatchEvent。
 4b. 跳转热点硬规则（未填完新必填项禁止 Save）：Academic/Add Institution——Level of Study / Bachelor / Undergraduate 之后若出现 Major / Concentration / Degree title 必须先填；Employment/Internship——雇主类型、在职、添加另一段后必须再观察再填；Research/Publications/Articles——添加条目、切换类型后必须再观察再填。跳出来的字段也算当前页必填。
 5. 默认用 snapshotText；仅当语义不足、保存前后或导航后需要视觉证据时才截图并 read。不要对稳定表单每字段截图。
 6. alert：record_blocker(dialogType: alert) 写入 pendingJsAlert 后 dismiss_js_alert 自动点掉并补字段，不要为校验 alert 交接顾问。confirm/prompt 或顾问接管：交接前确认 handOffTaskSpace 返回 done:true；登录交接标记 handoffType: login，其他标记 browser_takeover。顾问接管期间保持静默；绝不自动抢回控制，只有顾问明确回复继续后才可 takeOverTaskSpace/claimTaskSpace。
-7. 本页/本模态框可确认字段填完且动态复查通过后，必须点击真实可见的本页落盘/前进控件；禁止 JS submit、Element.dispatchEvent、改 URL 或在 record_save_verified 成功前宣称已保存。保存前先 begin_save_attempt，再用 observePageAction 执行真实点击；点不动且宽高>0 时同一 saveAttemptId 升级一次 clickByCoordinates 再 drain。把同一 requestId 的 request/response 交给 record_save_verified。Save & Continue 跳页允许，但源页与目标页观察不可混用。GET、非 2xx、旧事件或只有页面文字都不得算保存成功。pageInfo/CDP 连续超时必须先走疑似弹窗通道，未达限禁止 handoff。
+7. 本页可确认字段填完且动态复查通过后，必须点击真实可见的本页落盘/前进控件；Next/Save/Continue 等必须用 clickPageCommitControl（写死：滚进视口中央 → 重测坐标 → mouseMoved/Pressed/Released）。嵌套小表落盘走 successMode modal-closed，禁止对小表 begin_save_attempt。仅大页保存前先 begin_save_attempt，再 clickPageCommitControl；禁止 JS submit、Element.dispatchEvent、改 URL 或在 record_save_verified 成功前宣称已保存。点不动且不在视口内时禁止盲点视口外坐标。把同一 requestId 的 request/response 交给 record_save_verified。Save & Continue 跳页允许，但源页与目标页观察不可混用。GET、非 2xx、旧事件或只有页面文字都不得算保存成功。pageInfo/CDP 连续超时必须先走疑似弹窗通道，未达限禁止 handoff。
 7b. 若保存触发原生 alert（如 “Major is required.”）：结束 ego heredoc → record_blocker（dialogType: alert）→ dismiss_js_alert → 按返回 message 补字段 → 复查 → 重试本页落盘控件。禁止无选择器点击页面「确定」，禁止本回合反复 CDP 关窗。
 8. 上传材料用 ego-browser uploadFile；上传后在新的无 dialog 观察中确认文件名或状态，再调用 record_upload。
 9. 每次准备执行最终提交、付款、推荐信邀请或其他不可逆确认前，必须先调用 application-agent_risk；命中 BLOCKED 就停止。
@@ -2145,7 +2358,17 @@ function browserUrlWithoutQuery(value: unknown) {
 /** Timeout / unknown evidence that may stand in for an unreadable native validation alert. */
 function isSuspectedAlertTimeoutEvidence(evidence: string) {
   const text = String(evidence || "")
-  return /CDP request timed out|pageInfo timed out|timed out after\s*\d|observePageAction[\s\S]{0,80}(timeout|unknown)|kind:\s*['"]?unknown['"]?|TERRA_EGO_SUSPECTED_ALERT/i.test(text)
+  return /\btimed?\s*out\b|timeout|CDP request timed out|pageInfo timed out|timed out after\s*\d|observePageAction[\s\S]{0,80}(timeout|unknown)|kind:\s*['"]?unknown['"]?|TERRA_EGO_SUSPECTED_ALERT/i.test(text)
+}
+
+/** Nested-modal wait/lookup/commit exhaustion — skips SUSPECTED_ALERT_PATH_REQUIRED timeout gate.
+ * Rejects evidence that still contains timeout wording so agents cannot launder CDP timeouts. */
+function isNestedModalHandoffEvidence(evidence: string) {
+  const text = String(evidence || "").trim()
+  if (!/^NESTED_MODAL_BLOCKER:/i.test(text)) return false
+  // Reject any timeout-shaped wording, including bare "timed out" / "CDP timed out" laundering.
+  if (/\btimed?\s*out\b|timeout|CDP request timed out|pageInfo timed out|observePageAction[\s\S]{0,80}(timeout|unknown)|kind:\s*['"]?unknown['"]?/i.test(text)) return false
+  return true
 }
 
 function pageHasServerConfirmedSave(progress: any, pageUrl: string) {
@@ -4831,7 +5054,7 @@ export const cua = {
       return JSON.stringify({
         saveAttemptId,
         beganAt: progress.pendingSaveAttempt.beganAt,
-        nextAction: "Network.enable; drain old events; record actionStartedAt immediately before one real observePageAction save interaction (click('@freshRef')); settle briefly; drain new events and record eventsDrainedAt. If no POST/PUT/PATCH and the control no-ops with width/height > 0, upgrade once on this same saveAttemptId with observePageAction(() => clickByCoordinates(...)) then drain again — never Element.dispatchEvent. Join requestWillBeSent and responseReceived by the same requestId/frameId/loaderId into compact request/response parts without headers/postData/body/query/hash. XHR/fetch must retain the source frame+loader. A document POST may use the new navigation loader but must stay in the source frame; retain the original write request, final 2xx response, and redirected:true only for a real same-ID redirect chain. Then record a fresh top-level and form-frame destination observation/readback before record_save_verified. Do not claim the page is saved until record_save_verified succeeds.",
+        nextAction: "Network.enable; drain old events; record actionStartedAt immediately before clickPageCommitControl('@freshRef', { label }) — hard-required for Next/Continue/Save (scrollIntoView center → remasure inViewport → mouseMoved/Pressed/Released). settle briefly; drain new events and record eventsDrainedAt. Never Element.dispatchEvent and never CDP-click an off-viewport control. Join requestWillBeSent and responseReceived by the same requestId/frameId/loaderId into compact request/response parts without headers/postData/body/query/hash. XHR/fetch must retain the source frame+loader. A document POST may use the new navigation loader but must stay in the source frame; retain the original write request, final 2xx response, and redirected:true only for a real same-ID redirect chain. Then record a fresh top-level and form-frame destination observation/readback before record_save_verified. Do not claim the page is saved until record_save_verified succeeds.",
       }, null, 2)
     }
     if (input.action === "dismiss_js_alert") {
@@ -5071,6 +5294,7 @@ export const cua = {
       const timeoutWithoutSuspectedPath =
         controlLossKindProbe === "deliberate_handoff" &&
         isSuspectedAlertTimeoutEvidence(evidenceBlob) &&
+        !isNestedModalHandoffEvidence(evidence) &&
         !alertDismissHandoffAllowed(progress)
           ? "SUSPECTED_ALERT_PATH_REQUIRED: pageInfo/CDP/observePageAction timeout evidence requires record_blocker(suspected) → dismiss_js_alert before handoff_to_consultant. Handoff is allowed only after the dismiss retry limit."
           : ""
@@ -5078,7 +5302,7 @@ export const cua = {
         controlLossKindProbe === "deliberate_handoff" &&
         progress.pendingSaveAttempt &&
         !alertDismissHandoffAllowed(progress)
-          ? "SAVE_ATTEMPT_OPEN: a pendingSaveAttempt is still open. Finish the stubborn page-commit ladder (Ego click → one clickByCoordinates if needed → network evidence) or the suspected-alert dismiss path before deliberate handoff."
+          ? "SAVE_ATTEMPT_OPEN: a pendingSaveAttempt is still open. Finish the stubborn page-commit ladder (Ego click → one clickByCoordinates if needed → network evidence) or the suspected-alert dismiss path before deliberate handoff. Nested-modal paths must not open begin_save_attempt."
           : ""
       const handoffBlocked =
         alertPending && !alertDismissHandoffAllowed(progress)
@@ -5850,6 +6074,7 @@ export async function writeOpenCodeConfig(workspacePath: string, overrides?: Ope
       prune: true,
       tail_turns: 18,
       preserve_recent_tokens: 60000,
+      // Applied by session/overflow.usable for both limit.input and context-only models.
       reserved: 12000,
     },
   })

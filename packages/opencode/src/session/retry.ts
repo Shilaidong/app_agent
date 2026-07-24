@@ -76,7 +76,7 @@ export function retryable(error: Err, provider: string) {
       return {
         message: GO_UPSELL_MESSAGE,
         action: {
-          reason: "free_tier_limit",
+          reason: "free_tier_limit" as const,
           provider,
           title: "Free limit reached",
           message: "Subscribe to OpenCode Go for reliable access to the best open-source models, starting at $5/month.",
@@ -109,7 +109,7 @@ export function retryable(error: Err, provider: string) {
       return {
         message: `${message} - ${link}`,
         action: {
-          reason: "account_rate_limit",
+          reason: "account_rate_limit" as const,
           provider,
           title: "Go limit reached",
           message,
@@ -131,6 +131,13 @@ export function retryable(error: Err, provider: string) {
       lower.includes("too many requests")
     ) {
       return { message: msg }
+    }
+    // Legacy UnknownError("terminated") from undici stream aborts — also covered by fromError → APIError.
+    if (
+      error.name === "UnknownError" &&
+      (lower === "terminated" || lower.includes("socket hang up") || lower.includes("other side closed") || /und_err_/i.test(lower))
+    ) {
+      return { message: "Model stream connection terminated" }
     }
   }
 

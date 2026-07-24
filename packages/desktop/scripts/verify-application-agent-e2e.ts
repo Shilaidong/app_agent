@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
-import { EGO_OBSERVE_PAGE_ACTION_SOURCE, writeOpenCodeConfig } from "../src/main/application-agent-opencode"
+import { EGO_CLICK_PAGE_COMMIT_CONTROL_SOURCE, EGO_FILL_PORTAL_LOOKUP_BY_SEARCH_SOURCE, EGO_OBSERVE_PAGE_ACTION_SOURCE, EGO_WAIT_FOR_NESTED_MODAL_FORM_SOURCE, writeOpenCodeConfig } from "../src/main/application-agent-opencode"
 import { readEgoRuntimeLock } from "./ego-runtime-lock"
 
 const requestedWorkspace = process.env.APPLICATION_AGENT_WORKSPACE?.trim()
@@ -292,7 +292,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_TASKSPACE_CLOSE") && wrapperSource.includes("EGO_NODE_STDIN_COMPACT"), "Workspace wrapper must inspect nodejs stdin before launching Ego.")
   assert(wrapperSource.includes("completeTaskSpace 只能使用可验证的字面量") && wrapperSource.includes("keep[[:space:]]*:[[:space:]]*true"), "Workspace wrapper must allow only a mechanically verified literal keep:true completion call.")
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_PAGE_RELOAD") && wrapperSource.includes("grep -Eiq 'closeTab'") && wrapperSource.includes("grep -Eiq 'reload'"), "Workspace wrapper must reject automatic reloads and every direct or aliased programmatic tab close before Ego starts.")
-  assert(wrapperSource.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") && wrapperSource.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") && wrapperSource.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") && wrapperSource.includes("TERRA_EGO_ALERT_MUST_END_ROUND") && wrapperSource.includes("TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED") && wrapperSource.includes("TERRA_EGO_UNAUTHORIZED_TAKEOVER") && wrapperSource.includes("TERRA_EGO_SELECT_FILLINPUT_DENIED") && wrapperSource.includes("TERRA_EGO_SELECT_SETTER_DENIED"), "Workspace wrapper must reject scripted submit, bare Save/Continue clicks, native-alert OK clicks, same-round fill-after-dialog, synthetic DOM events, unauthorized takeOver, and select fillInput/setters.")
+  assert(wrapperSource.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") && wrapperSource.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") && wrapperSource.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") && wrapperSource.includes("TERRA_EGO_ALERT_MUST_END_ROUND") && wrapperSource.includes("TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED") && wrapperSource.includes("TERRA_EGO_UNAUTHORIZED_TAKEOVER") && wrapperSource.includes("TERRA_EGO_SELECT_FILLINPUT_DENIED") && wrapperSource.includes("TERRA_EGO_SELECT_SETTER_DENIED") && wrapperSource.includes("TERRA_EGO_MODAL_CANCEL_AFTER_FILL_DENIED"), "Workspace wrapper must reject scripted submit, bare Save/Continue clicks, native-alert OK clicks, same-round fill-after-dialog, synthetic DOM events, unauthorized takeOver, select fillInput/setters, and Cancel-after-fill.")
   assert(wrapperSource.includes('"$HELPER" "$@" <"$EGO_NODE_STDIN"'), "Workspace wrapper must forward the model-authored nodejs source directly to the pinned Ego helper.")
   assert(!wrapperSource.includes("/usr/bin/sandbox-exec") && !wrapperSource.includes("TERRA_EGO_NODE_PERMISSION_"), "Workspace wrapper must not add a sandbox or permission broker around Ego's independent browser service.")
 
@@ -330,6 +330,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
 
   const egoSkill = readText(join(workspace, ".opencode/skills/ego-browser/SKILL.md"))
   const terraPolicy = readText(join(workspace, ".opencode/skills/ego-browser/TERRA_POLICY.md"))
+  assert(terraPolicy.includes("nested_modal_open") || terraPolicy.includes("Nested modal first"), "Fresh writeOpenCodeConfig must ship nested-modal-first Terra policy.")
   assert(egoSkill.includes(`version: "${egoRuntimeLock.officialSkill.version}"`) && egoSkill.includes(`date: "${egoRuntimeLock.officialSkill.date}"`), "Generated ego-browser skill must retain the locked Current framework Skill identity.")
   assert(!egoSkill.includes("Default to `{ keep: false }`") && !egoSkill.includes("Try switching to the real tab, reloading") && !egoSkill.includes("close them as you go") && !egoSkill.includes("work after `completeTaskSpace(..., { keep: true })` — resume the original task space"), "Generated ego-browser skill must remove upstream close/reload/post-completion guidance that conflicts with managed application safety.")
   assert(egoSkill.includes("blocked by the managed Terra-Edu wrapper before Ego starts") && egoSkill.includes("Never reload an application page") && egoSkill.includes("never close tabs programmatically") && egoSkill.includes("Further filling requires the advisor to choose 重新填写"), "Generated ego-browser skill must replace unsafe upstream guidance with the managed keep-true/no-reload/no-close/terminal-completion contract.")
@@ -348,15 +349,15 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(terraPolicy.includes("结果只是“未决”") && terraPolicy.includes("疑似原生校验弹窗") && terraPolicy.includes("达重试上限仍未点掉时（且仅此时）才允许 handoff_to_consultant") && terraPolicy.includes("未走完疑似弹窗流程前 handoff"), "Terra policy must treat unknown/timeout as pending, require the suspected-alert path, and allow handoff only after that flow hits its limit.")
   assert(terraPolicy.includes("helper 回合退出时自动消掉仍未处理的弹窗") && terraPolicy.includes("只在初次导航期间临时替换无选择分支的 window.alert") && terraPolicy.includes("它绝不替换 confirm、prompt 或 beforeunload") && terraPolicy.includes("Runtime alerts are not auto-cleared by helper exit"), "Terra policy must keep load-time navigateInitialPageCapturingAlerts distinct from runtime alerts that are not auto-cleared.")
   assert(terraPolicy.includes("captureScreenshot('05_screenshots/<unique-name>.png')") && terraPolicy.includes("OpenCode `read` on that exact") && terraPolicy.includes("image/png"), "Terra policy must require explicit workspace screenshots followed by exact OpenCode image reads.")
-  assert(terraPolicy.includes("fillInput+Tab+readback") && terraPolicy.includes("click+snapshot+click-option+reobserve") && terraPolicy.includes("selectOptionByKeyboard") && terraPolicy.includes("Stubborn page-commit ladder") && terraPolicy.includes("Vue internals"), "Terra policy must require real generic interactions, stubborn page-commit ladder, native-select keyboard helper, and ban framework-internal writes.")
+  assert(terraPolicy.includes("fillInput+Tab+readback") && terraPolicy.includes("click+snapshot+click-option+reobserve") && terraPolicy.includes("selectOptionByKeyboard") && terraPolicy.includes("frosted") && terraPolicy.includes("owner-select") && terraPolicy.includes("clickPageCommitControl") && terraPolicy.includes("scrollIntoView(center)") && terraPolicy.includes("Stubborn page-commit ladder") && terraPolicy.includes("Vue internals") && terraPolicy.includes("waitForNestedModalForm") && terraPolicy.includes("modal-closed") && terraPolicy.includes("nested_modal_closed") && terraPolicy.includes("NESTED_MODAL_BLOCKER") && terraPolicy.includes("fillPortalLookupBySearch") && terraPolicy.includes("return to nested modal"), "Terra policy must require real generic interactions, nested-modal-first ladder, modal-closed evidence class, NESTED_MODAL_BLOCKER handoff, lookup helper, and return-to-nested-modal after alert.")
   assert(terraPolicy.includes("本页落盘/前进控件") && terraPolicy.includes("不以按钮字面量做硬规则") && terraPolicy.includes("Major is required.") && terraPolicy.includes("dismiss_js_alert") && terraPolicy.includes("先填完再查") && terraPolicy.includes("未填完禁止 Save") && terraPolicy.includes("clickByCoordinates") && terraPolicy.includes("PAGE_LEFT_WITHOUT_SAVE_EVIDENCE"), "Terra policy must require real page-commit clicks by behavior, coordinate CDP fallback, URL leave warning, fill-then-verify, Academic hard-block, and dismiss_js_alert.")
-  assert(terraPolicy.includes("In-page DOM modals") && terraPolicy.includes("Start New Application") && terraPolicy.includes("never coordinate-click at 0,0"), "Terra policy must keep in-page DOM modals on Ego @ref path and ban zero-rect coordinate shortcuts.")
+  assert(terraPolicy.includes("In-page DOM modals") && terraPolicy.includes("Start New Application") && terraPolicy.includes("never coordinate-click at 0,0") && terraPolicy.includes("successMode: 'modal-closed'") && terraPolicy.includes("cross-origin"), "Terra policy must keep in-page DOM modals on Ego @ref path, require explicit modal-closed successMode, and document cross-origin degrade.")
   assert(terraPolicy.includes("completeTaskSpace(taskSpaceId, { keep: true })") && terraPolicy.includes("一律不得使用 keep:false"), "Terra policy must preserve completed Ego windows instead of exercising the crashing native close path.")
   const cuaSkill = readText(join(workspace, ".opencode/skills/cua-application-filling/SKILL.md"))
   assert(cuaSkill.includes("绝不自动抢回控制"), "CUA skill must forbid automatic task-space takeover.")
   assert(cuaSkill.includes("dismiss_js_alert") && (cuaSkill.includes("Accessibility") || cuaSkill.includes("辅助功能") || cuaSkill.includes("结束回合")), "CUA skill must guide dismiss_js_alert via Accessibility outside Ego CDP.")
   assert(cuaSkill.includes("Major is required.") && cuaSkill.includes("Academic/Add Institution") && cuaSkill.includes("先填完再查") && cuaSkill.includes("dismiss_js_alert") && (cuaSkill.includes("本页落盘") || cuaSkill.includes("Save/Continue")), "CUA skill must require page commit, fill-then-verify, Academic hotspots, and dismiss_js_alert.")
-  assert(cuaSkill.includes("网页二级模态框") && cuaSkill.includes("坐标为 0 时先再观察") && cuaSkill.includes("Start New Application"), "CUA skill must keep in-page DOM modals on Ego @ref path and ban zero-rect / value-setter shortcuts.")
+  assert(cuaSkill.includes("网页二级模态框") && cuaSkill.includes("坐标为 0 时先再观察") && cuaSkill.includes("Start New Application") && cuaSkill.includes("先小表后大页") && cuaSkill.includes("NESTED_MODAL_BLOCKER"), "CUA skill must keep nested-modal-first ladder and NESTED_MODAL_BLOCKER handoff.")
   assert(terraPolicy.includes("未走完疑似弹窗流程并达限前禁止 handoff/takeOver") || cuaSkill.includes("未达疑似重试上限前禁止 handoff/takeOver") || cuaSkill.includes("达限后才可交接") || terraPolicy.includes("达重试上限仍未点掉时（且仅此时）才允许 handoff_to_consultant"), "Validation/suspected alerts must forbid early handoff until dismiss limit.")
   assert(cuaSkill.includes("observePageAction") && cuaSkill.includes("先启动动作但不 await"), "CUA skill must observe iframe dialogs while the triggering action is still pending.")
 
@@ -442,6 +443,61 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
     assert(!/sk-[A-Za-z0-9_-]{20,}/.test(body), `Potential API key leaked into workspace text file: ${file}`)
     assert(!hasRawPasswordLine(body), `Potential raw password leaked into workspace text file: ${file}`)
   }
+}
+
+async function verifyClickPageCommitNestedModalGate() {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
+    ...args: string[]
+  ) => (...args: unknown[]) => Promise<unknown>
+
+  const run = async (label: string, successMode: string | undefined, openCount: number) => {
+    let clicked = false
+    const js = async () => ({ openCount, open: openCount > 0 ? [{ controls: 2, crossOrigin: false, offline: false }] : [] })
+    const pageInfo = async () => ({ url: "https://fixture.example/parent" })
+    const observePageAction = async (action: () => Promise<unknown>) => action()
+    const click = async () => {
+      clicked = true
+      return { ok: true }
+    }
+    const wait = async () => {}
+    const clickByCoordinates = async () => {
+      clicked = true
+      return { ok: true }
+    }
+    const fn = new AsyncFunction(
+      "js",
+      "pageInfo",
+      "observePageAction",
+      "click",
+      "wait",
+      "clickByCoordinates",
+      `${EGO_CLICK_PAGE_COMMIT_CONTROL_SOURCE}\nreturn await clickPageCommitControl('@parentSave', { label: ${JSON.stringify(label)}, successMode: ${successMode === undefined ? "undefined" : JSON.stringify(successMode)} })`,
+    )
+    const result = (await fn(js, pageInfo, observePageAction, click, wait, clickByCoordinates)) as {
+      reason?: string
+      ok?: boolean
+    }
+    return { result, clicked }
+  }
+
+  const parentSave = await run("Save", "url", 1)
+  assert(parentSave.result.reason === "nested_modal_open", `Parent Save with open nested modal must return nested_modal_open, got ${JSON.stringify(parentSave.result)}`)
+  assert(!parentSave.clicked, "Parent Save gate must not click while nested modal is open")
+
+  const parentAuto = await run("Save", undefined, 1)
+  assert(parentAuto.result.reason === "nested_modal_open", `Default/auto successMode Save with open nested modal must return nested_modal_open, got ${JSON.stringify(parentAuto.result)}`)
+
+  const nestedClose = await run("Save and return", "modal-closed", 1)
+  assert(nestedClose.result.reason !== "nested_modal_open", `modal-closed commits must not be blocked by nested_modal_open gate, got ${JSON.stringify(nestedClose.result)}`)
+  assert(nestedClose.clicked, "modal-closed path may attempt the nested commit click")
+}
+
+async function verifyStaleTerraPolicyRegen(workspace: string) {
+  writeFileSync(join(workspace, ".opencode/skills/ego-browser/TERRA_POLICY.md"), "# STALE_OLD_POLICY\nno nested modal first\n", "utf8")
+  await writeOpenCodeConfig(workspace)
+  const regeneratedPolicy = readText(join(workspace, ".opencode/skills/ego-browser/TERRA_POLICY.md"))
+  assert(!regeneratedPolicy.includes("STALE_OLD_POLICY"), "writeOpenCodeConfig must overwrite a stale TERRA_POLICY.md on resume/regen.")
+  assert(regeneratedPolicy.includes("nested_modal_open") || regeneratedPolicy.includes("Nested modal first"), "Regenerated TERRA_POLICY must restore nested-modal-first content.")
 }
 
 async function verifyDirectNodeHelperContract(root: string) {
@@ -580,7 +636,8 @@ async function verifyCuaStateTransitions(workspace: string) {
     { input: "el.dispatchEvent(new MouseEvent('click'))\n", marker: "TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED" },
     { input: "await takeOverTaskSpace(101)\n", marker: "TERRA_EGO_UNAUTHORIZED_TAKEOVER" },
     { input: "await fillInput('@prefix', 'Ms.')\n", marker: "TERRA_EGO_SELECT_FILLINPUT_DENIED" },
-    { input: "el.selectedIndex = 2\n", marker: "TERRA_EGO_SELECT_SETTER_DENIED" },
+    { input: "await fillInput('@job', 'Analyst')\nawait click('@x', { label: 'Cancel' })\n", marker: "TERRA_EGO_MODAL_CANCEL_AFTER_FILL_DENIED" },
+    { input: "await fillPortalLookupBySearch({ selector: '@school' }, 'NTU')\nawait click('@c', { label: 'Close' })\n", marker: "TERRA_EGO_MODAL_CANCEL_AFTER_FILL_DENIED" },
   ].forEach(({ input, marker }) => {
     const result = spawnSync(wrapper, ["nodejs"], { cwd: workspace, encoding: "utf8", input })
     assert(result.status === 81 || result.status === 84, `Wrapper must reject unsafe save/dialog/takeover shortcuts before launching Ego: ${input}`)
@@ -639,11 +696,13 @@ async function verifyCuaStateTransitions(workspace: string) {
     "const info = await pageInfo()\nif (info.dialog) return\nawait uploadFile('@resume', '/tmp/resume.pdf')\n",
     // Canonical observer source contains `kind: 'dialog'` but not dialog.message; upload must stay allowed.
     `${EGO_OBSERVE_PAGE_ACTION_SOURCE}\nawait uploadFile('@resume', '/tmp/resume.pdf')\n`,
+    // Canonical nested-modal helpers mention Save and return / offline / modal literals + fillInput must not trip Cancel-after-fill.
+    `${EGO_WAIT_FOR_NESTED_MODAL_FORM_SOURCE}\n${EGO_CLICK_PAGE_COMMIT_CONTROL_SOURCE}\n${EGO_FILL_PORTAL_LOOKUP_BY_SEARCH_SOURCE}\nawait fillInput('@company', 'Intern')\n`,
   ].forEach((input) => {
     const result = spawnSync(wrapper, ["nodejs"], { cwd: workspace, encoding: "utf8", input })
     assert(
-      result.status !== 81 || (!result.stderr.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") && !result.stderr.includes("TERRA_EGO_ALERT_MUST_END_ROUND")),
-      `Wrapper must allow observePageAction+@selector OK clicks, bare info.dialog guards, and canonical observer+uploadFile: ${input.slice(0, 120)}`,
+      result.status !== 81 && result.status !== 84,
+      `Wrapper must allow observePageAction+@selector OK clicks, bare info.dialog guards, canonical observer+uploadFile, and canonical nested-modal helpers+fillInput without any exit 81/84 (status=${result.status}): ${String(result.stderr || "").slice(0, 240)} | input=${input.slice(0, 120)}`,
     )
   })
   ;[
@@ -883,6 +942,120 @@ async function verifyCuaStateTransitions(workspace: string) {
   })
   assert(String(timeoutHandoffWithoutSuspected).includes("SUSPECTED_ALERT_PATH_REQUIRED"), "Timeout evidence without dismiss-limit exit must reject early handoff.")
 
+  // Nested-modal blockers must pass without the suspected-timeout gate (and without timed-out wording).
+  for (const evidence of [
+    "NESTED_MODAL_BLOCKER: wait_exhausted|reason=modal_not_ready",
+    "NESTED_MODAL_BLOCKER: lookup_failed|reason=result_not_found",
+    "NESTED_MODAL_BLOCKER: commit_unresponsive|reason=modal_still_open",
+  ]) {
+    const nestedHandoff = await executeCua({
+      action: "handoff_to_consultant",
+      taskSpaceId: "101",
+      currentUrl: url,
+      pageTitle: title,
+      evidence,
+      handoffType: "browser_takeover",
+      detail: "nested modal exhausted",
+    })
+    assert(String(nestedHandoff).includes("已记录顾问接管"), `NESTED_MODAL_BLOCKER evidence must hand off: ${evidence}`)
+    assert(!String(nestedHandoff).includes("SUSPECTED_ALERT_PATH_REQUIRED"), `NESTED_MODAL_BLOCKER must skip suspected timeout gate: ${evidence}`)
+    const progressAfterNested = readRecord(join(workspace, "03_state/application_progress.json"))
+    if (isRecord(progressAfterNested.egoBrowser)) {
+      progressAfterNested.egoBrowser.handoffPending = false
+      progressAfterNested.egoBrowser.takeoverPending = false
+      delete progressAfterNested.egoBrowser.resumeAuthorizedAt
+    }
+    delete progressAfterNested.pendingSaveAttempt
+    writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressAfterNested, null, 2))
+  }
+
+  // Nested prefix cannot launder CDP/pageInfo timeout wording past the suspected-alert gate.
+  const launderedTimeoutHandoff = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "NESTED_MODAL_BLOCKER: wait_exhausted|pageInfo timed out after 1500ms",
+    handoffType: "browser_takeover",
+    detail: "must not skip suspected path",
+  })
+  assert(String(launderedTimeoutHandoff).includes("SUSPECTED_ALERT_PATH_REQUIRED"), "NESTED_MODAL_BLOCKER evidence that still contains timed-out wording must not skip the suspected-alert gate.")
+
+  const bareTimeoutHandoff = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "NESTED_MODAL_BLOCKER: wait_exhausted|CDP timed out",
+    handoffType: "browser_takeover",
+    detail: "bare CDP timed out must not skip",
+  })
+  assert(String(bareTimeoutHandoff).includes("SUSPECTED_ALERT_PATH_REQUIRED"), "NESTED_MODAL_BLOCKER evidence with bare 'CDP timed out' must not skip the suspected-alert gate.")
+
+  // NESTED_MODAL_BLOCKER does not skip PENDING_ALERT_DISMISS_REQUIRED while pendingJsAlert is open.
+  const progressForNestedAlertGate = readRecord(join(workspace, "03_state/application_progress.json"))
+  delete progressForNestedAlertGate.pendingSaveAttempt
+  progressForNestedAlertGate.egoBrowser = {
+    ...(isRecord(progressForNestedAlertGate.egoBrowser) ? progressForNestedAlertGate.egoBrowser : {}),
+    taskSpaceId: "101",
+    handoffPending: false,
+    takeoverPending: false,
+    pendingJsAlert: {
+      type: "alert",
+      message: "Region is required.",
+      attempts: 1,
+      recordedAt: new Date().toISOString(),
+    },
+  }
+  delete progressForNestedAlertGate.egoBrowser.alertDismissHandoffAllowed
+  delete progressForNestedAlertGate.egoBrowser.resumeAuthorizedAt
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressForNestedAlertGate, null, 2))
+  const nestedWithPendingAlert = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "NESTED_MODAL_BLOCKER: commit_unresponsive|reason=modal_still_open",
+    handoffType: "browser_takeover",
+    detail: "nested handoff while alert still pending",
+  })
+  assert(String(nestedWithPendingAlert).includes("PENDING_ALERT_DISMISS_REQUIRED"), "NESTED_MODAL_BLOCKER must not skip PENDING_ALERT_DISMISS_REQUIRED while pendingJsAlert is open.")
+  if (isRecord(progressForNestedAlertGate.egoBrowser)) {
+    delete progressForNestedAlertGate.egoBrowser.pendingJsAlert
+  }
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressForNestedAlertGate, null, 2))
+
+  // Mis-opened save attempt still blocks nested handoff (NESTED_MODAL_BLOCKER does not skip SAVE_ATTEMPT_OPEN).
+  const progressForNestedSaveGate = readRecord(join(workspace, "03_state/application_progress.json"))
+  progressForNestedSaveGate.pendingSaveAttempt = {
+    id: "save-attempt-open-nested",
+    beganAt: new Date().toISOString(),
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "open save attempt for nested handoff gate",
+  }
+  if (isRecord(progressForNestedSaveGate.egoBrowser)) {
+    progressForNestedSaveGate.egoBrowser.handoffPending = false
+    progressForNestedSaveGate.egoBrowser.takeoverPending = false
+    delete progressForNestedSaveGate.egoBrowser.resumeAuthorizedAt
+    delete progressForNestedSaveGate.egoBrowser.pendingJsAlert
+    delete progressForNestedSaveGate.egoBrowser.alertDismissHandoffAllowed
+  }
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressForNestedSaveGate, null, 2))
+  const openSaveNestedHandoff = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "NESTED_MODAL_BLOCKER: wait_exhausted|reason=modal_not_ready",
+    handoffType: "browser_takeover",
+    detail: "nested handoff while save attempt still open",
+  })
+  assert(String(openSaveNestedHandoff).includes("SAVE_ATTEMPT_OPEN"), "NESTED_MODAL_BLOCKER must not skip SAVE_ATTEMPT_OPEN.")
+  delete progressForNestedSaveGate.pendingSaveAttempt
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressForNestedSaveGate, null, 2))
+
   progressAfterSuspected.pendingSaveAttempt = {
     id: "save-attempt-open-gate",
     beganAt: new Date().toISOString(),
@@ -890,6 +1063,11 @@ async function verifyCuaStateTransitions(workspace: string) {
     currentUrl: url,
     pageTitle: title,
     evidence: "open save attempt for handoff gate",
+  }
+  if (isRecord(progressAfterSuspected.egoBrowser)) {
+    progressAfterSuspected.egoBrowser.handoffPending = false
+    progressAfterSuspected.egoBrowser.takeoverPending = false
+    delete progressAfterSuspected.egoBrowser.resumeAuthorizedAt
   }
   writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressAfterSuspected, null, 2))
   const openSaveHandoff = await executeCua({
@@ -2064,6 +2242,8 @@ try {
   await createFixture(temporaryWorkspace)
   verifyWorkspace(temporaryWorkspace, true)
   await verifyDirectNodeHelperContract(temporaryWorkspace)
+  await verifyClickPageCommitNestedModalGate()
+  await verifyStaleTerraPolicyRegen(temporaryWorkspace)
   await verifyCuaStateTransitions(temporaryWorkspace)
   console.log("Application Agent E2E workspace verification passed.")
   console.log("Workspace: deterministic temporary fixture")
