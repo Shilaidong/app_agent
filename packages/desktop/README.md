@@ -5,7 +5,7 @@
 ## 当前交付形态
 
 - App 名称：Terra-Edu Application Agent
-- 最新版本：`1.1.22`（先行版 preview：读取任务可选模型 / 修复 Go thinking 配置 / Terra Ego 残留自清理；稳定版 `1.1.17` / tag `desktop-v1.1.17-stable`）
+- 最新版本：`1.1.23`（先行版 preview：本页落盘点不动升级坐标真鼠标 / 原生下拉 selectOptionByKeyboard / 超时禁止跳过疑似弹窗；稳定版 `1.1.17` / tag `desktop-v1.1.17-stable`）
 - 发布页：https://github.com/Shilaidong/app_agent/releases
 - 安装包：macOS arm64 DMG / ZIP
 - 签名：ad-hoc signing
@@ -67,8 +67,8 @@ packages/desktop/dist/release-notes/mac-free.md
 先行版 / 稳定版桌面 tag 示例（与历史 `desktop-v*` 命名一致）：
 
 ```bash
-git tag -a desktop-v1.1.22-preview -m "Terra-Edu Application Agent 1.1.22 (preview)"
-git push origin desktop-v1.1.22-preview
+git tag -a desktop-v1.1.23-preview -m "Terra-Edu Application Agent 1.1.23 (preview)"
+git push origin desktop-v1.1.23-preview
 ```
 
 正式 `v*` 发版也可：确认代码已推到 `main` 后推送版本 tag，GitHub Actions 会自动构建 macOS 包并上传到对应 Release。

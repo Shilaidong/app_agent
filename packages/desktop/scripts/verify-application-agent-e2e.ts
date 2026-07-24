@@ -292,7 +292,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_TASKSPACE_CLOSE") && wrapperSource.includes("EGO_NODE_STDIN_COMPACT"), "Workspace wrapper must inspect nodejs stdin before launching Ego.")
   assert(wrapperSource.includes("completeTaskSpace 只能使用可验证的字面量") && wrapperSource.includes("keep[[:space:]]*:[[:space:]]*true"), "Workspace wrapper must allow only a mechanically verified literal keep:true completion call.")
   assert(wrapperSource.includes("TERRA_EGO_UNSAFE_PAGE_RELOAD") && wrapperSource.includes("grep -Eiq 'closeTab'") && wrapperSource.includes("grep -Eiq 'reload'"), "Workspace wrapper must reject automatic reloads and every direct or aliased programmatic tab close before Ego starts.")
-  assert(wrapperSource.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") && wrapperSource.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") && wrapperSource.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") && wrapperSource.includes("TERRA_EGO_ALERT_MUST_END_ROUND") && wrapperSource.includes("TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED") && wrapperSource.includes("TERRA_EGO_UNAUTHORIZED_TAKEOVER"), "Workspace wrapper must reject scripted submit, bare Save/Continue clicks, native-alert OK clicks, same-round fill-after-dialog, synthetic DOM events, and unauthorized takeOver.")
+  assert(wrapperSource.includes("TERRA_EGO_SCRIPTED_SUBMIT_DENIED") && wrapperSource.includes("TERRA_EGO_SAVE_MUST_USE_OBSERVE_PAGE_ACTION") && wrapperSource.includes("TERRA_EGO_NATIVE_ALERT_CLICK_DENIED") && wrapperSource.includes("TERRA_EGO_ALERT_MUST_END_ROUND") && wrapperSource.includes("TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED") && wrapperSource.includes("TERRA_EGO_UNAUTHORIZED_TAKEOVER") && wrapperSource.includes("TERRA_EGO_SELECT_FILLINPUT_DENIED") && wrapperSource.includes("TERRA_EGO_SELECT_SETTER_DENIED"), "Workspace wrapper must reject scripted submit, bare Save/Continue clicks, native-alert OK clicks, same-round fill-after-dialog, synthetic DOM events, unauthorized takeOver, and select fillInput/setters.")
   assert(wrapperSource.includes('"$HELPER" "$@" <"$EGO_NODE_STDIN"'), "Workspace wrapper must forward the model-authored nodejs source directly to the pinned Ego helper.")
   assert(!wrapperSource.includes("/usr/bin/sandbox-exec") && !wrapperSource.includes("TERRA_EGO_NODE_PERMISSION_"), "Workspace wrapper must not add a sandbox or permission broker around Ego's independent browser service.")
 
@@ -348,7 +348,7 @@ function verifyWorkspace(workspace: string, expectPaused: boolean) {
   assert(terraPolicy.includes("结果只是“未决”") && terraPolicy.includes("疑似原生校验弹窗") && terraPolicy.includes("达重试上限仍未点掉时（且仅此时）才允许 handoff_to_consultant") && terraPolicy.includes("未走完疑似弹窗流程前 handoff"), "Terra policy must treat unknown/timeout as pending, require the suspected-alert path, and allow handoff only after that flow hits its limit.")
   assert(terraPolicy.includes("helper 回合退出时自动消掉仍未处理的弹窗") && terraPolicy.includes("只在初次导航期间临时替换无选择分支的 window.alert") && terraPolicy.includes("它绝不替换 confirm、prompt 或 beforeunload") && terraPolicy.includes("Runtime alerts are not auto-cleared by helper exit"), "Terra policy must keep load-time navigateInitialPageCapturingAlerts distinct from runtime alerts that are not auto-cleared.")
   assert(terraPolicy.includes("captureScreenshot('05_screenshots/<unique-name>.png')") && terraPolicy.includes("OpenCode `read` on that exact") && terraPolicy.includes("image/png"), "Terra policy must require explicit workspace screenshots followed by exact OpenCode image reads.")
-  assert(terraPolicy.includes("fillInput+Tab+readback") && terraPolicy.includes("click+snapshot+click-option+reobserve") && terraPolicy.includes("Vue internals"), "Terra policy must require real generic interactions and ban framework-internal writes.")
+  assert(terraPolicy.includes("fillInput+Tab+readback") && terraPolicy.includes("click+snapshot+click-option+reobserve") && terraPolicy.includes("selectOptionByKeyboard") && terraPolicy.includes("Stubborn page-commit ladder") && terraPolicy.includes("Vue internals"), "Terra policy must require real generic interactions, stubborn page-commit ladder, native-select keyboard helper, and ban framework-internal writes.")
   assert(terraPolicy.includes("本页落盘/前进控件") && terraPolicy.includes("不以按钮字面量做硬规则") && terraPolicy.includes("Major is required.") && terraPolicy.includes("dismiss_js_alert") && terraPolicy.includes("先填完再查") && terraPolicy.includes("未填完禁止 Save") && terraPolicy.includes("clickByCoordinates") && terraPolicy.includes("PAGE_LEFT_WITHOUT_SAVE_EVIDENCE"), "Terra policy must require real page-commit clicks by behavior, coordinate CDP fallback, URL leave warning, fill-then-verify, Academic hard-block, and dismiss_js_alert.")
   assert(terraPolicy.includes("In-page DOM modals") && terraPolicy.includes("Start New Application") && terraPolicy.includes("never coordinate-click at 0,0"), "Terra policy must keep in-page DOM modals on Ego @ref path and ban zero-rect coordinate shortcuts.")
   assert(terraPolicy.includes("completeTaskSpace(taskSpaceId, { keep: true })") && terraPolicy.includes("一律不得使用 keep:false"), "Terra policy must preserve completed Ego windows instead of exercising the crashing native close path.")
@@ -579,6 +579,8 @@ async function verifyCuaStateTransitions(workspace: string) {
     { input: "const result = await observePageAction(() => click('@save'))\nif (result.kind === 'dialog') cliLog(result.info.dialog.message)\nawait uploadFile('@resume', '/tmp/resume.pdf')\n", marker: "TERRA_EGO_ALERT_MUST_END_ROUND" },
     { input: "el.dispatchEvent(new MouseEvent('click'))\n", marker: "TERRA_EGO_SYNTHETIC_DOM_EVENT_DENIED" },
     { input: "await takeOverTaskSpace(101)\n", marker: "TERRA_EGO_UNAUTHORIZED_TAKEOVER" },
+    { input: "await fillInput('@prefix', 'Ms.')\n", marker: "TERRA_EGO_SELECT_FILLINPUT_DENIED" },
+    { input: "el.selectedIndex = 2\n", marker: "TERRA_EGO_SELECT_SETTER_DENIED" },
   ].forEach(({ input, marker }) => {
     const result = spawnSync(wrapper, ["nodejs"], { cwd: workspace, encoding: "utf8", input })
     assert(result.status === 81 || result.status === 84, `Wrapper must reject unsafe save/dialog/takeover shortcuts before launching Ego: ${input}`)
@@ -869,6 +871,39 @@ async function verifyCuaStateTransitions(workspace: string) {
     delete progressAfterSuspected.egoBrowser.pendingJsAlert
     delete progressAfterSuspected.egoBrowser.alertDismissHandoffAllowed
   }
+  // Timeout evidence without writing pendingJsAlert must still force the suspected-alert path.
+  const timeoutHandoffWithoutSuspected = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "pageInfo timed out after 1500ms; CDP request timed out after page-commit",
+    handoffType: "browser_takeover",
+    detail: "skipped suspected-alert channel",
+  })
+  assert(String(timeoutHandoffWithoutSuspected).includes("SUSPECTED_ALERT_PATH_REQUIRED"), "Timeout evidence without dismiss-limit exit must reject early handoff.")
+
+  progressAfterSuspected.pendingSaveAttempt = {
+    id: "save-attempt-open-gate",
+    beganAt: new Date().toISOString(),
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "open save attempt for handoff gate",
+  }
+  writeFileSync(join(workspace, "03_state/application_progress.json"), JSON.stringify(progressAfterSuspected, null, 2))
+  const openSaveHandoff = await executeCua({
+    action: "handoff_to_consultant",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    evidence: "deliberate handoff while save attempt still open",
+    handoffType: "browser_takeover",
+    detail: "should finish stubborn page-commit ladder first",
+  })
+  assert(String(openSaveHandoff).includes("SAVE_ATTEMPT_OPEN"), "Deliberate handoff must reject while pendingSaveAttempt is open.")
+  delete progressAfterSuspected.pendingSaveAttempt
+
   progressAfterSuspected.currentUrl = url
   progressAfterSuspected.currentPage = title
   progressAfterSuspected.filledFields = [
@@ -998,6 +1033,39 @@ async function verifyCuaStateTransitions(workspace: string) {
     readbackValue: "Full time",
   })
   assert(String(verifiedSelect).includes("选项已记录"), "A select must verify only after open/snapshot/option-click/reobserve with matching readback.")
+
+  await executeCua({
+    action: "record_observation",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    ...mainFrameContext,
+    evidence: "Fresh reobservation after native OS select keyboard selection.",
+  })
+  const rejectedSelectFillInput = await executeCua({
+    action: "record_select_verified",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    fieldLabel: "Prefix",
+    optionLabel: "Ms.",
+    evidence: "Tried fillInput on a native select.",
+    interactionMethod: "fillInput+Tab+readback",
+    readbackValue: "Ms.",
+  })
+  assert(String(rejectedSelectFillInput).includes("REAL_INTERACTION_REQUIRED") || String(rejectedSelectFillInput).includes("DIRECT_PAGE_WRITE_FORBIDDEN"), "Select verification must reject fillInput interaction methods.")
+  const verifiedKeyboardSelect = await executeCua({
+    action: "record_select_verified",
+    taskSpaceId: "101",
+    currentUrl: url,
+    pageTitle: title,
+    fieldLabel: "Prefix",
+    optionLabel: "Ms.",
+    evidence: "selectOptionByKeyboard observed options and used Arrow/Enter with matching readback.",
+    interactionMethod: "click+keyboard-option+reobserve",
+    readbackValue: "Ms.",
+  })
+  assert(String(verifiedKeyboardSelect).includes("选项已记录"), "A native OS select must verify via click+keyboard-option+reobserve.")
 
   const beginWithoutDynamicCheck = await executeCua({
     action: "begin_save_attempt",
